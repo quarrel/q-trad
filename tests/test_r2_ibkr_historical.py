@@ -16,11 +16,13 @@ from qtrad.application.r2_ibkr_historical import (
 )
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole
 from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.r2_holdout import HoldoutDirection, R2HoldoutQuestion
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_FEATURE_SETS,
     IBKR_HISTORICAL_FEATURE_WINDOWS,
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_HORIZON,
+    IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT,
     IBKR_HISTORICAL_SOURCE,
     IBKR_HISTORICAL_TARGETS,
     IBKRHistoricalAdapterIdentity,
@@ -114,7 +116,7 @@ def _experiment() -> R2ExperimentConfig:
         forecast_bucket_policy="TRAINING_QUANTILES_V1",
         state_bucket_policy="TRAINING_THRESHOLDS_V1",
         model_selection_policy="OOF_PRIMARY_MSE_V1",
-        acceptance_thresholds={"minimum_common_support": 0.0},
+        acceptance_thresholds={"minimum_common_support": IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT},
         holdout_range=HOLDOUT,
         numeric_replay_relative_tolerance=1e-10,
         numeric_replay_absolute_tolerance=1e-12,
@@ -199,6 +201,10 @@ def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
     assert experiment.instrument_roles[CONTEXT_INSTRUMENT] is InstrumentRole.CONTEXT
     assert experiment.target_instruments == ORDERED_TARGETS
     assert experiment.source_adapter_identity == ADAPTER.as_json()
+    assert (
+        experiment.acceptance_thresholds["minimum_common_support"]
+        == IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT
+    )
 
     inputs = build_ibkr_r2_foundation_inputs(
         foundation,
@@ -212,6 +218,41 @@ def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
     assert set(
         cast(dict[str, object], inputs.availability_evidence["source_active_intervals"])
     ) == set(ORDERED_UNIVERSE)
+
+
+def test_ibkr_confirmatory_profile_threshold_builds_holdout_question() -> None:
+    foundation = cast(IBKRFoundationBuild, _foundation())
+    implementation = build_ibkr_historical_experiment(
+        foundation,
+        foundation_bundle_id=FOUNDATION_ID,
+        adapter_identity=ADAPTER,
+    )
+    confirmatory = replace(implementation, evidence_class=EvidenceClass.CONFIRMATORY)
+    validate_ibkr_historical_profile(
+        confirmatory,
+        expected_evidence_class=EvidenceClass.CONFIRMATORY,
+    )
+    changed_policy = replace(
+        confirmatory,
+        acceptance_thresholds={
+            **confirmatory.acceptance_thresholds,
+            "minimum_common_support": 0.8,
+        },
+    )
+    assert changed_policy.configuration_id != confirmatory.configuration_id
+    question = R2HoldoutQuestion.create(
+        question="Does the selected IBKR candidate improve the zero control?",
+        candidate_configuration_id="a" * 64,
+        comparator_configuration_id="b" * 64,
+        metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
+        support_policy="COMMON_ELIGIBLE",
+        direction=HoldoutDirection.LOWER_IS_BETTER,
+        threshold=0.0,
+        minimum_support=1,
+        minimum_coverage=confirmatory.acceptance_thresholds["minimum_common_support"],
+        conclusion_policy="THRESHOLD_OR_INCONCLUSIVE",
+    )
+    assert question.minimum_coverage == IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT
 
 
 def test_ibkr_builder_rejects_non_fixed_foundation_targets() -> None:
@@ -241,4 +282,14 @@ def test_ibkr_profile_is_strictly_source_and_policy_bound() -> None:
     with pytest.raises(ValueError, match="group assignments"):
         validate_ibkr_historical_profile(
             replace(experiment, market_groups={**IBKR_HISTORICAL_GROUPS, "fx:aud-usd": "INDEX"})
+        )
+    with pytest.raises(ValueError, match="common-support threshold"):
+        validate_ibkr_historical_profile(
+            replace(
+                experiment,
+                acceptance_thresholds={
+                    **experiment.acceptance_thresholds,
+                    "minimum_common_support": 0.8,
+                },
+            )
         )

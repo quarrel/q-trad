@@ -76,8 +76,16 @@ _CHILD_DIRECTORY_SUFFIX = ".children"
 _FOUNDATION_V3_CONTRACT = "qtrad-ibkr-historical-foundation-v2"
 _FOUNDATION_V3_SCHEMA_VERSION = 2
 _FOUNDATION_V3_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v2"
-_FOUNDATION_V3_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v2"
-_FOUNDATION_V3_VERIFIER_VERSION = 1
+_FOUNDATION_V3_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v3"
+_FOUNDATION_V3_VERIFIER_VERSION = 2
+_TARGET_OPPORTUNITY_POLICY = {
+    "contract": "qtrad-stage8-target-opportunity-policy-v1",
+    "version": 1,
+    "rule": (
+        "decision time is in the half-open source-active interval; "
+        "target endpoints may cross its close"
+    ),
+}
 _FOUNDATION_V3_CHECKS = (
     "stage7-receipt-authentication",
     "stage8-independent-derivation",
@@ -85,6 +93,7 @@ _FOUNDATION_V3_CHECKS = (
     "child-byte-closure",
     "child-semantic-equivalence",
     "readiness-equivalence",
+    "target-opportunity-policy-authentication",
 )
 _VERIFICATION_RECEIPT_FIELDS = {
     "contract",
@@ -97,6 +106,7 @@ _VERIFICATION_RECEIPT_FIELDS = {
     "provider_history_dataset_sha256",
     "child_references_sha256",
     "configuration_id",
+    "target_opportunity_policy_id",
     "verifier_contract",
     "verifier_version",
     "verifier_identity",
@@ -157,6 +167,7 @@ _V3_PAYLOAD_FIELDS = frozenset(
         "provider_gaps",
         "readiness",
         "readiness_semantics",
+        "target_opportunity_policy_id",
     }
 )
 _V3_PROVIDER_HISTORY_FIELDS = frozenset({"dataset", "stage7"})
@@ -333,6 +344,7 @@ _V3_LINEAGE_FIELDS = frozenset(
         "stage7_verification_id",
         "stage7_selected_input_sha256",
         "stage7_selected_input_semantic_id",
+        "target_opportunity_policy_id",
     }
 )
 
@@ -436,6 +448,16 @@ def _json_bytes(value: object) -> bytes:
 
 def _sha(value: object) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
+
+
+def _target_opportunity_policy_id() -> str:
+    return _sha(_TARGET_OPPORTUNITY_POLICY)
+
+
+def ibkr_foundation_target_opportunity_policy_id() -> str:
+    """Return the claim-scoped Stage 8 target-opportunity policy identity."""
+
+    return _target_opportunity_policy_id()
 
 
 def preflight_ibkr_foundation(
@@ -567,7 +589,7 @@ def _load_authenticated_ibkr_foundation_v3(
     )
     configuration = authenticated.configuration
     provider_dataset = authenticated.provider_dataset
-    observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
+    observation_rows = tuple(_observation_from_row(row) for row in decoded.pop("observations"))
     source_start = (
         min(row.interval_start for row in observation_rows)
         if observation_rows
@@ -603,13 +625,13 @@ def _load_authenticated_ibkr_foundation_v3(
         dataset_id=child_ids["observations"],
     )
     panel = PanelDataset(
-        rows=tuple(_panel_row(row) for row in decoded["panel"]),
+        rows=tuple(_panel_row(row) for row in decoded.pop("panel")),
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
         dataset_id=child_ids["panel"],
     )
     targets = TargetDataset(
-        rows=tuple(_target(row) for row in decoded["targets"]),
+        rows=tuple(_target(row) for row in decoded.pop("targets")),
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
         dataset_id=child_ids["targets"],
@@ -618,11 +640,11 @@ def _load_authenticated_ibkr_foundation_v3(
         source_target_dataset_id=targets.dataset_id,
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
-        rows=decoded["target-index"],
+        rows=decoded.pop("target-index"),
     )
     causal_metadata = R2HoldoutCausalMetadata.from_rows(
         source_panel_dataset_id=panel.dataset_id,
-        rows=decoded["causal-metadata"],
+        rows=decoded.pop("causal-metadata"),
     )
     build = IBKRFoundationBuild(
         configuration=configuration,
@@ -630,7 +652,7 @@ def _load_authenticated_ibkr_foundation_v3(
         panel=panel,
         targets=targets,
         folds=FoldDataset(
-            folds=tuple(_fold(row) for row in decoded["folds"]),
+            folds=tuple(_fold(row) for row in decoded.pop("folds")),
             target_dataset_id=targets.dataset_id,
             foundation_configuration_id=configuration.configuration_id,
             dataset_id=child_ids["folds"],
@@ -852,13 +874,16 @@ def _load_ibkr_foundation_outcome_blind(
         *(_G2_EXTENSION_CHILD_KINDS if decode_g2 else ()),
         *(("targets",) if decode_target else ()),
     )
+    decoded_child_kinds = tuple(
+        kind for kind in consumed_child_kinds if kind != "pre-holdout-target"
+    )
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
         expected_lineage,
         decode_rows=False,
-        decode_kinds=consumed_child_kinds,
+        decode_kinds=decoded_child_kinds,
         byte_kinds=consumed_child_kinds,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
@@ -890,30 +915,24 @@ def _load_ibkr_foundation_outcome_blind(
     )
     if causal_metadata.dataset_id != child_ids["causal-metadata"]:
         raise ValueError("IBKR holdout causal metadata identity is invalid")
-    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(decoded["pre-holdout-target"][0])
     projection_mismatches = []
-    if pre_holdout_target.source_target_dataset_id != child_ids["targets"]:
-        projection_mismatches.append("source target")
-    if pre_holdout_target.observation_dataset_id != child_ids["observations"]:
+    source_projection = holdout_target_source.pre_holdout_target_dataset
+    if source_projection.observation_dataset_id != child_ids["observations"]:
         projection_mismatches.append("observation")
-    if pre_holdout_target.foundation_configuration_id != configuration.configuration_id:
+    if source_projection.foundation_configuration_id != configuration.configuration_id:
         projection_mismatches.append("configuration")
-    if pre_holdout_target.holdout_start != configuration.holdout_range[0]:
-        projection_mismatches.append("holdout start")
-    if pre_holdout_target.primary_horizon_seconds != int(
-        configuration.primary_vertical_horizon.total_seconds()
-    ):
-        projection_mismatches.append("horizon")
-    if pre_holdout_target.target_instruments != tuple(
-        sorted(holdout_target_source.target_instruments)
-    ):
-        projection_mismatches.append("instruments")
-    if (
-        pre_holdout_target.projected_target_dataset
-        != holdout_target_source.pre_holdout_target_dataset
-    ):
-        projection_mismatches.append("projected rows")
-    if pre_holdout_target.projection_id != child_ids["pre-holdout-target"]:
+    expected_projection_id = R2PreHoldoutTargetProjection.compute_projection_id(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        holdout_start=configuration.holdout_range[0],
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(sorted(holdout_target_source.target_instruments)),
+        projection_policy=R2PreHoldoutTargetProjection.POLICY,
+        projected_target_dataset=source_projection,
+        projected_target_dataset_id=source_projection.dataset_id,
+    )
+    if expected_projection_id != child_ids["pre-holdout-target"]:
         projection_mismatches.append("projection ID")
     if projection_mismatches:
         raise ValueError(
@@ -2209,6 +2228,7 @@ def _v3_lineage(
         "stage7_verification_id": cast(str, metadata["stage7_verification_id"]),
         "stage7_selected_input_sha256": cast(str, metadata["selected_input_sha256"]),
         "stage7_selected_input_semantic_id": cast(str, metadata["selected_input_semantic_id"]),
+        "target_opportunity_policy_id": _target_opportunity_policy_id(),
     }
 
 
@@ -2244,6 +2264,7 @@ def _v3_payload(
         "provider_gaps": [dict(gap) for gap in build.provider_gaps],
         "readiness": readiness,
         "readiness_semantics": _v3_readiness_projection(readiness),
+        "target_opportunity_policy_id": _target_opportunity_policy_id(),
     }
 
 
@@ -2350,7 +2371,12 @@ def _validate_v3_payload_schema(payload: Mapping[str, object]) -> None:
             raise ValueError(f"Stage 8 v3 children.{kind} must be a list")
         for part in parts:
             _child_reference(part, kind)
-    _require_v3_fields(root["child_lineage"], _V3_LINEAGE_FIELDS, "Stage 8 v3 child lineage")
+    lineage = _require_v3_fields(root["child_lineage"], _V3_LINEAGE_FIELDS, "Stage 8 child lineage")
+    policy_id = _text(root["target_opportunity_policy_id"], "Stage 8 target-opportunity policy")
+    if policy_id != _target_opportunity_policy_id():
+        raise ValueError("Stage 8 target-opportunity policy is unsupported")
+    if lineage["target_opportunity_policy_id"] != policy_id:
+        raise ValueError("Stage 8 child lineage target-opportunity policy differs")
     semantic_children = _mapping(root["semantic_children"], "Stage 8 v3 semantic children")
     if set(semantic_children) != set(_CHILD_KINDS):
         raise ValueError("Stage 8 v3 semantic children fields are not exact")
@@ -2391,6 +2417,7 @@ def _v3_foundation_id(payload: Mapping[str, object]) -> str:
             "configuration_id": config["configuration_id"],
             "children": payload["semantic_children"],
             "readiness_semantics": payload["readiness_semantics"],
+            "target_opportunity_policy_id": payload["target_opportunity_policy_id"],
         }
     )
 
@@ -2458,11 +2485,15 @@ def _v3_receipt(authenticated: _AuthenticatedFoundationV3) -> dict[str, JsonValu
             authenticated.stage7["selected_input_semantic_id"], "Stage 7 semantic selection"
         ),
         "configuration_id": authenticated.configuration.configuration_id,
+        "target_opportunity_policy_id": _text(
+            authenticated.payload["target_opportunity_policy_id"],
+            "Stage 8 target-opportunity policy",
+        ),
         "readiness_sha256": _sha(authenticated.payload["readiness"]),
         "evidence_class": EvidenceClass.IMPLEMENTATION.value,
         "verifier_contract": _FOUNDATION_V3_VERIFIER_CONTRACT,
         "verifier_version": _FOUNDATION_V3_VERIFIER_VERSION,
-        "verifier_identity": _sha({"contract": _FOUNDATION_V3_VERIFIER_CONTRACT, "version": 1}),
+        "verifier_identity": ibkr_foundation_verifier_identity(),
         "completed_checks": list(_FOUNDATION_V3_CHECKS),
     }
     return {**identity, "verification_id": _sha(identity)}
@@ -2731,6 +2762,7 @@ def _preflight_ibkr_foundation_v3(
 __all__ = [
     "authenticate_ibkr_foundation",
     "foundation_config_payload",
+    "ibkr_foundation_target_opportunity_policy_id",
     "ibkr_foundation_verifier_identity",
     "load_ibkr_foundation",
     "preflight_ibkr_foundation",

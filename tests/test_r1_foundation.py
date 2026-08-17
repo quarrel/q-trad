@@ -191,16 +191,12 @@ def test_source_activity_and_required_observation_bounds_fail_closed() -> None:
     start = datetime(2026, 7, 1, 12, 3, tzinfo=UTC)
     empty = _dataset(())
     config = _config(empty, start=start, end=start + timedelta(minutes=1))
-    inactive = next(
-        row
-        for row in build_asof_panel(
-            empty,
-            config,
-            source_active_intervals={"fx:aud-usd": ()},
-        ).rows
-        if row.instrument_id == "fx:aud-usd"
+    inactive_panel = build_asof_panel(
+        empty,
+        config,
+        source_active_intervals={"fx:aud-usd": ()},
     )
-    assert inactive.audit_disposition is PanelAuditDisposition.SOURCE_NOT_ACTIVE
+    assert inactive_panel.rows == ()
 
     insufficient = ObservationDataset.create(
         (),
@@ -327,3 +323,184 @@ def test_ambiguous_target_source_fails_closed_without_selecting_a_price() -> Non
     ).rows[0]
     assert target.return_disposition is ReturnDisposition.AMBIGUOUS_SOURCE
     assert target.label_end_close is None
+
+
+def test_targets_skip_inactive_times_but_keep_active_missing_rows() -> None:
+    start = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    rows = tuple(
+        _row(
+            start + timedelta(minutes=index),
+            close=str(100 + index),
+            global_position=index + 1,
+        )
+        for index in range(16)
+    )
+    dataset = _dataset(rows)
+    config = _config(dataset, start=start, end=start + timedelta(minutes=31))
+    targets = build_frozen_targets(
+        dataset,
+        config,
+        source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=16)),)},
+    )
+    assert tuple(row.decision_time for row in targets.rows) == tuple(
+        start + timedelta(minutes=index) for index in range(16)
+    )
+    assert targets.rows[0].return_disposition is ReturnDisposition.VALID
+    assert all(row.return_disposition is ReturnDisposition.MISSING_END for row in targets.rows[1:])
+
+
+def test_targets_exclude_inactive_weekend_window() -> None:
+    start = datetime(2026, 7, 3, 23, 50, tzinfo=UTC)
+    monday = datetime(2026, 7, 6, 0, 0, tzinfo=UTC)
+    rows = tuple(
+        _row(
+            interval_end,
+            global_position=index + 1,
+        )
+        for index, interval_end in enumerate(
+            tuple(start + timedelta(minutes=index) for index in range(16))
+            + tuple(monday + timedelta(minutes=index) for index in range(16))
+        )
+    )
+    dataset = ObservationDataset.create(
+        rows,
+        configuration={
+            "fixture": "r1-weekend-window",
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
+            "interval_start": (start - timedelta(hours=1)).isoformat(),
+            "interval_end": (monday + timedelta(hours=1)).isoformat(),
+        },
+    )
+    config = _config(dataset, start=start, end=monday + timedelta(minutes=16))
+    targets = build_frozen_targets(
+        dataset,
+        config,
+        source_active_intervals={
+            "fx:aud-usd": (
+                (start, start + timedelta(minutes=16)),
+                (monday, monday + timedelta(minutes=16)),
+            )
+        },
+    )
+    decisions = tuple(row.decision_time for row in targets.rows)
+    assert decisions == tuple(
+        tuple(start + timedelta(minutes=index) for index in range(16))
+        + tuple(monday + timedelta(minutes=index) for index in range(16))
+    )
+    assert all(
+        start <= decision < start + timedelta(minutes=16) or decision >= monday
+        for decision in decisions
+    )
+
+
+def test_target_builder_active_intervals_bound_work_to_active_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from qtrad.application import foundation as foundation_application
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(weeks=20)
+    intervals = tuple(
+        (
+            start + timedelta(weeks=week),
+            start + timedelta(weeks=week, minutes=75),
+        )
+        for week in range(20)
+    )
+    rows = tuple(
+        _row(
+            start + timedelta(weeks=week, minutes=minute),
+            global_position=week * 76 + minute + 1,
+        )
+        for week in range(20)
+        for minute in range(76)
+    )
+    dataset = ObservationDataset.create(
+        rows,
+        configuration={
+            "fixture": "r1-active-work-bound",
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
+            "interval_start": (start - timedelta(hours=1)).isoformat(),
+            "interval_end": (end + timedelta(hours=1)).isoformat(),
+        },
+    )
+    config = _config(dataset, start=start, end=end)
+
+    def unexpected_dense_grid(*_args: object, **_kwargs: object) -> tuple[datetime, ...]:
+        raise AssertionError("active target construction used the dense wall-clock grid")
+
+    monkeypatch.setattr(foundation_application, "_grid_times", unexpected_dense_grid)
+    targets = build_frozen_targets(
+        dataset,
+        config,
+        source_active_intervals={"fx:aud-usd": intervals},
+    )
+
+    assert len(intervals) * 75 == 1_500
+    assert len(targets.rows) == 20 * 75
+    assert len(targets.rows) < int((end - start).total_seconds() // 60)
+    assert targets.rows[0].return_disposition is ReturnDisposition.VALID
+    assert targets.rows[-1].return_disposition is ReturnDisposition.MISSING_END
+
+
+def test_heterogeneous_active_intervals_bound_panel_and_target_opportunities() -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = start + timedelta(minutes=10)
+    first_rows = tuple(
+        _row(
+            start + timedelta(minutes=index),
+            close=str(100 + index),
+            global_position=index + 1,
+        )
+        for index in range(8)
+    )
+    second_rows = tuple(
+        replace(
+            row,
+            instrument_id="fx:eur-usd",
+            stream_id="market-bar:fx:eur-usd:MID",
+            source_external_id="EURUSD",
+            global_position=row.global_position + 100,
+            stream_version=row.stream_version + 100,
+        )
+        for row in first_rows
+    )
+    dataset = ObservationDataset.create(
+        (*first_rows, *second_rows),
+        configuration={
+            "fixture": "r1-heterogeneous-active-intervals",
+            "ordered_instruments": ["fx:aud-usd", "fx:eur-usd"],
+            "interval_start": (start - timedelta(hours=1)).isoformat(),
+            "interval_end": (end + timedelta(hours=1)).isoformat(),
+        },
+    )
+    config = replace(
+        _config(dataset, start=start, end=end),
+        ordered_instruments=("fx:aud-usd", "fx:eur-usd"),
+        instrument_roles={
+            "fx:aud-usd": InstrumentRole.TARGET,
+            "fx:eur-usd": InstrumentRole.TARGET,
+        },
+    )
+    active_intervals = {
+        "fx:aud-usd": ((start, start + timedelta(minutes=3)),),
+        "fx:eur-usd": ((start + timedelta(minutes=5), start + timedelta(minutes=8)),),
+    }
+    panel = build_asof_panel(dataset, config, source_active_intervals=active_intervals)
+    targets = build_frozen_targets(
+        dataset,
+        config,
+        source_active_intervals=active_intervals,
+    )
+
+    expected_first = tuple(start + timedelta(minutes=index) for index in range(3))
+    expected_second = tuple(start + timedelta(minutes=index) for index in range(5, 8))
+    assert tuple(
+        row.decision_time for row in targets.rows if row.instrument_id == "fx:aud-usd"
+    ) == (expected_first)
+    assert tuple(
+        row.decision_time for row in targets.rows if row.instrument_id == "fx:eur-usd"
+    ) == (expected_second)
+    assert len(targets.rows) == 6
+    assert set(row.decision_time for row in panel.rows) == {*expected_first, *expected_second}
+    assert len(panel.rows) == 12

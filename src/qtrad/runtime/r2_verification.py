@@ -10,7 +10,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,8 +30,10 @@ from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.application.r2_baselines import build_local_ridge_oof
 from qtrad.application.r2_evaluation import (
     EvaluationModel,
+    bind_verified_evaluation_model,
     build_r2_evaluation,
     build_selection_manifest,
+    verify_local_ridge_ladder,
 )
 from qtrad.application.r2_features import (
     R2FoundationInputs,
@@ -56,7 +58,7 @@ from qtrad.application.r2_holdout import (
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_r2_foundation_inputs,
 )
-from qtrad.application.r2_pooled import build_pooled_ridge_oof
+from qtrad.application.r2_pooled import build_pooled_ridge_oof, build_pooled_ridge_oof_sequential
 from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
     build_r2_preprocessing_selection,
@@ -82,6 +84,7 @@ from qtrad.domain.foundation import (
 )
 from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
+from qtrad.domain.r2_baselines import ForecastCoverageDataset
 from qtrad.domain.r2_bundles import (
     R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
     ArtifactReference,
@@ -99,10 +102,14 @@ from qtrad.domain.r2_evaluation import (
     SelectionDecision,
     SelectionGateOutcome,
     SelectionManifest,
+    semantic_id,
 )
 from qtrad.domain.r2_features import (
+    _VERIFIED_FEATURE_DATASET_TOKEN,
+    R2_FEATURE_DATASET_CONTRACT,
     FeatureDefinition,
     R2FeatureDataset,
+    R2FeatureVerificationReceipt,
     RawFeatureRow,
     RawFeatureValue,
     feature_set_id,
@@ -120,11 +127,10 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutForecastDataset,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
-    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
-    R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
@@ -175,7 +181,9 @@ from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     _canonical_payload_identity,
+    _identity_field_for_contract,
     _reject_orphan_files,
+    _verify_feature_manifest_binding,
     _verify_r2_oof_bundle_with_source,
     atomic_create,
     canonical_bytes,
@@ -195,11 +203,13 @@ from qtrad.runtime.r2_holdout_source import (
     R2HoldoutTargetSourceAuthority,
     load_r2_holdout_target_source_authority,
 )
+from qtrad.runtime.r2_partitioned_rows import write_partitioned_rows
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
 CONFIRMATORY_RUN_KIND = "CONFIRMATORY"
+R2_POOLED_ABLATION_CONTRACT = "qtrad-r2-pooled-ablation-v2"
 R2_OOF_VERIFIER_CONTRACT = "qtrad-r2-oof-semantic-verifier-v1"
 R2_OOF_VERIFIER_VERSION = "1"
 R2_OOF_COMPLETED_CHECKS = (
@@ -407,6 +417,7 @@ class AuthenticatedR2Foundation:
         self,
         *,
         feature_manifest_paths: Mapping[str, Path],
+        feature_receipt_paths: Mapping[str, Path],
         experiment_path: Path,
         research_root: Path,
     ) -> dict[str, JsonValue]:
@@ -440,6 +451,10 @@ class AuthenticatedR2Foundation:
             "feature_manifests": {
                 name: absolute_locator(path, relative_root=absolute_research_root)
                 for name, path in sorted(feature_manifest_paths.items())
+            },
+            "feature_receipts": {
+                name: absolute_locator(path, relative_root=absolute_research_root)
+                for name, path in sorted(feature_receipt_paths.items())
             },
         }
 
@@ -791,11 +806,18 @@ class VerifiedConfirmatoryG1:
 class VerifiedConfirmatoryG2Preparation:
     """Runtime-only authority proving a sealed, unopened confirmatory preparation."""
 
-    __slots__ = ("_path", "_seal", "_verified_g1", "_verifier_provenance")
+    __slots__ = (
+        "_path",
+        "_seal",
+        "_training_features",
+        "_verified_g1",
+        "_verifier_provenance",
+    )
 
     _path: Path
     _seal: R2HoldoutForecastSeal
     _verified_g1: VerifiedConfirmatoryG1
+    _training_features: Mapping[str, R2FeatureDataset]
     _verifier_provenance: object
 
     def __init__(self) -> None:
@@ -812,6 +834,7 @@ class VerifiedConfirmatoryG2Preparation:
         verified_g1: VerifiedConfirmatoryG1,
         seal: R2HoldoutForecastSeal,
         path: Path,
+        training_features: Mapping[str, R2FeatureDataset],
     ) -> VerifiedConfirmatoryG2Preparation:
         if token is not _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN:
             raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
@@ -819,6 +842,11 @@ class VerifiedConfirmatoryG2Preparation:
         object.__setattr__(instance, "_verified_g1", verified_g1)
         object.__setattr__(instance, "_seal", seal)
         object.__setattr__(instance, "_path", path.resolve(strict=True))
+        object.__setattr__(
+            instance,
+            "_training_features",
+            MappingProxyType(dict(training_features)),
+        )
         object.__setattr__(
             instance,
             "_verifier_provenance",
@@ -833,6 +861,10 @@ class VerifiedConfirmatoryG2Preparation:
     @property
     def verified_g1(self) -> VerifiedConfirmatoryG1:
         return self._verified_g1
+
+    @property
+    def training_feature_datasets(self) -> Mapping[str, R2FeatureDataset]:
+        return self._training_features
 
     @property
     def seal(self) -> R2HoldoutForecastSeal:
@@ -1017,6 +1049,30 @@ def parse_feature_manifest_arguments(arguments: list[str]) -> dict[str, Path]:
             detail.append("undeclared " + ", ".join(extra))
         raise ValueError(
             "feature manifests must cover exactly L0/L1/P0/P1 (" + "; ".join(detail) + ")"
+        )
+    return parsed
+
+
+def parse_feature_receipt_arguments(arguments: list[str]) -> dict[str, Path]:
+    """Parse the four required stage-specific feature verification receipt paths."""
+    parsed: dict[str, Path] = {}
+    for argument in arguments:
+        name, separator, raw_path = argument.partition("=")
+        if not separator or not name or not raw_path:
+            raise ValueError("feature receipt must use NAME=PATH")
+        if name in parsed:
+            raise ValueError(f"duplicate feature receipt: {name}")
+        parsed[name] = Path(raw_path)
+    if set(parsed) != _REQUIRED_FEATURE_SETS:
+        missing = sorted(_REQUIRED_FEATURE_SETS - set(parsed))
+        extra = sorted(set(parsed) - _REQUIRED_FEATURE_SETS)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("undeclared " + ", ".join(extra))
+        raise ValueError(
+            "feature receipts must cover exactly L0/L1/P0/P1 (" + "; ".join(detail) + ")"
         )
     return parsed
 
@@ -1209,6 +1265,7 @@ def _descriptor_payload(
     identities: dict[str, str],
     representative_profile: str | None = None,
     foundation_authority: AuthenticatedR2Foundation | None = None,
+    feature_receipts: Mapping[str, R2FeatureVerificationReceipt] | None = None,
 ) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": OOF_DESCRIPTOR_CONTRACT,
@@ -1253,6 +1310,19 @@ def _descriptor_payload(
         "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
     }
+    if feature_receipts is not None:
+        semantic["feature_verification_receipts"] = {
+            name: {
+                "contract": receipt.CONTRACT,
+                "verification_id": receipt.verification_id,
+                "manifest_id": receipt.manifest_id,
+                "manifest_sha256": receipt.manifest_sha256,
+                "semantic_dataset_id": receipt.semantic_dataset_id,
+                "foundation_verification_id": receipt.foundation_verification_id,
+                "completed_checks": list(receipt.completed_checks),
+            }
+            for name, receipt in sorted(feature_receipts.items())
+        }
     if foundation_authority is not None:
         semantic["foundation_authority"] = foundation_authority.identity_json()
     if representative_profile is not None:
@@ -1481,56 +1551,276 @@ def _descriptor_reference(
     )
 
 
+R2_FEATURE_VERIFIER_CONTRACT = "qtrad-r2-feature-verifier-v1"
+R2_FEATURE_VERIFIER_VERSION = "1"
+R2_FEATURE_VERIFICATION_CHECKS = (
+    "foundation-authority",
+    "manifest-bindings",
+    "manifest-tree",
+    "feature-row-hashes",
+    "feature-semantic-dataset",
+    "causal-feature-replay",
+    "holdout-exclusion",
+)
+
+
+def build_r2_feature_verification_receipt(
+    manifest: R2FeatureManifest,
+    foundation: AuthenticatedR2Foundation,
+    experiment: R2ExperimentConfig,
+) -> R2FeatureVerificationReceipt:
+    """Create the stage-specific receipt after the complete feature verifier succeeds."""
+    if manifest.experiment_configuration_id != experiment.configuration_id:
+        raise ValueError("feature manifest experiment differs from the receipt experiment")
+    return R2FeatureVerificationReceipt.create(
+        manifest_contract=manifest.CONTRACT,
+        manifest_schema_version=manifest.SCHEMA_VERSION,
+        manifest_id=manifest.manifest_id,
+        manifest_sha256=manifest.manifest_sha256,
+        semantic_dataset_id=manifest.semantic_dataset_id,
+        feature_set_name=manifest.feature_set_name,
+        feature_set_id=manifest.feature_set_id,
+        raw_feature_schema_id=manifest.raw_feature_schema_id,
+        feature_schema=manifest.feature_schema,
+        observation_dataset_id=manifest.observation_dataset_id,
+        panel_dataset_id=manifest.panel_dataset_id,
+        target_dataset_id=manifest.target_dataset_id,
+        fold_dataset_id=manifest.fold_dataset_id,
+        experiment_configuration_id=manifest.experiment_configuration_id,
+        source_class=manifest.market_data_source_class,
+        evidence_class=manifest.evidence_class,
+        holdout_excluded=manifest.holdout_excluded,
+        foundation_semantic_id=foundation.foundation_id,
+        foundation_closure_id=foundation.closure_id,
+        foundation_verification_id=foundation.verification_id,
+        foundation_promotion_id=foundation.promotion_id,
+        verifier_contract=R2_FEATURE_VERIFIER_CONTRACT,
+        verifier_version=R2_FEATURE_VERIFIER_VERSION,
+        completed_checks=R2_FEATURE_VERIFICATION_CHECKS,
+    )
+
+
+def authenticate_r2_feature_verification_receipt(
+    path: Path,
+    manifest: R2FeatureManifest,
+    foundation: AuthenticatedR2Foundation,
+    experiment: R2ExperimentConfig,
+) -> R2FeatureVerificationReceipt:
+    """Authenticate one feature receipt and its immediate parent without replaying features."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("feature verification receipt must be a regular non-symlink file")
+    receipt = R2FeatureVerificationReceipt.from_json(json.loads(path.read_text(encoding="utf-8")))
+    expected = {
+        "manifest_contract": manifest.CONTRACT,
+        "manifest_schema_version": manifest.SCHEMA_VERSION,
+        "manifest_id": manifest.manifest_id,
+        "manifest_sha256": manifest.manifest_sha256,
+        "semantic_dataset_id": manifest.semantic_dataset_id,
+        "feature_set_name": manifest.feature_set_name,
+        "feature_set_id": manifest.feature_set_id,
+        "raw_feature_schema_id": manifest.raw_feature_schema_id,
+        "feature_schema": manifest.feature_schema,
+        "observation_dataset_id": manifest.observation_dataset_id,
+        "panel_dataset_id": manifest.panel_dataset_id,
+        "target_dataset_id": manifest.target_dataset_id,
+        "fold_dataset_id": manifest.fold_dataset_id,
+        "experiment_configuration_id": manifest.experiment_configuration_id,
+        "source_class": manifest.market_data_source_class,
+        "evidence_class": manifest.evidence_class,
+        "holdout_excluded": manifest.holdout_excluded,
+        "foundation_semantic_id": foundation.foundation_id,
+        "foundation_closure_id": foundation.closure_id,
+        "foundation_verification_id": foundation.verification_id,
+        "foundation_promotion_id": foundation.promotion_id,
+        "verifier_contract": R2_FEATURE_VERIFIER_CONTRACT,
+        "verifier_version": R2_FEATURE_VERIFIER_VERSION,
+        "completed_checks": R2_FEATURE_VERIFICATION_CHECKS,
+    }
+    for field, expected_value in expected.items():
+        if getattr(receipt, field) != expected_value:
+            raise ValueError(
+                f"feature verification receipt {field} differs from its manifest authority"
+            )
+    if receipt.source_class is not experiment.market_data_source_class:
+        raise ValueError("feature verification receipt source differs from the experiment")
+    if receipt.evidence_class is not experiment.evidence_class:
+        raise ValueError("feature verification receipt evidence differs from the experiment")
+    if receipt.experiment_configuration_id != experiment.configuration_id:
+        raise ValueError("feature verification receipt experiment differs from the run")
+    return receipt
+
+
+def write_r2_feature_verification_receipt(
+    path: Path,
+    receipt: R2FeatureVerificationReceipt,
+) -> None:
+    """Publish a feature receipt create-only, without replacing retained evidence."""
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"feature verification receipt already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(receipt.as_json(), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with path.open("xb") as output:
+        output.write(encoded)
+
+
+def _load_feature_manifest_and_receipt(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    name: str,
+    manifest_path: Path,
+    receipt_path: Path,
+    root: Path,
+    clock: Clock,
+    foundation_authority: AuthenticatedR2Foundation,
+) -> tuple[R2FeatureManifest, R2FeatureVerificationReceipt]:
+    foundation = _foundation_inputs(verified)
+    manifest = ParquetR2FeatureStore(root, clock).read_manifest(manifest_path)
+    verify_raw_feature_manifest_bindings(manifest, foundation, experiment, feature_set_name=name)
+    receipt = authenticate_r2_feature_verification_receipt(
+        receipt_path, manifest, foundation_authority, experiment
+    )
+    return manifest, receipt
+
+
+def _load_feature_dataset(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    name: str,
+    manifest_path: Path,
+    manifest: R2FeatureManifest,
+    receipt: R2FeatureVerificationReceipt,
+    root: Path,
+    clock: Clock,
+) -> R2FeatureDataset:
+    del verified, experiment, name, receipt
+    rows = tuple(ParquetR2FeatureStore(root, clock).iter_rows(manifest_path))
+    dataset = R2FeatureDataset._from_verified_rows(
+        rows,
+        feature_schema=manifest.feature_schema,
+        feature_set_name=manifest.feature_set_name,
+        feature_set_id=manifest.feature_set_id,
+        observation_dataset_id=manifest.observation_dataset_id,
+        panel_dataset_id=manifest.panel_dataset_id,
+        target_dataset_id=manifest.target_dataset_id,
+        fold_dataset_id=manifest.fold_dataset_id,
+        experiment_configuration_id=manifest.experiment_configuration_id,
+        evidence_class=manifest.evidence_class,
+        market_data_source_class=manifest.market_data_source_class,
+        dataset_id=manifest.semantic_dataset_id,
+        _capability=_VERIFIED_FEATURE_DATASET_TOKEN,
+    )
+    if dataset.dataset_id != manifest.semantic_dataset_id:
+        raise ValueError(
+            "feature manifest semantic dataset identity differs from its verified rows"
+        )
+    return dataset
+
+
 def _load_feature_datasets(
     *,
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     feature_manifest_paths: dict[str, Path],
+    feature_receipt_paths: dict[str, Path] | None,
     root: Path,
     clock: Clock,
+    foundation_authority: AuthenticatedR2Foundation | None,
     recompute_rows: bool = True,
-) -> tuple[dict[str, R2FeatureDataset], dict[str, R2FeatureManifest]]:
+) -> tuple[
+    dict[str, R2FeatureDataset],
+    dict[str, R2FeatureManifest],
+    dict[str, R2FeatureVerificationReceipt],
+]:
     foundation = _foundation_inputs(verified)
     store = ParquetR2FeatureStore(root, clock)
     datasets: dict[str, R2FeatureDataset] = {}
     manifests: dict[str, R2FeatureManifest] = {}
+    receipts: dict[str, R2FeatureVerificationReceipt] = {}
+    if feature_receipt_paths is not None:
+        if foundation_authority is None:
+            raise ValueError("feature verification receipts require immediate foundation authority")
+        if set(feature_receipt_paths) != set(feature_manifest_paths):
+            raise ValueError("feature receipts must cover exactly the declared feature manifests")
     for name in sorted(feature_manifest_paths):
-        manifest = store.read_manifest(feature_manifest_paths[name])
+        manifest_path = feature_manifest_paths[name]
+        manifest = store.read_manifest(manifest_path)
         verify_raw_feature_manifest_bindings(
             manifest, foundation, experiment, feature_set_name=name
         )
-        rows = tuple(store.iter_rows(feature_manifest_paths[name]))
-        if recompute_rows:
+        if feature_receipt_paths is not None:
+            assert foundation_authority is not None
+            receipt = authenticate_r2_feature_verification_receipt(
+                feature_receipt_paths[name], manifest, foundation_authority, experiment
+            )
+            receipts[name] = receipt
+        rows = tuple(store.iter_rows(manifest_path))
+        if feature_receipt_paths is None and recompute_rows:
             verify_raw_feature_rows(iter(rows), foundation, experiment, feature_set_name=name)
-        dataset = R2FeatureDataset.create(
-            rows,
-            feature_schema=manifest.feature_schema,
-            feature_set_name=name,
-            feature_set_id=manifest.feature_set_id,
-            observation_dataset_id=manifest.observation_dataset_id,
-            panel_dataset_id=manifest.panel_dataset_id,
-            target_dataset_id=manifest.target_dataset_id,
-            fold_dataset_id=manifest.fold_dataset_id,
-            experiment_configuration_id=manifest.experiment_configuration_id,
-            evidence_class=manifest.evidence_class,
-            market_data_source_class=experiment.market_data_source_class,
-        )
+        if feature_receipt_paths is None:
+            dataset = R2FeatureDataset.create(
+                rows,
+                feature_schema=manifest.feature_schema,
+                feature_set_name=name,
+                feature_set_id=manifest.feature_set_id,
+                observation_dataset_id=manifest.observation_dataset_id,
+                panel_dataset_id=manifest.panel_dataset_id,
+                target_dataset_id=manifest.target_dataset_id,
+                fold_dataset_id=manifest.fold_dataset_id,
+                experiment_configuration_id=manifest.experiment_configuration_id,
+                evidence_class=manifest.evidence_class,
+                market_data_source_class=experiment.market_data_source_class,
+            )
+        else:
+            dataset = R2FeatureDataset._from_verified_rows(
+                rows,
+                feature_schema=manifest.feature_schema,
+                feature_set_name=name,
+                feature_set_id=manifest.feature_set_id,
+                observation_dataset_id=manifest.observation_dataset_id,
+                panel_dataset_id=manifest.panel_dataset_id,
+                target_dataset_id=manifest.target_dataset_id,
+                fold_dataset_id=manifest.fold_dataset_id,
+                experiment_configuration_id=manifest.experiment_configuration_id,
+                evidence_class=manifest.evidence_class,
+                market_data_source_class=experiment.market_data_source_class,
+                dataset_id=manifest.semantic_dataset_id,
+                _capability=_VERIFIED_FEATURE_DATASET_TOKEN,
+            )
         if dataset.dataset_id != manifest.semantic_dataset_id:
             raise ValueError(
-                "feature manifest semantic dataset identity differs from replayed rows"
+                "feature manifest semantic dataset identity differs from its verified rows"
             )
         datasets[name] = dataset
         manifests[name] = manifest
-    return datasets, manifests
+    return datasets, manifests, receipts
 
 
 def _dataset_payload(
-    dataset: R2FeatureDataset, manifest: R2FeatureManifest | Mapping[str, object]
+    dataset: R2FeatureDataset,
+    manifest: R2FeatureManifest | Mapping[str, object],
+    *,
+    receipt: R2FeatureVerificationReceipt | None = None,
+    compact: bool = False,
 ) -> dict[str, object]:
     manifest_payload = (
         manifest.as_json() if isinstance(manifest, R2FeatureManifest) else dict(manifest)
     )
-    return {
+    if compact:
+        manifest_payload = {
+            key: manifest_payload[key]
+            for key in (
+                "contract",
+                "schema_version",
+                "manifest_id",
+                "manifest_sha256",
+                "semantic_dataset_id",
+                "feature_set_name",
+                "feature_set_id",
+            )
+        }
+    payload: dict[str, object] = {
         "contract": dataset.CONTRACT,
         "schema_version": dataset.SCHEMA_VERSION,
         "dataset_id": dataset.dataset_id,
@@ -1540,8 +1830,21 @@ def _dataset_payload(
             for key, value in dataset.manifest_json().items()
             if key not in {"contract", "schema_version", "dataset_id"}
         },
-        "rows": [row.as_json() for row in dataset.rows],
     }
+    if receipt is not None:
+        payload["verification"] = {
+            "contract": receipt.CONTRACT,
+            "verification_id": receipt.verification_id,
+            "manifest_sha256": receipt.manifest_sha256,
+            "semantic_dataset_id": receipt.semantic_dataset_id,
+            "foundation_verification_id": receipt.foundation_verification_id,
+            "completed_checks": list(receipt.completed_checks),
+        }
+    if compact:
+        payload["storage"] = "qtrad-r2-feature-manifest-binding-v1"
+    else:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
 
 
 def _forecast_payload(
@@ -1549,8 +1852,9 @@ def _forecast_payload(
     *,
     source_class: MarketDataSourceClass,
     evidence_class: EvidenceClass,
+    include_rows: bool = True,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "contract": dataset.CONTRACT,
         "schema_version": 1,
         "dataset_id": dataset.dataset_id,
@@ -1560,7 +1864,41 @@ def _forecast_payload(
         "fold_dataset_id": dataset.fold_dataset_id,
         "source_class": source_class.value,
         "evidence_class": evidence_class.value,
-        "rows": [row.as_json() for row in dataset.rows],
+    }
+    if include_rows:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
+
+
+def _coverage_payload(
+    dataset: ForecastCoverageDataset,
+    *,
+    source_class: MarketDataSourceClass,
+    evidence_class: EvidenceClass,
+    include_rows: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "contract": dataset.CONTRACT,
+        "schema_version": 1,
+        "experiment_configuration_id": dataset.experiment_configuration_id,
+        "target_dataset_id": dataset.target_dataset_id,
+        "fold_dataset_id": dataset.fold_dataset_id,
+        "r2_feature_dataset_id": dataset.r2_feature_dataset_id,
+        "dataset_id": dataset.dataset_id,
+        "market_data_source_class": source_class.value,
+        "source_class": source_class.value,
+        "evidence_class": evidence_class.value,
+    }
+    if include_rows:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
+
+
+def _ordered_id_summary(values: Sequence[str]) -> dict[str, object]:
+    ordered = tuple(values)
+    return {
+        "count": len(ordered),
+        "sha256": sha256(canonical_bytes({"ids": list(ordered)})).hexdigest(),
     }
 
 
@@ -1580,6 +1918,33 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
         contract=contract,
         semantic_id=_payload_identity(payload),
         content=payload,
+    )
+
+
+_EVALUATION_PART_FIELDS = ("metric_slices", "bucket_definitions")
+
+
+def _partition_evaluation_payload(
+    output: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Persist large report arrays as bounded parts while retaining one report identity."""
+    header = dict(payload)
+    rows: list[dict[str, object]] = []
+    for field in _EVALUATION_PART_FIELDS:
+        raw = header.pop(field, None)
+        if not isinstance(raw, list):
+            raise ValueError(f"evaluation report field is not a list: {field}")
+        for index, value in enumerate(raw):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"evaluation report field contains a non-object row: {field}")
+            rows.append({"field": field, "index": index, "value": dict(value)})
+    return write_partitioned_rows(
+        output,
+        relative_path,
+        header=header,
+        identity_field="report_id",
+        rows=rows,
+        expected_row_count=len(rows),
     )
 
 
@@ -2103,11 +2468,12 @@ def _build_synthetic_oof(
         )
 
 
-def build_oof_bundle(
+def _build_oof_bundle(
     *,
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     feature_manifest_paths: dict[str, Path],
+    feature_receipt_paths: dict[str, Path] | None,
     research_root: Path,
     clock: Clock,
     output: Path,
@@ -2167,14 +2533,68 @@ def build_oof_bundle(
     foundation_source = getattr(verified.bundle, "market_data_source_class", None)
     if foundation_source is not experiment.market_data_source_class:
         raise ValueError("R2 experiment source class differs from the R1 foundation")
-    datasets, manifests = _load_feature_datasets(
-        verified=verified,
-        experiment=experiment,
-        feature_manifest_paths=feature_manifest_paths,
-        root=research_root,
-        clock=clock,
-        recompute_rows=run_kind != "SYNTHETIC",
+    if run_kind != "SYNTHETIC" and feature_receipt_paths is None:
+        raise ValueError("canonical OOF build requires four feature verification receipts")
+    if feature_receipt_paths is not None and set(feature_receipt_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF feature verification receipts must cover exactly L0/L1/P0/P1")
+    datasets: dict[str, R2FeatureDataset]
+    manifests: dict[str, R2FeatureManifest]
+    feature_receipts: dict[str, R2FeatureVerificationReceipt]
+    load_canonical_dataset: Callable[[str], R2FeatureDataset] = cast(
+        Callable[[str], R2FeatureDataset], None
     )
+    feature_payloads: dict[str, dict[str, object]] = {}
+    if run_kind == "SYNTHETIC":
+        datasets, manifests, feature_receipts = _load_feature_datasets(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
+            root=research_root,
+            clock=clock,
+            foundation_authority=foundation_authority,
+            recompute_rows=False,
+        )
+    else:
+        assert foundation_authority is not None
+        assert feature_receipt_paths is not None
+        if set(feature_manifest_paths) != _REQUIRED_FEATURE_SETS:
+            raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
+        manifests = {}
+        feature_receipts = {}
+        for name in sorted(feature_manifest_paths):
+            manifest, receipt = _load_feature_manifest_and_receipt(
+                verified=verified,
+                experiment=experiment,
+                name=name,
+                manifest_path=feature_manifest_paths[name],
+                receipt_path=feature_receipt_paths[name],
+                root=research_root,
+                clock=clock,
+                foundation_authority=foundation_authority,
+            )
+            manifests[name] = manifest
+            feature_receipts[name] = receipt
+        datasets = {}
+
+        def canonical_loader(name: str) -> R2FeatureDataset:
+            dataset = _load_feature_dataset(
+                verified=verified,
+                experiment=experiment,
+                name=name,
+                manifest_path=feature_manifest_paths[name],
+                manifest=manifests[name],
+                receipt=feature_receipts[name],
+                root=research_root,
+                clock=clock,
+            )
+            feature_payloads[name] = _dataset_payload(
+                dataset, manifests[name], receipt=feature_receipts[name], compact=True
+            )
+            return dataset
+
+        load_canonical_dataset = canonical_loader
+
     if holdout_target_source is not None:
         if verified.targets.dataset_id != holdout_target_source.source_target_dataset_id:
             raise ValueError("OOF target view differs from the authenticated holdout source")
@@ -2182,8 +2602,6 @@ def build_oof_bundle(
             raise ValueError(
                 "OOF target rows are not the authenticated pre-holdout target projection"
             )
-    if set(datasets) != _REQUIRED_FEATURE_SETS:
-        raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     if runtime_provenance is not None and (
         set(runtime_provenance) != _OOF_DESCRIPTOR_PROVENANCE_FIELDS
         or any(not value for value in runtime_provenance.values())
@@ -2192,86 +2610,238 @@ def build_oof_bundle(
     identities = (
         dict(runtime_provenance) if runtime_provenance is not None else runtime_identities()
     )
-    local_datasets = tuple(datasets[name] for name in ("L0", "L1"))
-    pooled_datasets = (datasets["P0"], datasets["P1"])
-    selections_local = tuple(
-        build_r2_preprocessing_selection(
+
+    if run_kind == "SYNTHETIC":
+        local_datasets = tuple(datasets[name] for name in ("L0", "L1"))
+        pooled_datasets = (datasets["P0"], datasets["P1"])
+        evaluation_local_datasets = local_datasets
+        local_feature_descriptors = tuple(
+            (dataset.feature_set_id, dataset.feature_set_name) for dataset in local_datasets
+        )
+        selections_local = tuple(
+            build_r2_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=ModelFamily.LOCAL_RIDGE,
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=(instrument,),
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("L0", "L1")
+            for instrument in experiment.target_instruments
+            for fold in verified.folds.folds
+        )
+        selections_pooled = tuple(
+            build_pooled_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=(
+                    ModelFamily.POOLED_LOCAL_RIDGE
+                    if name == "P0"
+                    else ModelFamily.POOLED_CROSS_ASSET_RIDGE
+                ),
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=experiment.target_instruments,
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("P0", "P1")
+            for fold in verified.folds.folds
+        )
+        local_result = build_local_ridge_oof(
             verified,
-            datasets[name],
+            local_datasets,
             experiment,
-            model_family=ModelFamily.LOCAL_RIDGE,
-            horizon=experiment.primary_horizon,
-            outer_fold_id=fold.fold_id,
-            target_instruments=(instrument,),
+            selections_local,
             application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
             sklearn_library_identity=identities["sklearn_identity"],
         )
-        for name in ("L0", "L1")
-        for instrument in experiment.target_instruments
-        for fold in verified.folds.folds
-    )
-    selections_pooled = tuple(
-        build_pooled_preprocessing_selection(
+        pooled_result = build_pooled_ridge_oof(
             verified,
-            datasets[name],
+            pooled_datasets,
             experiment,
-            model_family=(
+            selections_pooled,
+            local_result,
+            datasets["L1"],
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
+        )
+        models: list[EvaluationModel] = []
+        training_predictions_by_model = None
+        local_ladder_verified = False
+    else:
+        assert callable(load_canonical_dataset)
+        datasets["L0"] = load_canonical_dataset("L0")
+        datasets["L1"] = load_canonical_dataset("L1")
+        local_datasets = (datasets["L0"], datasets["L1"])
+        evaluation_local_datasets = (datasets["L1"],)
+        local_feature_descriptors = tuple(
+            (dataset.feature_set_id, dataset.feature_set_name)
+            for dataset in evaluation_local_datasets
+        )
+        selections_local = tuple(
+            build_r2_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=ModelFamily.LOCAL_RIDGE,
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=(instrument,),
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("L0", "L1")
+            for instrument in experiment.target_instruments
+            for fold in verified.folds.folds
+        )
+        local_result = build_local_ridge_oof(
+            verified,
+            local_datasets,
+            experiment,
+            selections_local,
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
+        )
+        verify_local_ridge_ladder(verified, experiment, local_result, local_datasets)
+        training_predictions_by_model = {}
+        local_model = EvaluationModel(
+            ModelFamily.LOCAL_RIDGE,
+            datasets["L1"].feature_set_id,
+            datasets["L1"],
+            _model_forecasts(
+                tuple(
+                    result
+                    for result in local_result.fold_results
+                    if result.fit.feature_set_id == datasets["L1"].feature_set_id
+                ),
+                observation_dataset_id=verified.observations.dataset_id,
+                panel_dataset_id=verified.panel.dataset_id,
+                target_dataset_id=verified.targets.dataset_id,
+                fold_dataset_id=verified.folds.dataset_id,
+            ),
+            tuple(
+                result
+                for result in local_result.fold_results
+                if result.fit.feature_set_id == datasets["L1"].feature_set_id
+            ),
+        )
+        _, local_training = bind_verified_evaluation_model(
+            verified,
+            experiment,
+            local_model,
+            feature_verification_id=feature_receipts["L1"].verification_id,
+        )
+        training_predictions_by_model[(ModelFamily.LOCAL_RIDGE, datasets["L1"].feature_set_id)] = (
+            local_training
+        )
+        del local_datasets
+        del datasets["L0"]
+        models = []
+        pooled_selections: list[R2PreprocessingSelection] = []
+
+        def selection_loader(
+            name: str, dataset: R2FeatureDataset
+        ) -> Sequence[R2PreprocessingSelection]:
+            selections = tuple(
+                build_pooled_preprocessing_selection(
+                    verified,
+                    dataset,
+                    experiment,
+                    model_family=(
+                        ModelFamily.POOLED_LOCAL_RIDGE
+                        if name == "P0"
+                        else ModelFamily.POOLED_CROSS_ASSET_RIDGE
+                    ),
+                    horizon=experiment.primary_horizon,
+                    outer_fold_id=fold.fold_id,
+                    target_instruments=experiment.target_instruments,
+                    application_image_identity=identities["application_identity"],
+                    sklearn_library_identity=identities["sklearn_identity"],
+                )
+                for fold in verified.folds.folds
+            )
+            pooled_selections.extend(selections)
+            return selections
+
+        def on_dataset_complete(
+            name: str, dataset: R2FeatureDataset, fold_results: Sequence[Any]
+        ) -> None:
+            family = (
                 ModelFamily.POOLED_LOCAL_RIDGE
                 if name == "P0"
                 else ModelFamily.POOLED_CROSS_ASSET_RIDGE
-            ),
-            horizon=experiment.primary_horizon,
-            outer_fold_id=fold.fold_id,
-            target_instruments=experiment.target_instruments,
-            application_image_identity=identities["application_identity"],
-            sklearn_library_identity=identities["sklearn_identity"],
-        )
-        for name in ("P0", "P1")
-        for fold in verified.folds.folds
-    )
-    local_result = build_local_ridge_oof(
-        verified,
-        local_datasets,
-        experiment,
-        selections_local,
-        application_image_identity=identities["application_identity"],
-        numpy_library_identity=identities["numpy_identity"],
-        sklearn_library_identity=identities["sklearn_identity"],
-    )
-    pooled_result = build_pooled_ridge_oof(
-        verified,
-        pooled_datasets,
-        experiment,
-        selections_pooled,
-        local_result,
-        datasets["L1"],
-        application_image_identity=identities["application_identity"],
-        numpy_library_identity=identities["numpy_identity"],
-        sklearn_library_identity=identities["sklearn_identity"],
-    )
-    models: list[EvaluationModel] = []
-    for family, name in (
-        (ModelFamily.POOLED_LOCAL_RIDGE, "P0"),
-        (ModelFamily.POOLED_CROSS_ASSET_RIDGE, "P1"),
-    ):
-        fold_results = tuple(
-            result for result in pooled_result.fold_results if result.fit.model_family is family
-        )
-        models.append(
-            EvaluationModel(
+            )
+            fold_results_for_model = tuple(fold_results)
+            model = EvaluationModel(
                 family,
-                datasets[name].feature_set_id,
-                datasets[name],
+                dataset.feature_set_id,
+                dataset,
                 _model_forecasts(
-                    fold_results,
+                    fold_results_for_model,
                     observation_dataset_id=verified.observations.dataset_id,
                     panel_dataset_id=verified.panel.dataset_id,
                     target_dataset_id=verified.targets.dataset_id,
                     fold_dataset_id=verified.folds.dataset_id,
                 ),
-                fold_results,
+                fold_results_for_model,
             )
+            compact_model, training = bind_verified_evaluation_model(
+                verified,
+                experiment,
+                model,
+                feature_verification_id=feature_receipts[name].verification_id,
+            )
+            models.append(compact_model)
+            training_predictions_by_model[(family, dataset.feature_set_id)] = training
+
+        pooled_result = build_pooled_ridge_oof_sequential(
+            verified,
+            experiment,
+            None,
+            local_result,
+            datasets["L1"],
+            feature_dataset_loader=load_canonical_dataset,
+            selection_loader=selection_loader,
+            on_dataset_complete=on_dataset_complete,
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
         )
+        selections_pooled = tuple(pooled_selections)
+        local_ladder_verified = True
+    if run_kind == "SYNTHETIC":
+        models = []
+        for family, name in (
+            (ModelFamily.POOLED_LOCAL_RIDGE, "P0"),
+            (ModelFamily.POOLED_CROSS_ASSET_RIDGE, "P1"),
+        ):
+            fold_results = tuple(
+                result for result in pooled_result.fold_results if result.fit.model_family is family
+            )
+            models.append(
+                EvaluationModel(
+                    family,
+                    datasets[name].feature_set_id,
+                    datasets[name],
+                    _model_forecasts(
+                        fold_results,
+                        observation_dataset_id=verified.observations.dataset_id,
+                        panel_dataset_id=verified.panel.dataset_id,
+                        target_dataset_id=verified.targets.dataset_id,
+                        fold_dataset_id=verified.folds.dataset_id,
+                    ),
+                    fold_results,
+                )
+            )
     configurations = (
         _configuration_record(
             family=ModelFamily.ZERO_RETURN,
@@ -2283,22 +2853,22 @@ def build_oof_bundle(
         *(
             _configuration_record(
                 family=ModelFamily.LOCAL_RIDGE,
-                feature_set_id=dataset.feature_set_id,
+                feature_set_id=feature_id,
                 forecast_dataset_id=_model_forecasts(
                     tuple(
                         result
                         for result in local_result.fold_results
-                        if result.fit.feature_set_id == dataset.feature_set_id
+                        if result.fit.feature_set_id == feature_id
                     ),
                     observation_dataset_id=verified.observations.dataset_id,
                     panel_dataset_id=verified.panel.dataset_id,
                     target_dataset_id=verified.targets.dataset_id,
                     fold_dataset_id=verified.folds.dataset_id,
                 ).dataset_id,
-                reason=f"local {dataset.feature_set_name} Ridge",
+                reason=f"local {feature_name} Ridge",
                 market_data_source_class=experiment.market_data_source_class,
             )
-            for dataset in local_datasets
+            for feature_id, feature_name in local_feature_descriptors
         ),
         *(
             _configuration_record(
@@ -2318,7 +2888,9 @@ def build_oof_bundle(
         models,
         configurations,
         local_feature_set_id=datasets["L1"].feature_set_id,
-        local_feature_datasets=local_datasets,
+        local_feature_datasets=evaluation_local_datasets,
+        training_predictions_by_model=training_predictions_by_model,
+        local_ladder_verified=local_ladder_verified,
     )
     selection_preview = build_selection_manifest(
         evaluation,
@@ -2334,8 +2906,17 @@ def build_oof_bundle(
 
     children: dict[str, dict[str, object]] = {}
     feature_refs: list[ArtifactReference] = []
-    for name in sorted(datasets):
-        payload = _dataset_payload(datasets[name], manifests[name])
+    compact_external_features = foundation_authority is not None
+    for name in sorted(feature_manifest_paths):
+        if name in feature_payloads:
+            payload = feature_payloads[name]
+        else:
+            payload = _dataset_payload(
+                datasets[name],
+                manifests[name],
+                receipt=feature_receipts.get(name),
+                compact=compact_external_features,
+            )
         path = f"features/{name}.json"
         children[path] = payload
         feature_refs.append(_child_reference(path, payload))
@@ -2360,30 +2941,49 @@ def build_oof_bundle(
         fit_path = f"fits/{index:04d}.json"
         children[fit_path] = fit_payload
         fit_refs.append(_child_reference(fit_path, fit_payload))
-        coverage_payload = cast(
-            dict[str, object],
-            {
-                **result.coverage.as_json(),
-                "source_class": experiment.market_data_source_class.value,
-                "evidence_class": experiment.evidence_class.value,
-            },
+        coverage_payload = _coverage_payload(
+            result.coverage,
+            source_class=experiment.market_data_source_class,
+            evidence_class=experiment.evidence_class,
+            include_rows=not compact_external_features,
         )
         coverage_path = f"coverage/{index:04d}.json"
+        if compact_external_features:
+            coverage_header = coverage_payload
+            coverage_payload = write_partitioned_rows(
+                output,
+                coverage_path,
+                header=coverage_header,
+                identity_field="dataset_id",
+                rows=(row.as_json() for row in result.coverage.rows),
+                expected_row_count=len(result.coverage.rows),
+            )
         children[coverage_path] = coverage_payload
         coverage_refs.append(_child_reference(coverage_path, coverage_payload))
-        forecast_payload = _forecast_payload(
+        forecast_header = _forecast_payload(
             result.forecasts,
             source_class=experiment.market_data_source_class,
             evidence_class=experiment.evidence_class,
+            include_rows=not compact_external_features,
         )
-        forecast_child_path = f"forecasts/{index:04d}.data.json"
-        forecast_child_ref = _child_reference(forecast_child_path, forecast_payload)
         forecast_identity = (
-            forecast_child_ref.contract,
-            forecast_child_ref.semantic_id,
+            str(forecast_header["contract"]),
+            str(forecast_header["dataset_id"]),
         )
         existing_forecast_ref = forecast_child_by_identity.get(forecast_identity)
         if existing_forecast_ref is None:
+            forecast_child_path = f"forecasts/{index:04d}.data.json"
+            forecast_payload = forecast_header
+            if compact_external_features:
+                forecast_payload = write_partitioned_rows(
+                    output,
+                    forecast_child_path,
+                    header=forecast_header,
+                    identity_field="dataset_id",
+                    rows=(row.as_json() for row in result.forecasts.rows),
+                    expected_row_count=len(result.forecasts.rows),
+                )
+            forecast_child_ref = _child_reference(forecast_child_path, forecast_payload)
             children[forecast_child_path] = forecast_payload
             forecast_child_refs.append(forecast_child_ref)
             forecast_child_by_identity[forecast_identity] = forecast_child_ref
@@ -2460,23 +3060,24 @@ def build_oof_bundle(
         "evidence_class": experiment.evidence_class.value,
     }
     evaluation_path = "evaluation/report.json"
+    evaluation_payload = _partition_evaluation_payload(output, evaluation_path, evaluation_payload)
     children[evaluation_path] = evaluation_payload
     evaluation_ref = _child_reference(evaluation_path, evaluation_payload)
     evaluation_refs.append(evaluation_ref)
 
     ablation = pooled_result.ablation
     ablation_payload: dict[str, object] = {
-        "contract": "qtrad-r2-pooled-ablation-v1",
-        "schema_version": 1,
+        "contract": R2_POOLED_ABLATION_CONTRACT,
+        "schema_version": 2,
         "source_class": experiment.market_data_source_class.value,
         "evidence_class": experiment.evidence_class.value,
         "local_fold_fit_ids": list(ablation.local_fold_fit_ids),
         "pooled_local_fold_fit_ids": list(ablation.pooled_local_fold_fit_ids),
         "pooled_context_fold_fit_ids": list(ablation.pooled_context_fold_fit_ids),
-        "local_target_ids": list(ablation.local_target_ids),
-        "pooled_local_target_ids": list(ablation.pooled_local_target_ids),
-        "pooled_context_target_ids": list(ablation.pooled_context_target_ids),
-        "common_target_ids": list(ablation.common_target_ids),
+        "local_target_ids": _ordered_id_summary(ablation.local_target_ids),
+        "pooled_local_target_ids": _ordered_id_summary(ablation.pooled_local_target_ids),
+        "pooled_context_target_ids": _ordered_id_summary(ablation.pooled_context_target_ids),
+        "common_target_ids": _ordered_id_summary(ablation.common_target_ids),
         "holdout_excluded": True,
     }
     ablation_payload["ablation_id"] = sha256(
@@ -2525,11 +3126,12 @@ def build_oof_bundle(
     descriptor = _descriptor_payload(
         foundation_bundle_id=verified.bundle.foundation_id,
         experiment=experiment,
-        feature_names=tuple(sorted(datasets)),
+        feature_names=tuple(sorted(feature_manifest_paths)),
         run_kind=run_kind,
         identities=identities,
         representative_profile=representative_profile,
         foundation_authority=foundation_authority,
+        feature_receipts=feature_receipts or None,
     )
     descriptor.update(
         {
@@ -2543,8 +3145,11 @@ def build_oof_bundle(
     if foundation_authority is not None:
         if experiment_path is None:
             raise ValueError("canonical OOF build requires an experiment runtime locator")
+        if feature_receipt_paths is None:
+            raise ValueError("canonical OOF build requires four feature verification receipts")
         runtime_inputs = foundation_authority.runtime_json(
             feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
             experiment_path=experiment_path,
             research_root=research_root,
         )
@@ -2597,6 +3202,65 @@ def build_oof_bundle(
     return write_r2_oof_bundle(output, bundle, children)
 
 
+def _reject_oof_output_symlink_ancestors(path: Path) -> None:
+    current = path.parent
+    while True:
+        if current.is_symlink():
+            raise ValueError(f"OOF output traverses a symlink: {current}")
+        if current == current.parent:
+            return
+        current = current.parent
+
+
+def build_oof_bundle(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    feature_manifest_paths: dict[str, Path],
+    research_root: Path,
+    clock: Clock,
+    output: Path,
+    feature_receipt_paths: dict[str, Path] | None = None,
+    run_kind: str = "REPRESENTATIVE",
+    foundation_authority: AuthenticatedR2Foundation | None = None,
+    representative_profile: str | None = None,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
+    holdout_target_source_authority: R2HoldoutTargetSourceAuthority | None = None,
+    holdout_target_source_path: Path | None = None,
+    experiment_path: Path | None = None,
+    runtime_provenance: Mapping[str, str] | None = None,
+) -> Path:
+    """Build an OOF bundle in a private staging tree before final publication."""
+    output = output.absolute()
+    _reject_oof_output_symlink_ancestors(output)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(
+        prefix=f".{output.name or 'oof'}.staging-", dir=output.parent
+    ) as staging:
+        staged_output = Path(staging)
+        _build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
+            research_root=research_root,
+            clock=clock,
+            output=staged_output,
+            run_kind=run_kind,
+            foundation_authority=foundation_authority,
+            representative_profile=representative_profile,
+            holdout_target_source=holdout_target_source,
+            holdout_target_source_authority=holdout_target_source_authority,
+            holdout_target_source_path=holdout_target_source_path,
+            experiment_path=experiment_path,
+            runtime_provenance=runtime_provenance,
+        )
+        staged_output.rename(output)
+    return output / "manifest.json"
+
+
 def _load_selection(path: Path) -> dict[str, object]:
     if path.is_symlink() or not path.is_file():
         raise ValueError("selection manifest must be a regular non-symlink file")
@@ -2606,7 +3270,54 @@ def _load_selection(path: Path) -> dict[str, object]:
     return value
 
 
-def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) -> dict[str, object]:
+def _expand_evaluation_payload(
+    root: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Reconstruct the logical report once for a consumer that needs its large arrays."""
+    if payload.get("storage") != "qtrad-r2-partitioned-json-rows-v1":
+        return dict(payload)
+    from qtrad.runtime.r2_partitioned_rows import load_partitioned_rows
+
+    rows = load_partitioned_rows(root, relative_path, payload, identity_field="report_id")
+    grouped: dict[str, list[dict[str, object]]] = {field: [] for field in _EVALUATION_PART_FIELDS}
+    for row in rows:
+        if set(row) != {"field", "index", "value"}:
+            raise ValueError("evaluation report part row has unknown or missing fields")
+        field = row["field"]
+        index = row["index"]
+        value = row["value"]
+        if (
+            not isinstance(field, str)
+            or field not in grouped
+            or type(index) is not int
+            or not isinstance(value, Mapping)
+            or index != len(grouped[field])
+        ):
+            raise ValueError("evaluation report part row ordering or shape is invalid")
+        grouped[field].append(dict(cast(Mapping[str, object], value)))
+    expanded = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    }
+    for field in _EVALUATION_PART_FIELDS:
+        expanded[field] = grouped[field]
+    report_id = expanded.get("report_id")
+    logical_payload = {
+        key: value for key, value in expanded.items() if key not in {"report_id", "source_class"}
+    }
+    if not isinstance(report_id, str) or semantic_id(logical_payload) != report_id:
+        raise ValueError("evaluation report parts do not authenticate the report identity")
+    return expanded
+
+
+def _oof_child_payload(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    contract: str,
+    *,
+    expand_evaluation_parts: bool = False,
+) -> dict[str, object]:
     matches: list[dict[str, object]] = []
     references = [*bundle.evaluation_children, *bundle.forecast_manifests]
     if bundle.holdout_target_source is not None:
@@ -2630,6 +3341,8 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
             raise ValueError(
                 "OOF child bytes or semantic identity differ from its bundle reference"
             )
+        if expand_evaluation_parts and contract == R2_EVALUATION_CONTRACT:
+            payload = _expand_evaluation_payload(bundle_path.parent, reference.path, payload)
         matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
@@ -3381,6 +4094,7 @@ def _promotion_parent_boundaries(descriptor: Mapping[str, object]) -> tuple[Path
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if "holdout_target_source" in runtime:
         expected_keys.add("holdout_target_source")
@@ -3511,6 +4225,7 @@ async def _authenticate_confirmatory_parent(
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if "holdout_target_source" in runtime:
         expected_keys.add("holdout_target_source")
@@ -3977,10 +4692,12 @@ def _build_confirmatory_selection(
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
     source = verified_f2.holdout_target_source
-    projection = R2HoldoutTargetProjection.create_from_source(source)
-    projection.verify_source(source)
-    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(source)
-    opportunity_registry.verify_source(source)
+    (
+        pre_holdout_projection_id,
+        opportunity_registry_id,
+        opportunity_count,
+        opportunity_digest,
+    ) = holdout_selection_compact_bindings(source)
     experiment = verified_f2.experiment
     holdout_range = source.holdout_range
     selected = verified_f2.selected_configuration_ids
@@ -4095,13 +4812,11 @@ def _build_confirmatory_selection(
             "target_dataset_id": source.source_target_dataset_id,
             "target_instruments": list(source.target_instruments),
             "holdout_target_source_id": source.source_id,
-            "holdout_target_source_artifact": source.as_json(),
             "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
-            "pre_holdout_target_dataset": source.pre_holdout_target_dataset.as_json(),
-            "pre_holdout_projection_id": projection.projection_id,
-            "pre_holdout_projection": projection.as_json(),
-            "holdout_opportunity_registry_id": opportunity_registry.registry_id,
-            "holdout_opportunity_registry_artifact": opportunity_registry.as_json(),
+            "pre_holdout_projection_id": pre_holdout_projection_id,
+            "holdout_opportunity_registry_id": opportunity_registry_id,
+            "holdout_opportunity_count": opportunity_count,
+            "holdout_opportunity_digest": opportunity_digest,
             "model_selection_policy": experiment.model_selection_policy,
             "loss_policy": experiment.model_selection_policy,
             "minimum_training_rows": experiment.minimum_training_rows,
@@ -4173,8 +4888,6 @@ def _build_confirmatory_selection(
         evaluation_policy=evaluation_policy,
         confirmatory_authority=verified_f2.confirmatory_holdout_authority,
         holdout_target_source=source,
-        holdout_opportunity_registry=opportunity_registry,
-        pre_holdout_projection=projection,
     )
     return selection
 
@@ -4306,6 +5019,174 @@ class _ConfirmatoryG2Build:
     forecasts: tuple[R2HoldoutForecastDataset, ...]
     coverage: tuple[R2HoldoutCoverageDataset, ...]
     seal: R2HoldoutForecastSeal
+
+
+def _confirmatory_g2_parent_authority(
+    verified_g1: VerifiedConfirmatoryG1,
+) -> dict[str, object]:
+    """Encode exact authenticated F2/G1/G2 immediate parents without copying rows."""
+    verified_f2 = verified_g1.verified_f2
+
+    def digest(value: object) -> str:
+        return sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+
+    promotion = (
+        verified_f2.promotion if isinstance(verified_f2, VerifiedConfirmatoryF2Promotion) else None
+    )
+    bundle = verified_f2.bundle
+    oof_verification_id = (
+        promotion.oof_verification_id
+        if promotion is not None
+        else digest(
+            {
+                "kind": "oof-verification-fallback",
+                "oof_id": bundle.oof_id,
+                "closure_id": bundle.closure_id,
+                "evaluation_report_id": verified_f2.evaluation_report_id,
+            }
+        )
+    )
+
+    foundation = verified_f2.outcome_blind_foundation
+    foundation_receipt = getattr(foundation, "receipt", None)
+    foundation_verification_id = (
+        promotion.foundation_verification_id
+        if promotion is not None
+        else (
+            foundation_receipt.verification_id
+            if foundation_receipt is not None
+            else digest(
+                {
+                    "kind": "foundation-verification-fallback",
+                    "foundation_id": verified_f2.foundation_bundle_id,
+                    "evaluation_report_id": verified_f2.evaluation_report_id,
+                }
+            )
+        )
+    )
+    foundation_promotion_id = (
+        promotion.foundation_promotion_id
+        if promotion is not None and promotion.foundation_promotion_id is not None
+        else digest(
+            {
+                "kind": "foundation-promotion-fallback",
+                "foundation_id": verified_f2.foundation_bundle_id,
+                "foundation_verification_id": foundation_verification_id,
+                "f2_promotion_id": None if promotion is None else promotion.promotion_id,
+            }
+        )
+    )
+
+    source = verified_f2.holdout_target_source
+    source_reference = bundle.holdout_target_source
+    target_source_closure_id = (
+        source_reference.sha256
+        if source_reference is not None
+        else digest(
+            {
+                "kind": "target-source-closure-fallback",
+                "source_id": source.source_id,
+                "source_target_dataset_id": source.source_target_dataset_id,
+            }
+        )
+    )
+    target_source_verification_id = digest(
+        {
+            "kind": "target-source-verification",
+            "semantic_id": source.source_id,
+            "closure_id": target_source_closure_id,
+            "oof_verification_id": oof_verification_id,
+        }
+    )
+    source_parent: dict[str, object] = {
+        "semantic_id": source.source_id,
+        "closure_id": target_source_closure_id,
+        "verification_id": target_source_verification_id,
+        "source_target_dataset_id": source.source_target_dataset_id,
+        "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+        "oof_reference": None if source_reference is None else source_reference.as_json(),
+    }
+
+    feature = verified_f2._g2_feature_source_authority
+    if isinstance(feature, G2FeatureSourceAuthority):
+        feature_parent = {
+            "authority_id": feature.source_id,
+            "foundation_bundle_id": feature.foundation_bundle_id,
+            "foundation_configuration_id": feature.foundation_configuration_id,
+            "observation_dataset_id": feature.observation_dataset_id,
+            "panel_dataset_id": feature.panel_dataset_id,
+            "observation_reference": feature.observation_reference.as_json(),
+            "panel_reference": feature.panel_reference.as_json(),
+        }
+    elif isinstance(feature, IBKRG2FeatureSourceAuthority):
+        feature_parent = {
+            "authority_id": feature.source_id,
+            "foundation_bundle_id": feature.foundation_bundle_id,
+            "foundation_configuration_id": feature.foundation_configuration_id,
+            "observation_dataset_id": feature.observation_dataset_id,
+            "panel_dataset_id": feature.panel_dataset_id,
+            "child_closure_id": feature.child_references_sha256,
+            "target_child_closure_id": feature.target_child_references_sha256,
+        }
+    else:
+        raise TypeError("confirmatory G2 feature authority is unsupported")
+
+    selection = verified_g1.selection
+    selection_parent = {
+        "manifest_id": selection.manifest_id,
+        "evaluation_report_id": selection.evaluation_report_id,
+        "prior_manifest_id": selection.prior_selection_manifest_id,
+        "authority_id": digest(
+            {
+                "manifest_id": selection.manifest_id,
+                "evaluation_report_id": selection.evaluation_report_id,
+                "prior_manifest_id": selection.prior_selection_manifest_id,
+            }
+        ),
+    }
+    return {
+        "f2": {
+            "promotion_id": (
+                promotion.promotion_id
+                if promotion is not None
+                else digest(
+                    {
+                        "kind": "f2-promotion-fallback",
+                        "oof_verification_id": oof_verification_id,
+                        "foundation_verification_id": foundation_verification_id,
+                        "evaluation_report_id": verified_f2.evaluation_report_id,
+                    }
+                )
+            ),
+            "evaluation_report_id": verified_f2.evaluation_report_id,
+            "foundation_bundle_id": verified_f2.foundation_bundle_id,
+        },
+        "oof": {
+            "semantic_id": bundle.oof_id,
+            "closure_id": bundle.closure_id,
+            "verification_id": oof_verification_id,
+        },
+        "foundation": {
+            "semantic_id": verified_f2.foundation_bundle_id,
+            "verification_id": foundation_verification_id,
+            "promotion_id": foundation_promotion_id,
+            "closure_id": (
+                foundation_receipt.closure_id
+                if foundation_receipt is not None
+                else digest(
+                    {
+                        "kind": "foundation-closure-fallback",
+                        "foundation_id": verified_f2.foundation_bundle_id,
+                    }
+                )
+            ),
+        },
+        "target_source": source_parent,
+        "feature_source": feature_parent,
+        "selection": selection_parent,
+    }
 
 
 def _build_confirmatory_g2(
@@ -4479,6 +5360,7 @@ def prepare_confirmatory_g2(
     write_holdout_preparation(
         output,
         selection=verified_g1.selection,
+        holdout_target_source=target_source,
         feature_datasets={child.dataset_id: child for child in built.holdout_features.values()},
         final_fits={fit.fit_id: fit for fit in built.fits},
         forecasts={forecast.dataset_id: forecast for forecast in built.forecasts},
@@ -4488,6 +5370,7 @@ def prepare_confirmatory_g2(
             child.dataset_id: child for child in built.training_features.values()
         },
         training_target_datasets={pre_holdout_targets.dataset_id: pre_holdout_targets},
+        immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
     )
     return manifest_path
@@ -4502,9 +5385,22 @@ def verify_confirmatory_g2_preparation(
 
     if type(verified_g1) is not VerifiedConfirmatoryG1:
         raise TypeError("confirmatory preparation verification requires VerifiedConfirmatoryG1")
+    persisted_selection = R2HoldoutSelectionManifest.from_json(
+        _load_selection(path / "selection.json")
+    )
+    if persisted_selection.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory preparation contains a substituted G1 selection")
+    persisted_seal = R2HoldoutForecastSeal.from_json(_load_selection(path / "manifest.json"))
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=persisted_seal.prepared_by,
+    )
     seal = verify_holdout_preparation(
         path,
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+        holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+        training_feature_datasets=expected.training_features,
+        immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
     )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
@@ -4513,15 +5409,6 @@ def verify_confirmatory_g2_preparation(
         or seal.holdout_outcomes_accessed
     ):
         raise ValueError("confirmatory preparation differs from verified G1 authority")
-    persisted_selection = R2HoldoutSelectionManifest.from_json(
-        _load_selection(path / "selection.json")
-    )
-    if persisted_selection.as_json() != verified_g1.selection.as_json():
-        raise ValueError("confirmatory preparation contains a substituted G1 selection")
-    expected = _build_confirmatory_g2(
-        verified_g1=verified_g1,
-        prepared_by=seal.prepared_by,
-    )
     if seal.as_json() != expected.seal.as_json():
         raise ValueError(
             "confirmatory preparation differs from independently replayed "
@@ -4532,6 +5419,7 @@ def verify_confirmatory_g2_preparation(
         verified_g1=verified_g1,
         seal=seal,
         path=path,
+        training_features=expected.training_features,
     )
 
 
@@ -4556,7 +5444,31 @@ def _verify_confirmatory_g2_lifecycle(
         or verified_g1._verifier_provenance is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
     ):
         raise TypeError("confirmatory lifecycle verification requires verified G1 provenance")
-    seal = _verify_confirmatory_holdout_preparation(path)
+    persisted_selection = R2HoldoutSelectionManifest.from_json(
+        _load_selection(path / "selection.json")
+    )
+    if persisted_selection.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
+    persisted_seal = R2HoldoutForecastSeal.from_json(_load_selection(path / "manifest.json"))
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=persisted_seal.prepared_by,
+    )
+    training_features = getattr(expected, "training_features", None)
+    if training_features is None:
+        training_feature_authority: Mapping[str, R2FeatureDataset] = {}
+        seal = _verify_confirmatory_holdout_preparation(
+            path,
+            holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+        )
+    else:
+        training_feature_authority = cast(Mapping[str, R2FeatureDataset], training_features)
+        seal = _verify_confirmatory_holdout_preparation(
+            path,
+            holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+            training_feature_datasets=training_feature_authority,
+            immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
+        )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
         or seal.holdout_scope is not HoldoutScope.CONFIRMATORY
@@ -4564,13 +5476,6 @@ def _verify_confirmatory_g2_lifecycle(
         or seal.holdout_outcomes_accessed
     ):
         raise ValueError("confirmatory lifecycle differs from verified G1 authority")
-    persisted = R2HoldoutSelectionManifest.from_json(_load_selection(path / "selection.json"))
-    if persisted.as_json() != verified_g1.selection.as_json():
-        raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
-    expected = _build_confirmatory_g2(
-        verified_g1=verified_g1,
-        prepared_by=seal.prepared_by,
-    )
     if seal.as_json() != expected.seal.as_json():
         raise ValueError("confirmatory lifecycle seal differs from independent G1 replay")
     return VerifiedConfirmatoryG2Preparation._create(
@@ -4578,6 +5483,7 @@ def _verify_confirmatory_g2_lifecycle(
         verified_g1=verified_g1,
         seal=seal,
         path=path,
+        training_features=training_feature_authority,
     )
 
 
@@ -4724,7 +5630,10 @@ def reveal_confirmatory_g2(
         consumed_by=consumed_by,
         opened_at=opened_at,
         consumed_at=clock.now,
+        holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
         outcome_loader=load_outcomes,
+        training_feature_datasets=preparation.training_feature_datasets,
+        immediate_parent_authority=_confirmatory_g2_parent_authority(preparation.verified_g1),
     )
     evaluation, consumed = result
     if evaluation is None:
@@ -4800,7 +5709,12 @@ def verify_confirmatory_r2h(
                 consumed.evaluation_id,
                 "post-OPENED execution failed before a valid evaluation",
             )
-        evaluation = _verify_confirmatory_holdout_evaluation(preparation.path)
+        evaluation = _verify_confirmatory_holdout_evaluation(
+            preparation.path,
+            holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
+            training_feature_datasets=preparation.training_feature_datasets,
+            immediate_parent_authority=_confirmatory_g2_parent_authority(preparation.verified_g1),
+        )
         if evaluation.selection_manifest_id != selection_id:
             raise ValueError("confirmatory evaluation differs from verified G1")
         return ConfirmatoryR2HReport(
@@ -5112,6 +6026,7 @@ async def _replay_authority_oof_async(
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
         expected_runtime_keys.add("holdout_target_source")
@@ -5157,6 +6072,23 @@ async def _replay_authority_oof_async(
             or not feature_path.is_file()
         ):
             raise ValueError(f"OOF runtime feature manifest is unavailable: {name}")
+    raw_receipt_paths = runtime["feature_receipts"]
+    if not isinstance(raw_receipt_paths, dict):
+        raise ValueError("OOF runtime feature receipts are malformed")
+    if set(raw_receipt_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF runtime feature receipts must cover exactly L0/L1/P0/P1")
+    feature_receipt_paths: dict[str, Path] = {}
+    for name, raw_path in cast(dict[str, object], raw_receipt_paths).items():
+        if not isinstance(raw_path, str):
+            raise ValueError(f"OOF runtime feature receipt locator is malformed: {name}")
+        feature_receipt_path = Path(raw_path)
+        if (
+            not feature_receipt_path.is_absolute()
+            or feature_receipt_path.is_symlink()
+            or not feature_receipt_path.is_file()
+        ):
+            raise ValueError(f"OOF runtime feature receipt is unavailable: {name}")
+        feature_receipt_paths[name] = feature_receipt_path
     holdout_target_source_path = (
         runtime_file("holdout_target_source")
         if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
@@ -5238,6 +6170,7 @@ async def _replay_authority_oof_async(
             foundation_authority=authority,
             experiment=experiment,
             feature_manifest_paths=feature_paths,
+            feature_receipt_paths=feature_receipt_paths,
             research_root=research_root,
             clock=clock,
             output=expected_root,
@@ -5472,9 +6405,15 @@ def _authenticate_oof_closure(
     if manifest_bytes != canonical_bytes(manifest_payload):
         raise ValueError("R2 OOF manifest is not canonical")
     bundle = R2OofBundle.from_json(manifest_payload)
+    from qtrad.runtime.r2_partitioned_rows import (
+        PARTITIONED_ROWS_STORAGE,
+        partitioned_manifest_part_paths,
+    )
+
     allowed_paths = {"manifest.json"}
     descriptor: dict[str, object] | None = None
     descriptor_count = 0
+    feature_bindings: list[tuple[ArtifactReference, dict[str, object]]] = []
     for reference in _oof_declared_references(bundle):
         allowed_paths.add(reference.path)
         if reference.contract == OOF_DESCRIPTOR_CONTRACT:
@@ -5485,12 +6424,42 @@ def _authenticate_oof_closure(
             forecast_manifest = R2ForecastManifest.from_json(forecast_payload)
             nested = forecast_manifest.forecast_child
             allowed_paths.add(nested.path)
-            _safe_oof_child(root, nested)
+            nested_payload = _read_oof_consumed_json(root, nested)
+            if nested_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+                allowed_paths.update(
+                    partitioned_manifest_part_paths(
+                        root,
+                        nested.path,
+                        nested_payload,
+                        identity_field=_identity_field_for_contract(nested.contract),
+                    )
+                )
         else:
             _safe_oof_child(root, reference)
+            if reference.contract == R2_FEATURE_DATASET_CONTRACT:
+                feature_payload = _read_oof_consumed_json(root, reference)
+                if feature_payload.get("storage") == "qtrad-r2-feature-manifest-binding-v1":
+                    feature_bindings.append((reference, feature_payload))
+            if reference.contract in {
+                R2_EVALUATION_CONTRACT,
+                "qtrad-research-forecasts-v1",
+                "qtrad-r2-forecast-coverage-v2",
+            }:
+                child_payload = _read_oof_consumed_json(root, reference)
+                if child_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+                    allowed_paths.update(
+                        partitioned_manifest_part_paths(
+                            root,
+                            reference.path,
+                            child_payload,
+                            identity_field=_identity_field_for_contract(reference.contract),
+                        )
+                    )
     _reject_orphan_files(root, allowed_paths)
     if descriptor_count != 1 or descriptor is None:
         raise ValueError("R2 OOF closure must contain exactly one run descriptor")
+    for reference, payload in feature_bindings:
+        _verify_feature_manifest_binding(root, reference, payload, descriptor)
     return bundle, descriptor
 
 

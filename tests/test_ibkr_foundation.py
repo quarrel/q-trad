@@ -150,7 +150,7 @@ def test_stage8_outcome_blind_loader_does_not_decode_full_children(tmp_path: Pat
     foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
     loaded = load_ibkr_foundation(foundation, receipt=receipt)
     assert loaded.observations.rows
-    assert loaded.targets.rows
+    assert loaded.targets.rows == ()
 
 
 def test_stage8_child_manifest_mutation_is_rejected(tmp_path: Path) -> None:
@@ -245,7 +245,7 @@ def test_stage8_readiness_without_valid_folds_is_insufficient(tmp_path: Path) ->
         "opportunity_counts": {
             "ELIGIBLE": 0,
             "GAP": 0,
-            "INACTIVE": 6,
+            "INACTIVE": 0,
             "OTHER_INELIGIBLE": 0,
         },
     }
@@ -257,7 +257,7 @@ def test_stage8_readiness_without_valid_folds_is_insufficient(tmp_path: Path) ->
         == {
             "ELIGIBLE": 0,
             "GAP": 0,
-            "INACTIVE": 1,
+            "INACTIVE": 0,
             "OTHER_INELIGIBLE": 0,
         }
         and cell["coverage"] is None
@@ -467,9 +467,13 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
         holdout_target_source=blind_source,
     )
     assert_parquet_reads(safe_kinds | {"folds"})
-    assert {kind for path in child_reads for kind in all_child_kinds if kind in path.parts} == (
-        safe_kinds | {"folds"}
-    )
+    expected_decoded = (safe_kinds - {"pre-holdout-target"}) | {"folds"}
+    assert "pre-holdout-target" not in {
+        kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+    }
+    assert {
+        kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+    } == expected_decoded
     assert build_id
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
 
@@ -489,9 +493,10 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
         )
         expected = safe_kinds | {"folds"} | expected_extra
         assert_parquet_reads(expected)
+        expected_decoded = (safe_kinds - {"pre-holdout-target"}) | {"folds"} | expected_extra
         assert {
             kind for path in child_reads for kind in all_child_kinds if kind in path.parts
-        } == expected
+        } == expected_decoded
 
     parquet_reads.clear()
     child_reads.clear()
@@ -765,3 +770,14 @@ def test_stage8_writer_and_consuming_verifiers_share_kind_bound(
         )
         == expected_rows
     )
+
+
+def test_stage8_receipt_from_previous_target_opportunity_policy_is_rejected(
+    tmp_path: Path,
+) -> None:
+    foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
+    document = json.loads(receipt.read_bytes())
+    document.pop("target_opportunity_policy_id")
+    receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="receipt"):
+        authenticate_ibkr_foundation(foundation, receipt=receipt)

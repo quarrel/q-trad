@@ -17,7 +17,10 @@ from qtrad.domain.ibkr_foundation import (
     VerifiedIbkrFoundationPromotion,
 )
 from qtrad.domain.r2_readiness import EvidenceClass
-from qtrad.runtime.ibkr_foundation import authenticate_ibkr_foundation
+from qtrad.runtime.ibkr_foundation import (
+    authenticate_ibkr_foundation,
+    ibkr_foundation_target_opportunity_policy_id,
+)
 from qtrad.runtime.r2_bundles import atomic_create
 
 _MAX_BYTES = 4 * 1024 * 1024
@@ -121,9 +124,11 @@ def _authority(document: Mapping[str, object]) -> VerifiedIbkrFoundationPromotio
 
 _PROMOTION_V3_CONTRACT = "qtrad-ibkr-foundation-confirmatory-promotion-v2"
 _PROMOTION_V3_SCHEMA_VERSION = 2
-_PROMOTION_V3_VERIFIER_CONTRACT = "qtrad-stage8-confirmatory-promotion-verifier-v2"
+_PROMOTION_V3_VERIFIER_CONTRACT = "qtrad-stage8-confirmatory-promotion-verifier-v3"
+_PROMOTION_V3_VERIFIER_VERSION = 2
 _PROMOTION_V3_CHECKS = (
     "stage8-receipt-authentication",
+    "target-opportunity-policy-authentication",
     "qualifying-readiness",
     "confirmatory-source-class",
     "operator-authorization",
@@ -135,7 +140,7 @@ def _promotion_v3_verifier_identity() -> str:
     return _sha(
         {
             "contract": _PROMOTION_V3_VERIFIER_CONTRACT,
-            "version": 1,
+            "version": _PROMOTION_V3_VERIFIER_VERSION,
             "completed_checks": list(_PROMOTION_V3_CHECKS),
         }
     )
@@ -156,6 +161,11 @@ def _foundation_v3_bindings(
     foundation_id = _sha256(foundation_document.get("foundation_id"), "Stage 8 foundation identity")
     closure_id = _sha256(foundation_document.get("closure_id"), "Stage 8 closure identity")
     receipt_id = _sha256(receipt_document.get("verification_id"), "Stage 8 verification identity")
+    policy_id = _sha256(
+        payload.get("target_opportunity_policy_id"), "Stage 8 target-opportunity policy"
+    )
+    if policy_id != ibkr_foundation_target_opportunity_policy_id():
+        raise ValueError("Stage 8 target-opportunity policy is unsupported")
     stage8: dict[str, JsonValue] = {
         "foundation_id": foundation_id,
         "closure_id": closure_id,
@@ -170,10 +180,11 @@ def _foundation_v3_bindings(
             receipt_document.get("verifier_identity"), "Stage 8 verifier identity"
         ),
         "evidence_class": _text(receipt_document.get("evidence_class"), "Stage 8 evidence class"),
+        "target_opportunity_policy_id": policy_id,
     }
     if (
-        stage8["verifier_contract"] != "qtrad-stage8-foundation-semantic-verifier-v2"
-        or stage8["verifier_version"] != 1
+        stage8["verifier_contract"] != "qtrad-stage8-foundation-semantic-verifier-v3"
+        or stage8["verifier_version"] != 2
         or stage8["evidence_class"] != EvidenceClass.IMPLEMENTATION.value
     ):
         raise ValueError("Stage 8 verification receipt is not accepted")
@@ -237,7 +248,7 @@ def _authenticate_v3_promotion(
         or document["profile"] != "CONFIRMATORY"
         or document["evidence_class"] != EvidenceClass.CONFIRMATORY.value
         or document["verifier_contract"] != _PROMOTION_V3_VERIFIER_CONTRACT
-        or document["verifier_version"] != 1
+        or document["verifier_version"] != _PROMOTION_V3_VERIFIER_VERSION
         or document["verifier_identity"] != _promotion_v3_verifier_identity()
         or document["completed_checks"] != list(_PROMOTION_V3_CHECKS)
     ):
@@ -392,7 +403,7 @@ def _create_v3_promotion(
         "runtime": runtime,
         "operator_authorization": operator,
         "verifier_contract": _PROMOTION_V3_VERIFIER_CONTRACT,
-        "verifier_version": 1,
+        "verifier_version": _PROMOTION_V3_VERIFIER_VERSION,
         "verifier_identity": _promotion_v3_verifier_identity(),
         "completed_checks": list(_PROMOTION_V3_CHECKS),
         "evidence_class": EvidenceClass.CONFIRMATORY.value,

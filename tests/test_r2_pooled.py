@@ -1,5 +1,6 @@
 """R2.E pooled Ridge recovery, weighting, replay and invariance evidence."""
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -16,7 +17,11 @@ from qtrad.application.r2_baselines import (
     build_local_ridge_oof,
 )
 from qtrad.application.r2_features import feature_schema_for_set
-from qtrad.application.r2_pooled import build_pooled_ridge_fold, build_pooled_ridge_oof
+from qtrad.application.r2_pooled import (
+    build_pooled_ridge_fold,
+    build_pooled_ridge_oof,
+    build_pooled_ridge_oof_sequential,
+)
 from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
     build_r2_preprocessing_selection,
@@ -348,6 +353,61 @@ def _build_local_comparator(
             sklearn_library_identity=_FINAL_SKLEARN_IDENTITY,
         ),
         datasets[comparator_name],
+    )
+
+
+def test_sequential_pooled_loader_bounds_live_feature_sets() -> None:
+    verified, datasets, config, fold = _pooled_fixture()
+    local_result, comparator = _build_local_comparator(verified, datasets, config, fold)
+    selections = (
+        _pooled_selection(verified, datasets["P0"], config, fold, ModelFamily.POOLED_LOCAL_RIDGE),
+        _pooled_selection(
+            verified,
+            datasets["P1"],
+            config,
+            fold,
+            ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+        ),
+    )
+    loaded: list[str] = []
+    completed: list[str] = []
+    live = 0
+    peak_live = 0
+
+    def load(name: str) -> R2FeatureDataset:
+        nonlocal live, peak_live
+        loaded.append(name)
+        live += 1
+        peak_live = max(peak_live, live)
+        return datasets[name]
+
+    def complete(
+        name: str, _dataset: R2FeatureDataset, _results: Sequence[RidgeFoldResult]
+    ) -> None:
+        nonlocal live
+        completed.append(name)
+        live -= 1
+
+    result = build_pooled_ridge_oof_sequential(
+        verified,
+        config,
+        selections,
+        local_result,
+        comparator,
+        feature_dataset_loader=load,
+        on_dataset_complete=complete,
+        application_image_identity=_FINAL_APPLICATION_IMAGE,
+        numpy_library_identity=_FINAL_NUMPY_IDENTITY,
+        sklearn_library_identity=_FINAL_SKLEARN_IDENTITY,
+    )
+
+    assert tuple(loaded) == ("P0", "P1")
+    assert tuple(completed) == tuple(loaded)
+    assert peak_live == 1
+    assert live == 0
+    assert tuple(item.fit.model_family for item in result.fold_results) == (
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+        ModelFamily.POOLED_LOCAL_RIDGE,
     )
 
 

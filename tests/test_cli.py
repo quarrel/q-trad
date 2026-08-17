@@ -1178,6 +1178,21 @@ def test_parser_rejects_non_demo_ingestion_environment() -> None:
         cli.build_parser().parse_args(["ingest", "--environment", "live"])
 
 
+@pytest.mark.parametrize(
+    "subcommand",
+    (
+        "holdout-prepare",
+        "holdout-recover",
+        "holdout-bundle",
+        "holdout-reveal",
+        "holdout-verify",
+    ),
+)
+def test_parser_rejects_unauthorised_generic_holdout_commands(subcommand: str) -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["research", "baselines", subcommand])
+
+
 def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> None:
     parser = cli.build_parser()
 
@@ -1200,6 +1215,14 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
             "P0=p0.json",
             "--feature-manifest",
             "P1=p1.json",
+            "--feature-receipt",
+            "L0=l0-receipt.json",
+            "--feature-receipt",
+            "L1=l1-receipt.json",
+            "--feature-receipt",
+            "P0=p0-receipt.json",
+            "--feature-receipt",
+            "P1=p1-receipt.json",
             "--output",
             "run",
         ]
@@ -1207,6 +1230,12 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
 
     assert oof.baselines_command == "oof-build"
     assert oof.feature_manifest == ["L0=l0.json", "L1=l1.json", "P0=p0.json", "P1=p1.json"]
+    assert oof.feature_receipt == [
+        "L0=l0-receipt.json",
+        "L1=l1-receipt.json",
+        "P0=p0-receipt.json",
+        "P1=p1-receipt.json",
+    ]
     oof_verify = parser.parse_args(
         [
             "research",
@@ -1402,6 +1431,7 @@ async def test_oof_build_requires_foundation_receipt_and_holdout_source(
             foundation_receipt_path=tmp_path / "receipt.json",
             experiment_path=tmp_path / "experiment.json",
             feature_arguments=[],
+            feature_receipt_arguments=[],
             output_path=output,
             holdout_target_source_path=None,
         )

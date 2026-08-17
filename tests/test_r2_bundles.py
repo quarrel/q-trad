@@ -8,7 +8,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -32,6 +32,7 @@ from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.runtime.r2_bundles import (
     atomic_create,
     canonical_bytes,
+    reference_for_json,
     verify_r2_oof_bundle,
     verify_r2_reference,
     write_r2_oof_bundle,
@@ -43,6 +44,7 @@ from qtrad.runtime.r2_holdout_source import (
     load_r2_holdout_target_source_authority,
     write_r2_holdout_target_source,
 )
+from qtrad.runtime.r2_partitioned_rows import write_partitioned_rows
 from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
     authenticate_r2_oof,
@@ -207,6 +209,121 @@ def test_oof_bundle_rejects_orphaned_children(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="orphaned child"):
         verify_r2_oof_bundle(manifest_path)
+
+
+def test_partitioned_child_tree_round_trip_and_orphan_rejection(tmp_path: Path) -> None:
+    bundle, children = _bundle_and_children()
+    coverage_path = "coverage/child.json"
+    partitioned_payload = write_partitioned_rows(
+        tmp_path,
+        coverage_path,
+        header=children[coverage_path],
+        identity_field="artifact_id",
+        rows=({"row": index} for index in range(3)),
+        expected_row_count=3,
+    )
+    children[coverage_path] = partitioned_payload
+    coverage_reference = reference_for_json(
+        path=coverage_path,
+        contract=str(partitioned_payload["contract"]),
+        semantic_id=str(partitioned_payload["artifact_id"]),
+        content=partitioned_payload,
+    )
+    bundle = R2OofBundle.create(
+        foundation_bundle_id=bundle.foundation_bundle_id,
+        experiment_configuration_id=bundle.experiment_configuration_id,
+        source_class=bundle.source_class,
+        evidence_class=bundle.evidence_class,
+        feature_children=bundle.feature_children,
+        preprocessing_children=bundle.preprocessing_children,
+        fit_children=bundle.fit_children,
+        forecast_manifests=bundle.forecast_manifests,
+        coverage_children=(coverage_reference,),
+        evaluation_children=bundle.evaluation_children,
+    )
+
+    manifest_path = write_r2_oof_bundle(tmp_path, bundle, children)
+    assert verify_r2_oof_bundle(manifest_path) == bundle
+
+    orphan = tmp_path / f"{coverage_path}.parts" / "orphan.json"
+    orphan.write_bytes(canonical_bytes({"orphan": True}))
+    with pytest.raises(ValueError, match="orphan"):
+        verify_r2_oof_bundle(manifest_path)
+
+
+def test_compact_feature_binding_omits_rows_and_manifest_chunks(tmp_path: Path) -> None:
+    _verified, experiment, datasets = verification._synthetic_pipeline_inputs()
+    feature_paths = verification._materialise_synthetic_feature_manifests(
+        tmp_path, experiment, datasets
+    )
+    manifest_payload = cast(
+        dict[str, object],
+        json.loads((tmp_path / feature_paths["L0"]).read_bytes()),
+    )
+    compact = verification._dataset_payload(datasets["L0"], manifest_payload, compact=True)
+
+    assert "rows" not in compact
+    assert "chunks" not in compact
+    assert set(cast(dict[str, object], compact["manifest"])) == {
+        "contract",
+        "schema_version",
+        "manifest_id",
+        "manifest_sha256",
+        "semantic_dataset_id",
+        "feature_set_name",
+        "feature_set_id",
+    }
+
+
+def test_oof_build_staging_discards_post_partition_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_after_parts(**kwargs: object) -> None:
+        staged_output = kwargs["output"]
+        if not isinstance(staged_output, Path):
+            raise AssertionError("staging output was not a Path")
+        write_partitioned_rows(
+            staged_output,
+            "coverage/0000.json",
+            header={
+                "contract": "qtrad-test-child-v1",
+                "artifact_id": "a" * 64,
+            },
+            identity_field="artifact_id",
+            rows=({"row": 1},),
+            expected_row_count=1,
+        )
+        raise RuntimeError("injected post-partition failure")
+
+    monkeypatch.setattr(verification, "_build_oof_bundle", fail_after_parts)
+    output = tmp_path / "oof"
+    with pytest.raises(RuntimeError, match="injected post-partition failure"):
+        verification.build_oof_bundle(
+            verified=cast(Any, None),
+            experiment=cast(Any, None),
+            feature_manifest_paths={},
+            research_root=tmp_path,
+            clock=cast(Any, None),
+            output=output,
+        )
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".oof.staging-*"))
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        verification.build_oof_bundle(
+            verified=cast(Any, None),
+            experiment=cast(Any, None),
+            feature_manifest_paths={},
+            research_root=tmp_path,
+            clock=cast(Any, None),
+            output=alias / "oof",
+        )
+    assert not (outside / "oof").exists()
 
 
 def test_reordered_reference_arrays_replay_to_the_same_identity(tmp_path: Path) -> None:

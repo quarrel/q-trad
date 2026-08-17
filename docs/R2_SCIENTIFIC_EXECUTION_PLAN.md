@@ -1,6 +1,6 @@
 # q-trad R2 decision-grade scientific execution plan
 
-**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification and PR-S0 run enablement are merged and complete
+**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification and PR-S0 run enablement are merged and complete; PR #144's pre-F2 scientific-policy amendment is pending merge
 **Scope:** first real decision-grade `R2-IBKR-HISTORICAL` run through F2, G1, unopened G2, irreversible reveal and R2.H  
 **Safety boundary:** offline research only; IBKR paper historical market data; no broker orders, production trading endpoint or real-capital operation  
 **Primary scientific question:** do the fixed local or pooled Ridge controls produce stable out-of-sample information about 15-minute future midpoint returns beyond the zero-return control?  
@@ -26,7 +26,9 @@ Stage 6 receipt
   -> R2.H
 ```
 
-However, **do not begin F2 immediately**.
+The required bounded production-path micro-run now passes through independently verified unopened G2 on a correctly shaped sparse 20-week confirmatory fixture. It proves the current CLI, persistence, receipt, authority and fail-closed state transitions only; it is not scientific evidence and accessed no holdout outcomes.
+
+However, **do not begin real F2 immediately**.
 
 The H4 retained-file migration proved that the old retained Stage 8 “qualifying” result is not valid under the corrected causal contracts. Its immutable invalidation record shows:
 
@@ -131,6 +133,11 @@ Before F2 the verified foundation must support at least:
 - exactly three chronological OOF validation periods of two weeks each; and
 - a final locked holdout of at least four weeks.
 
+The authorised `ibkr-historical-v1` confirmatory profile also requires a predeclared
+`minimum_common_support` acceptance threshold of `0.9` (90%). This is the minimum realised
+pairwise common-support ratio for an accepted comparison; it does not relax the separate per-target
+valid-coverage gate above.
+
 The source-specific experiment implementation also requires the holdout to be the final 20% of the foundation range and requires exactly three folds. The configuration below is constructed to satisfy all of these constraints simultaneously rather than weakening any of them.
 
 ## 2.4 Evidence and authority
@@ -158,11 +165,11 @@ The instruction to execute this plan does not by itself authorise irreversible h
 
 ---
 
-# 3. PR-S0 — scientific-run enablement and active-authority cleanup
+# 3. PR-S0 and pre-F2 scientific-policy amendment
 
-**State:** COMPLETE and merged as PR-S0; this section records the accepted prerequisite boundary for the first real run.
+**State:** PR-S0 is complete and merged; the pre-F2 scientific-policy amendment is proposed by PR #144 and becomes current on merge.
 
-This PR must not alter any scientific contract, threshold, model, feature or evidence semantics.
+PR-S0 itself did not alter scientific contracts, thresholds, models, features or evidence semantics. Before the first real F2 run, PR #144 explicitly amends that boundary for only the three pre-F2 corrections in Section 3.2. No other scientific change is authorised by this run-enablement work.
 
 ## 3.1 Documentation cleanup
 
@@ -175,7 +182,23 @@ The completed PR-S0 reconciles current authority so agents do not follow stale p
 
 Do not rewrite historical chronology merely for neatness.
 
-## 3.2 Close the two thin CLI gaps if they still exist at exact head
+## 3.2 Pre-F2 scientific-policy amendment
+
+**Original requirements:** target construction was not explicitly limited to per-instrument source-active decision times and could enumerate the configured wall-clock grid; OOF validation membership did not explicitly exclude target rows whose disposition was not `VALID`; and the fixed `ibkr-historical-v1` profile permitted `minimum_common_support = 0.0`.
+
+**Revised requirements:**
+
+- a target opportunity exists for an instrument only when its grid-aligned decision time lies in that instrument's declared half-open source-active interval. The complete target window need not fit inside the interval at construction time; missing start/end evidence inside an active decision opportunity remains an explicit invalid target disposition rather than disappearing;
+- OOF model-support membership contains only `VALID` target rows with a realised log return. Non-`VALID` rows remain immutable target and foundation/readiness data-quality evidence, but they are not forecasts, zero-valued fallbacks or members of the model-comparison denominator; and
+- the fixed `ibkr-historical-v1` pairwise comparison gate requires `minimum_common_support = 0.9`. This is distinct from, and does not relax, the separate 90% per-target valid-coverage gate.
+
+**Rationale:** inactive wall-clock periods are not scientific opportunities, while missing evidence during a declared active opportunity must remain visible. Invalid targets cannot support a forecast-error comparison, and including them caused coverage to claim scientifically ineligible rows that evaluation correctly rejected. A zero common-support threshold provided no comparison-overlap safeguard and could not construct the strictly positive frozen holdout question; `0.9` is now predeclared before real fitting or outcome access.
+
+**Evidence impact:** no decision-grade R2/F2 result, locked-holdout result or holdout outcome exists under the superseded semantics. Earlier synthetic and bounded implementation fixtures are superseded or regenerated under the amended identities; no scientific result is retroactively reclassified. The retained H4 invalidation and superseded Stage 8 promotion remain immutable historical evidence and grant no current authority.
+
+**Authority:** this amendment is reviewed in PR #144 before replacement Stage 8 construction or any real F2 execution.
+
+## 3.3 Close the two thin CLI gaps if they still exist at exact head
 
 ### A. OOF verification receipt output
 
@@ -230,21 +253,21 @@ Requirements:
 
 PR-S0 would have reused an existing supported command name if one existed; no compatibility alias is retained.
 
-## 3.3 Validation
+## 3.4 Validation
 
-Because this PR touches runtime CLI plumbing, run:
+Because this run-enablement work touches scientific identities and runtime CLI plumbing, run:
 
 - focused CLI/OOF/holdout tests;
 - static/type checks; and
 - clean `ops/dev/verify.sh`.
 
-No provider call, Stage 8 build, model run or holdout access in PR-S0.
+PR-S0 made no provider call, Stage 8 build, model run or holdout access. PR #144 adds only disposable, correctly shaped fixture Stage 8/model execution to prove the exact bounded path; it performs no provider call, retained Stage 8 publication, real model run or holdout access.
 
 ---
 
 # 4. Run root, code freeze and provenance
 
-After PR-S0 merges:
+After PR #144 merges:
 
 1. update to exact `main`;
 2. require a clean worktree;
@@ -697,7 +720,21 @@ qtrad research baselines features \
   --output <feature-output>
 ```
 
-Then independently verify each persisted feature manifest with the corresponding `features-verify` command, the same foundation authorities and the same `--holdout-target-source`. Each command authenticates the source once and uses the outcome-blind Stage 8 loader.
+Then independently verify each persisted feature manifest with the same foundation authorities and the same `--holdout-target-source`, writing its create-only receipt:
+
+```text
+qtrad research baselines features-verify \
+  --foundation-bundle <stage8> \
+  --foundation-receipt <stage8-receipt> \
+  --foundation-promotion <stage8-promotion> \
+  --experiment <experiment> \
+  --holdout-target-source <holdout-target-source> \
+  --feature-set <NAME> \
+  --manifest <feature-output> \
+  --receipt-output <feature-receipt>
+```
+
+Each command authenticates the source once, uses the outcome-blind Stage 8 loader and independently proves the Phase F transformation. Ordinary OOF construction authenticates these receipts and consumes each required feature child once rather than replaying Phase F.
 
 Record for each set:
 
@@ -723,7 +760,7 @@ Invoke `oof-build` with:
 - exact Stage 8 receipt;
 - exact Stage 8 promotion;
 - frozen experiment;
-- all four independently verified feature manifests; and
+- all four independently verified feature manifests and their create-only verification receipts; and
 - the authenticated outcome-blind holdout-target source.
 
 Conceptually:
@@ -738,6 +775,10 @@ qtrad research baselines oof-build \
   --feature-manifest L1=<...> \
   --feature-manifest P0=<...> \
   --feature-manifest P1=<...> \
+  --feature-receipt L0=<...> \
+  --feature-receipt L1=<...> \
+  --feature-receipt P0=<...> \
+  --feature-receipt P1=<...> \
   --holdout-target-source <holdout-target-source.json> \
   --output <oof-root-or-manifest>
 ```

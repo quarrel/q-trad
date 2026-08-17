@@ -82,8 +82,9 @@ from qtrad.ports.clock import Clock
 
 _MAX_BUNDLE_BYTES = 4 * 1024 * 1024
 _MAX_RECEIPT_BYTES = 512 * 1024
-_FOUNDATION_VERIFIER_CONTRACT = "qtrad-r1-foundation-semantic-verifier-v1"
-_FOUNDATION_VERIFIER_VERSION = 1
+_FOUNDATION_TARGET_OPPORTUNITY_POLICY_ID = "qtrad-r1-target-opportunity-policy-v1"
+_FOUNDATION_VERIFIER_CONTRACT = "qtrad-r1-foundation-semantic-verifier-v2"
+_FOUNDATION_VERIFIER_VERSION = 2
 _FOUNDATION_VERIFIER_CHECKS = (
     "observation-build-availability",
     "causal-panel",
@@ -94,6 +95,16 @@ _FOUNDATION_VERIFIER_CHECKS = (
     "cross-lineage",
     "outcome-blind-projections",
     "g2-safe-projections",
+    "target-opportunity-policy",
+)
+_FOUNDATION_BUILD_SUMMARY_KEYS = frozenset(
+    {
+        "application_version",
+        "image_identity",
+        "row_counts",
+        "outcome_blind_projections",
+        "target_opportunity_policy_id",
+    }
 )
 _FOUNDATION_PROJECTION_NAMES: tuple[tuple[str, str], ...] = (
     ("target_index", "target-index"),
@@ -366,6 +377,13 @@ def _expected_verifier_identity() -> str:
     )
 
 
+def _validate_build_summary_policy(build_summary: Mapping[str, object]) -> None:
+    if set(build_summary) != _FOUNDATION_BUILD_SUMMARY_KEYS:
+        raise ValueError("foundation build summary has an unexpected schema")
+    if build_summary["target_opportunity_policy_id"] != _FOUNDATION_TARGET_OPPORTUNITY_POLICY_ID:
+        raise ValueError("foundation target-opportunity policy is unsupported")
+
+
 def _authenticate_receipt(
     *, bundle_path: Path, bundle: FoundationBundle, receipt: FoundationVerificationReceipt
 ) -> None:
@@ -458,7 +476,9 @@ async def authenticate_foundation_bundle(
     likewise limited to those consumed children.
     """
     bundle = load_foundation_bundle(bundle_path)
-    _projection_references(bundle, _mapping(bundle.build_summary))
+    build_summary = _mapping(bundle.build_summary)
+    _validate_build_summary_policy(build_summary)
+    _projection_references(bundle, build_summary)
     if isinstance(receipt, Path):
         _reject_receipt_in_bundle_closure(
             bundle_path=bundle_path,
@@ -515,14 +535,7 @@ async def restore_authenticated_foundation_bundle(
         load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
     )
     build_summary = _mapping(bundle.build_summary)
-    expected_build_summary_keys = {
-        "application_version",
-        "image_identity",
-        "row_counts",
-        "outcome_blind_projections",
-    }
-    if set(build_summary) != expected_build_summary_keys:
-        raise ValueError("foundation build summary has an unexpected schema")
+    _validate_build_summary_policy(build_summary)
     expected_row_counts: dict[str, JsonValue] = {
         "observations": bundle.observations.row_count,
         "panel": bundle.panel.row_count,
@@ -712,6 +725,8 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         projections
     ) != len(expected_projection_names):
         raise ValueError("foundation bundle projection set is unsupported")
+    build_summary = cast(Mapping[str, JsonValue], _mapping(payload["build_summary"]))
+    _validate_build_summary_policy(build_summary)
     return FoundationBundle(
         configuration=_reference("configuration", children["configuration"]),
         observations=_reference("observations", children["observations"]),
@@ -726,7 +741,7 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         range_start=_datetime(payload["range_start"]),
         range_end=_datetime(payload["range_end"]),
         coverage=tuple(_coverage(_mapping(item)) for item in _sequence(payload["coverage"])),
-        build_summary=cast(Mapping[str, JsonValue], _mapping(payload["build_summary"])),
+        build_summary=build_summary,
         foundation_id=_text(payload["foundation_id"]),
         closure_id=_text(payload["closure_id"]),
         market_data_source_class=MarketDataSourceClass(_text(payload["source_class"])),
@@ -1258,6 +1273,7 @@ async def persist_foundation_bundle(
     build_summary: dict[str, JsonValue] = {
         "application_version": application_version,
         "image_identity": image_identity,
+        "target_opportunity_policy_id": _FOUNDATION_TARGET_OPPORTUNITY_POLICY_ID,
         "row_counts": {
             "observations": len(observations.rows),
             "panel": len(panel.rows),
@@ -1408,14 +1424,7 @@ async def _verify_foundation_bundle(
             "fold_dataset_id": manifests["folds"].dataset_id,
         },
     )
-    extension_build_summary_keys = {
-        "application_version",
-        "image_identity",
-        "row_counts",
-        "outcome_blind_projections",
-    }
-    if frozenset(build_summary) != frozenset(extension_build_summary_keys):
-        raise ValueError("foundation build summary has an unexpected schema")
+    _validate_build_summary_policy(build_summary)
     application_version = _text(build_summary["application_version"])
     image_identity = _text(build_summary["image_identity"])
     expected_row_counts: dict[str, JsonValue] = {
@@ -1477,6 +1486,7 @@ async def _verify_foundation_bundle(
         observations,
         configuration,
         horizons=configuration.target_horizons,
+        source_active_intervals=evidence.source_active_intervals,
     )
     if targets != expected_targets:
         raise ValueError("foundation targets differ from deterministic causal replay")
@@ -1742,13 +1752,7 @@ async def restore_authenticated_outcome_blind_foundation_bundle(
     )
     build_summary = _mapping(bundle.build_summary)
     projection_references = _projection_references(bundle, build_summary)
-    if set(build_summary) != {
-        "application_version",
-        "image_identity",
-        "row_counts",
-        "outcome_blind_projections",
-    }:
-        raise ValueError("foundation build summary has an unexpected schema")
+    _validate_build_summary_policy(build_summary)
     application_version = _text(build_summary["application_version"])
     image_identity = _text(build_summary["image_identity"])
     expected_row_counts: dict[str, JsonValue] = {

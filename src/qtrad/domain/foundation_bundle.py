@@ -403,6 +403,7 @@ def _semantic_payload(bundle: FoundationBundle | _UnboundBundle) -> dict[str, ob
         "range_start": bundle.range_start.isoformat(),
         "range_end": bundle.range_end.isoformat(),
         "coverage": [summary.as_json() for summary in bundle.coverage],
+        "target_opportunity_policy_id": bundle.build_summary["target_opportunity_policy_id"],
     }
 
 

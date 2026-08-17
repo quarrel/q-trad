@@ -1,5 +1,5 @@
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,7 +15,12 @@ from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
-from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
+from qtrad.domain.foundation import (
+    AvailabilityBasis,
+    FoundationConfig,
+    InstrumentRole,
+    PanelDataset,
+)
 from qtrad.domain.foundation_bundle import ArtifactReference, FoundationBundle
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
@@ -186,7 +191,17 @@ async def _bundle(tmp_path: Path):
         },
     )
     targets = build_frozen_targets(
-        observations, configuration, horizons=configuration.target_horizons
+        observations,
+        configuration,
+        horizons=configuration.target_horizons,
+        source_active_intervals={
+            "fx:aud-usd": (
+                (
+                    datetime.fromisoformat(str(observations.configuration["interval_start"])),
+                    datetime.fromisoformat(str(observations.configuration["interval_end"])),
+                ),
+            )
+        },
     )
     folds = build_expanding_folds(targets, configuration)
     forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
@@ -260,6 +275,48 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
             image_identity="test@sha256:" + "1" * 64,
         )
     assert {item.name for item in (tmp_path / "manifests").glob("*.json")} == manifests_before
+
+
+@pytest.mark.asyncio
+async def test_foundation_verifier_replays_targets_with_active_intervals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    original_builder = foundation_runtime.build_frozen_targets
+    observed: dict[str, object] = {}
+
+    def capture_target_builder(
+        dataset: ObservationDataset,
+        config: FoundationConfig,
+        *,
+        horizons: Sequence[timedelta] | None = None,
+        source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]] | None = None,
+    ):
+        observed["source_active_intervals"] = source_active_intervals
+        return original_builder(
+            dataset,
+            config,
+            horizons=horizons,
+            source_active_intervals=source_active_intervals,
+        )
+
+    monkeypatch.setattr(foundation_runtime, "build_frozen_targets", capture_target_builder)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
+    assert verified.bundle == bundle
+    observations = _observations()
+    assert observed["source_active_intervals"] == {
+        "fx:aud-usd": (
+            (
+                datetime.fromisoformat(str(observations.configuration["interval_start"])),
+                datetime.fromisoformat(str(observations.configuration["interval_end"])),
+            ),
+        )
+    }
 
 
 @pytest.mark.asyncio
@@ -511,6 +568,15 @@ async def test_semantic_and_closure_identities_are_separate(tmp_path: Path) -> N
     semantic_change = recreate(panel=replace(bundle.panel, dataset_id="f" * 64))
     assert semantic_change.foundation_id != bundle.foundation_id
     assert semantic_change.closure_id == bundle.closure_id
+
+    policy_change = recreate(
+        build_summary={
+            **bundle.build_summary,
+            "target_opportunity_policy_id": "qtrad-r1-target-opportunity-policy-v0",
+        }
+    )
+    assert policy_change.foundation_id != bundle.foundation_id
+    assert policy_change.closure_id == bundle.closure_id
 
 
 @pytest.mark.asyncio
@@ -912,6 +978,33 @@ async def test_foundation_receipt_binds_artifact_contract_and_schema(
     mutated.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="artefact contract"):
         load_foundation_verification_receipt(mutated)
+
+
+@pytest.mark.asyncio
+async def test_foundation_auth_rejects_an_older_target_opportunity_policy(
+    tmp_path: Path,
+) -> None:
+    _bundle_value, path, clock, _configuration = await _bundle(tmp_path)
+    receipt_path = tmp_path / "foundation-receipt.json"
+    await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=receipt_path,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["build_summary"]["target_opportunity_policy_id"] = (
+        "qtrad-r1-target-opportunity-policy-v0"
+    )
+    mutated = tmp_path / "older-policy-foundation.json"
+    mutated.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="target-opportunity policy"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=mutated,
+            clock=clock,
+            receipt=receipt_path,
+        )
 
 
 def test_foundation_verify_requires_receipt_output() -> None:

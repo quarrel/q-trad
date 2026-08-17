@@ -166,6 +166,15 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
 - **Approving review:** PR #124.
 - **Amendment date:** 2026-08-14.
 
+### Amendment 6 — pre-F2 target opportunities, model support and common support
+
+- **Original requirement:** the plan did not bind target-opportunity membership to each instrument's declared source-active intervals, so foundation construction could enumerate the full configured wall-clock grid. OOF support was defined by forecast membership without explicitly restricting eligible model-support rows to `VALID` targets. The fixed `ibkr-historical-v1` profile permitted `minimum_common_support = 0.0`.
+- **Revised requirement:** a target opportunity exists only at a grid-aligned decision time within that instrument's declared half-open source-active interval; construction does not require the complete target window to fit inside the interval, and missing evidence inside an active decision opportunity retains its explicit invalid disposition. OOF model-support membership includes only `VALID` targets with realised log returns; excluded dispositions remain target and foundation/readiness data-quality evidence and are never zero forecasts. The fixed `ibkr-historical-v1` pairwise comparison threshold is `minimum_common_support = 0.9`, separate from the 90% per-target valid-coverage gate.
+- **Rationale:** inactive wall-clock periods are not forecast opportunities, but active missingness must remain visible. Invalid target rows cannot support forecast-error comparisons and previously produced coverage for rows that evaluation correctly rejected. A zero common-support threshold supplied no overlap safeguard and was incompatible with the strictly positive frozen holdout question. All three rules are frozen before real model output or holdout access.
+- **Evidence impact:** no decision-grade R2/F2 artefact, locked-holdout result or holdout outcome exists under the superseded semantics, so no scientific result is invalidated or retroactively reclassified. Synthetic and bounded implementation fixtures are superseded or regenerated under the amended semantic identities. The retained H4 invalidation and superseded Stage 8 promotion remain immutable historical evidence and confer no current authority.
+- **Approving review:** PR #144, subject to merge.
+- **Amendment date:** 2026-08-17.
+
 ---
 
 ## 3. Research questions
@@ -276,6 +285,8 @@ The prediction target is the R1 completed-bar cumulative midpoint log return for
 The primary vertical path is 15 minutes. Schemas and algorithms must accept every configured R1 horizon from the outset.
 
 Forecast values use `float64` log-return units. Prices and money are not model inputs at a monetary boundary in R2.
+
+For source-active foundations, target opportunities are instrument-specific grid-aligned decision times inside declared half-open active intervals. Missing target evidence after an active decision remains an explicit invalid disposition. R2 model support consumes only `VALID` targets with realised log returns; it does not erase the separately retained invalid-target and readiness evidence.
 
 ### 5.3 Instrument roles
 
@@ -1302,7 +1313,7 @@ Every pairwise comparison reports both:
 - **own support:** every row forecast by that model; and
 - **common support:** only rows forecast by every model in the comparison.
 
-Coverage is reported alongside both.
+Coverage is reported alongside both. Model-comparison support begins from `VALID` target rows with realised log returns; non-`VALID` target dispositions remain separately retained foundation/readiness data-quality evidence and are not counted as missed forecasts.
 
 A model cannot appear superior merely by omitting difficult observations.
 
@@ -1438,7 +1449,7 @@ A configuration may enter the frozen holdout comparator set only when:
 - no correctness or replay check failed; and
 - every evaluated configuration is counted and retained.
 
-The gate thresholds are explicit configuration. They must not be invented after results are seen.
+The gate thresholds are explicit configuration. They must not be invented after results are seen. The fixed `ibkr-historical-v1` profile requires at least `0.9` realised pairwise common support; this comparison-overlap threshold is separate from the 90% per-target valid-coverage gate.
 
 A weak model may still enter the holdout comparator set as a required control, but it is labelled as such rather than as an OOF-selected candidate.
 

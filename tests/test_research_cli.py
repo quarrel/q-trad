@@ -327,6 +327,8 @@ def test_r2_feature_commands_require_explicit_feature_set(
         destination,
         str(tmp_path / "features.json"),
     ]
+    if command == "features-verify":
+        common.extend(["--receipt-output", str(tmp_path / "features-receipt.json")])
     with pytest.raises(SystemExit):
         parser.parse_args(common)
     parsed = parser.parse_args([*common, "--feature-set", "L0"])

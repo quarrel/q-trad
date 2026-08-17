@@ -8,15 +8,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import polars as pl
 import pytest
 
 from qtrad import __main__ as cli
+from qtrad.adapters.parquet import r2 as r2_parquet
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
+from qtrad.application.ibkr_foundation import _adapt_observation
 from qtrad.application.r2_features import (
     FeatureLineageError,
     R2FoundationInputs,
+    _build_source_active_index,
     _calculate,
     _context,
     _index,
@@ -24,6 +28,8 @@ from qtrad.application.r2_features import (
     _return,
     _rolling,
     _RowCache,
+    _source_active,
+    _source_active_index_for,
     _spread,
     feature_schema_for_set,
     materialise_r2_features,
@@ -36,9 +42,21 @@ from qtrad.application.r2_readiness import _availability_dataset_id
 from qtrad.domain.foundation import AvailabilityBasis, PanelRow, PanelStatus
 from qtrad.domain.identifiers import ProviderListingId
 from qtrad.domain.market_data import PriceBasis
+from qtrad.domain.provider_history import (
+    PROVIDER_HISTORY_BAR_BASIS,
+    PROVIDER_HISTORY_CORRECTION_POLICY,
+    PROVIDER_HISTORY_DECLARED_DELAY,
+    PROVIDER_HISTORY_ENVIRONMENT,
+    PROVIDER_HISTORY_POLICY,
+    PROVIDER_HISTORY_PROVIDER,
+    PROVIDER_HISTORY_SOURCE_CLASS,
+    ProviderHistoricalObservation,
+)
+from qtrad.domain.r2_bundles import ArtifactReference
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
+    R2FeatureVerificationReceipt,
     RawFeatureRow,
     RawFeatureValue,
     feature_registry,
@@ -54,6 +72,8 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.domain.research import ObservationRow
+from qtrad.runtime import r2_bundles as r2_bundle_runtime
+from qtrad.runtime import r2_verification
 from qtrad.runtime.settings import Settings
 from tests.test_r1_observations import _bar, _candidate, _dataset
 from tests.test_r2_readiness import END, START, TARGETS, experiment
@@ -86,6 +106,130 @@ def _minimal_foundation(
             source_active_intervals=intervals,
         ),
     )
+
+
+def _stage8_row(
+    interval_start: datetime,
+    *,
+    close: str,
+    position: int,
+    instrument: str = "fx:aud-usd",
+) -> ObservationRow:
+    interval_end = interval_start + timedelta(minutes=1)
+    provider_row = ProviderHistoricalObservation.create(
+        source_class=PROVIDER_HISTORY_SOURCE_CLASS,
+        provider=PROVIDER_HISTORY_PROVIDER,
+        environment=PROVIDER_HISTORY_ENVIRONMENT,
+        instrument_id=instrument,
+        contract_selection_identity="1" * 64,
+        plan_sha256="2" * 64,
+        interval_start=interval_start,
+        interval_end=interval_end,
+        basis=PROVIDER_HISTORY_BAR_BASIS,
+        open=Decimal(close),
+        high=Decimal(close) + Decimal("0.1"),
+        low=Decimal(close) - Decimal("0.1"),
+        close=Decimal(close),
+        request_sha256="3" * 64,
+        result_sha256="4" * 64,
+        attempt_id=UUID(int=position),
+        attempt_started_at=interval_start,
+        attempt_completed_at=interval_start + timedelta(seconds=30),
+        acquisition_started_at=interval_start,
+        acquisition_completed_at=interval_start + timedelta(seconds=30),
+        available_at=interval_end,
+        availability_selector=PROVIDER_HISTORY_DECLARED_DELAY,
+        availability_policy=PROVIDER_HISTORY_POLICY,
+        availability_delay="PT0S",
+        correction_policy=PROVIDER_HISTORY_CORRECTION_POLICY,
+        schedule_evidence={},
+        gap_disposition="SUCCESS",
+        count=1,
+        callback_sequence=1,
+    )
+    return _adapt_observation(provider_row, source_dataset_id="stage8-fixture", position=position)
+
+
+def test_ibkr_stage8_source_lineage_is_series_stable() -> None:
+    first = _stage8_row(START, close="100", position=1)
+    second = _stage8_row(START + timedelta(minutes=1), close="101", position=2)
+    assert first.source_external_id == second.source_external_id == "ibkr-historical:fx:aud-usd"
+
+    end = START + timedelta(minutes=2)
+    foundation = _minimal_foundation(START, END, active={"fx:aud-usd": ((START, END),)})
+    value, _ = _return(
+        "return_60s",
+        _index((first, second)),
+        "fx:aud-usd",
+        end,
+        end + timedelta(minutes=1),
+        foundation,
+        _RowCache(),
+    )
+    assert value == pytest.approx(log(101 / 100))
+
+    mismatched = replace(second, source_external_id="ibkr-historical:other")
+    with pytest.raises(FeatureLineageError, match="cross source lineage"):
+        _return(
+            "return_60s",
+            _index((first, mismatched)),
+            "fx:aud-usd",
+            end,
+            end + timedelta(minutes=1),
+            foundation,
+            _RowCache(),
+        )
+
+
+def test_source_active_index_matches_scan_and_counts_bounded_work() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    intervals: dict[str, tuple[tuple[datetime, datetime], ...]] = {
+        "fx:aud-usd": (
+            (start, start + timedelta(minutes=2)),
+            (start + timedelta(minutes=3), start + timedelta(minutes=5)),
+        )
+    }
+    index = _build_source_active_index(intervals)
+    cases = (
+        (start + timedelta(minutes=1), start + timedelta(minutes=1)),
+        (start + timedelta(minutes=2), start + timedelta(minutes=2)),
+        (start + timedelta(minutes=3), start + timedelta(minutes=3)),
+        (start + timedelta(minutes=4), start + timedelta(minutes=4)),
+        (start + timedelta(minutes=5), start + timedelta(minutes=5)),
+        (start + timedelta(minutes=3), start + timedelta(minutes=2)),
+    )
+    for interval_end, cutoff in cases:
+        expected_start = interval_end - timedelta(minutes=1)
+        expected = interval_end <= cutoff and any(
+            active_start <= expected_start and interval_end <= active_end
+            for active_start, active_end in intervals["fx:aud-usd"]
+        )
+        assert (
+            _source_active(index, "fx:aud-usd", interval_end, cutoff, timedelta(minutes=1))
+            is expected
+        )
+    assert index.index_build_count == 1
+    assert index.indexed_interval_count == 2
+    assert index.lookup_count == len(cases)
+    assert index.interval_comparisons == len(cases) - 1
+    fixture_foundation = _minimal_foundation(start, start + timedelta(minutes=5), active=intervals)
+    cached_index = _source_active_index_for(fixture_foundation)
+    assert _source_active_index_for(fixture_foundation) is cached_index
+    assert cached_index.index_build_count == 1
+
+    with pytest.raises(ValueError, match="not ordered"):
+        _build_source_active_index(
+            {"fx:aud-usd": (intervals["fx:aud-usd"][1], intervals["fx:aud-usd"][0])}
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        _build_source_active_index(
+            {
+                "fx:aud-usd": (
+                    (start, start + timedelta(minutes=2)),
+                    (start + timedelta(minutes=1), start + timedelta(minutes=3)),
+                )
+            }
+        )
 
 
 def _availability_evidence(
@@ -719,6 +863,41 @@ def test_pooled_universes_use_fixed_leave_one_out_and_group_denominators() -> No
     assert no_group is None and lineage == ()
 
 
+def test_empty_pooled_context_is_unavailable_at_zero_threshold() -> None:
+    config = _wider_target_experiment()
+    thresholds = dict(config.feature_coverage_thresholds)
+    thresholds[FeatureFamily.POOLED_CROSS_ASSET] = 0.0
+    config = replace(config, feature_coverage_thresholds=thresholds)
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] = {
+        instrument: ((start, start + timedelta(minutes=2)),)
+        for instrument in config.ordered_instruments
+    }
+    foundation = _minimal_foundation(
+        start,
+        start + timedelta(minutes=2),
+        config.ordered_instruments,
+        active=active,
+    )
+    panel = cast(
+        PanelRow,
+        SimpleNamespace(
+            instrument_id=config.target_instruments[0],
+            latest_feature_bar_end=start + timedelta(minutes=2),
+            feature_data_asof=start + timedelta(minutes=3),
+        ),
+    )
+    value, lineage = _context(
+        "loo_mean_return_60s",
+        panel,
+        _index(()),
+        config,
+        foundation,
+        _RowCache(),
+    )
+    assert value is None and lineage == ()
+
+
 def test_cross_market_counts_use_leave_one_out_model_universe() -> None:
     config = _wider_target_experiment()
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
@@ -1039,6 +1218,246 @@ def _write_store(
     return store, manifest, rows
 
 
+def _feature_receipt_fixture(
+    root: Path,
+) -> tuple[Any, Any, Any, Any, Any, Path]:
+    store, manifest, rows = _write_store(root)
+    config = cast(
+        Any,
+        SimpleNamespace(
+            configuration_id=manifest.experiment_configuration_id,
+            market_data_source_class=manifest.market_data_source_class,
+            evidence_class=manifest.evidence_class,
+        ),
+    )
+    foundation = cast(
+        Any,
+        SimpleNamespace(
+            foundation_id="f" * 64,
+            closure_id="e" * 64,
+            verification_id="d" * 64,
+            promotion_id=None,
+        ),
+    )
+    receipt = r2_verification.build_r2_feature_verification_receipt(manifest, foundation, config)
+    receipt_path = root / "receipt.json"
+    r2_verification.write_r2_feature_verification_receipt(receipt_path, receipt)
+    return store, manifest, rows, config, foundation, receipt_path
+
+
+def test_feature_receipt_auth_rejects_missing_mismatched_and_tampered_inputs(
+    tmp_path: Path,
+) -> None:
+    _store, manifest, _rows, config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            tmp_path / "missing.json", manifest, foundation, config
+        )
+
+    mismatched = replace(manifest, semantic_dataset_id="0" * 64)
+    with pytest.raises(ValueError, match="semantic_dataset_id"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            receipt_path, mismatched, foundation, config
+        )
+
+    tampered = json.loads(receipt_path.read_text(encoding="utf-8"))
+    tampered["manifest_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="verification ID"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            receipt_path, manifest, foundation, config
+        )
+
+
+def test_feature_receipt_loading_skips_parent_row_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _store, manifest, rows, config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+    monkeypatch.setattr(
+        r2_verification,
+        "_foundation_inputs",
+        lambda _verified: cast(Any, SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        r2_verification,
+        "verify_raw_feature_manifest_bindings",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def unexpected_parent_replay(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("feature receipt path replayed the parent transformation")
+
+    monkeypatch.setattr(r2_verification, "verify_raw_feature_rows", unexpected_parent_replay)
+    datasets, manifests, receipts = r2_verification._load_feature_datasets(
+        verified=cast(Any, object()),
+        experiment=config,
+        feature_manifest_paths={"fixture": tmp_path / "features.json"},
+        feature_receipt_paths={"fixture": receipt_path},
+        root=tmp_path,
+        clock=FixedClock(),
+        foundation_authority=foundation,
+    )
+
+    assert tuple(datasets["fixture"].rows) == rows
+    assert manifests["fixture"].semantic_dataset_id == manifest.semantic_dataset_id
+    assert receipts["fixture"].verification_id
+
+
+def test_compact_feature_binding_authenticates_receipt_metadata(
+    tmp_path: Path,
+) -> None:
+    store, manifest, _rows, _config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+    dataset = store.load(Path("features.json"))
+    receipt = R2FeatureVerificationReceipt.from_json(json.loads(receipt_path.read_bytes()))
+    payload = r2_verification._dataset_payload(dataset, manifest, receipt=receipt, compact=True)
+    receipt_authority = {
+        "contract": receipt.CONTRACT,
+        "verification_id": receipt.verification_id,
+        "manifest_id": receipt.manifest_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "semantic_dataset_id": receipt.semantic_dataset_id,
+        "foundation_verification_id": receipt.foundation_verification_id,
+        "completed_checks": list(receipt.completed_checks),
+    }
+    descriptor: dict[str, object] = {
+        "foundation_authority": {
+            "foundation_id": foundation.foundation_id,
+            "closure_id": foundation.closure_id,
+            "verification_id": foundation.verification_id,
+            "promotion_id": foundation.promotion_id,
+        },
+        "runtime_inputs": {
+            "feature_manifests": {"fixture": str(tmp_path / "features.json")},
+            "feature_receipts": {"fixture": str(receipt_path)},
+        },
+        "feature_verification_receipts": {"fixture": receipt_authority},
+    }
+    reference = ArtifactReference(
+        dataset.CONTRACT,
+        dataset.dataset_id,
+        "features.json",
+        "0" * 64,
+    )
+    r2_bundle_runtime._verify_feature_manifest_binding(tmp_path, reference, payload, descriptor)
+
+    missing_receipt = {
+        **descriptor,
+        "runtime_inputs": {
+            **cast(dict[str, object], descriptor["runtime_inputs"]),
+            "feature_receipts": {},
+        },
+    }
+    with pytest.raises(ValueError, match="no receipt locator"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, missing_receipt
+        )
+
+    mismatched_authority = {
+        **descriptor,
+        "feature_verification_receipts": {
+            "fixture": {**receipt_authority, "verification_id": "0" * 64}
+        },
+    }
+    with pytest.raises(ValueError, match="receipt authority differs"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, mismatched_authority
+        )
+
+    def receipt_with(
+        *,
+        verifier_contract: str = receipt.verifier_contract,
+        completed_checks: tuple[str, ...] = receipt.completed_checks,
+    ) -> R2FeatureVerificationReceipt:
+        return R2FeatureVerificationReceipt.create(
+            manifest_contract=receipt.manifest_contract,
+            manifest_schema_version=receipt.manifest_schema_version,
+            manifest_id=receipt.manifest_id,
+            manifest_sha256=receipt.manifest_sha256,
+            semantic_dataset_id=receipt.semantic_dataset_id,
+            feature_set_name=receipt.feature_set_name,
+            feature_set_id=receipt.feature_set_id,
+            raw_feature_schema_id=receipt.raw_feature_schema_id,
+            feature_schema=receipt.feature_schema,
+            observation_dataset_id=receipt.observation_dataset_id,
+            panel_dataset_id=receipt.panel_dataset_id,
+            target_dataset_id=receipt.target_dataset_id,
+            fold_dataset_id=receipt.fold_dataset_id,
+            experiment_configuration_id=receipt.experiment_configuration_id,
+            source_class=receipt.source_class,
+            evidence_class=receipt.evidence_class,
+            holdout_excluded=receipt.holdout_excluded,
+            foundation_semantic_id=receipt.foundation_semantic_id,
+            foundation_closure_id=receipt.foundation_closure_id,
+            foundation_verification_id=receipt.foundation_verification_id,
+            foundation_promotion_id=receipt.foundation_promotion_id,
+            verifier_contract=verifier_contract,
+            verifier_version=receipt.verifier_version,
+            completed_checks=completed_checks,
+        )
+
+    for suffix, contract, checks in (
+        ("custom", "custom-verifier", receipt.completed_checks),
+        ("incomplete", receipt.verifier_contract, receipt.completed_checks[:-1]),
+    ):
+        unsupported_receipt = receipt_with(
+            verifier_contract=contract,
+            completed_checks=checks,
+        )
+        unsupported_path = tmp_path / f"{suffix}-receipt.json"
+        r2_verification.write_r2_feature_verification_receipt(unsupported_path, unsupported_receipt)
+        unsupported_authority = {
+            **receipt_authority,
+            "verification_id": unsupported_receipt.verification_id,
+            "completed_checks": list(unsupported_receipt.completed_checks),
+        }
+        unsupported_descriptor = {
+            **descriptor,
+            "runtime_inputs": {
+                **cast(dict[str, object], descriptor["runtime_inputs"]),
+                "feature_receipts": {"fixture": str(unsupported_path)},
+            },
+            "feature_verification_receipts": {"fixture": unsupported_authority},
+        }
+        with pytest.raises(ValueError, match="verifier contract or checks"):
+            r2_bundle_runtime._verify_feature_manifest_binding(
+                tmp_path, reference, payload, unsupported_descriptor
+            )
+
+    other_foundation = cast(
+        Any,
+        SimpleNamespace(
+            foundation_id=foundation.foundation_id,
+            closure_id=foundation.closure_id,
+            verification_id="c" * 64,
+            promotion_id=None,
+        ),
+    )
+    other_receipt = r2_verification.build_r2_feature_verification_receipt(
+        manifest, other_foundation, _config
+    )
+    other_receipt_path = tmp_path / "other-receipt.json"
+    r2_verification.write_r2_feature_verification_receipt(other_receipt_path, other_receipt)
+    cross_foundation = {
+        **descriptor,
+        "runtime_inputs": {
+            **cast(dict[str, object], descriptor["runtime_inputs"]),
+            "feature_receipts": {"fixture": str(other_receipt_path)},
+        },
+        "feature_verification_receipts": {
+            "fixture": {
+                **receipt_authority,
+                "verification_id": other_receipt.verification_id,
+                "foundation_verification_id": other_receipt.foundation_verification_id,
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="foundation authority"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, cross_foundation
+        )
+
+
 def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(
     tmp_path: Path,
 ) -> None:
@@ -1068,6 +1487,30 @@ def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(
     assert other_store.verify(Path("features-other.json")) == physical
     assert physical.semantic_dataset_id == manifest.semantic_dataset_id
     assert physical.manifest_sha256 != manifest.manifest_sha256
+
+
+def test_parquet_chunks_bisect_on_encoded_bytes_and_fail_for_oversized_single_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_size = r2_parquet._parquet_encoded_size
+
+    def adverse_size(frame: pl.DataFrame) -> int:
+        if "target_instrument_id" in frame.columns and frame.height > 1:
+            return r2_parquet._MAX_CHUNK_BYTES + 1
+        return real_size(frame)
+
+    monkeypatch.setattr(r2_parquet, "_parquet_encoded_size", adverse_size)
+    store, manifest, rows = _write_store(tmp_path / "split", count=4, chunk_rows=4)
+    assert tuple(chunk.row_count for chunk in manifest.chunks) == (1, 1, 1, 1)
+    assert tuple(store.iter_rows(Path("features.json"))) == rows
+
+    monkeypatch.setattr(
+        r2_parquet,
+        "_parquet_encoded_size",
+        lambda _frame: r2_parquet._MAX_CHUNK_BYTES + 1,
+    )
+    with pytest.raises(ValueError, match="single-row chunk exceeds"):
+        _write_store(tmp_path / "oversized", count=1, chunk_rows=1)
 
 
 def test_parquet_manifest_chunk_value_lineage_and_schema_tampering_fail_closed(
@@ -1357,6 +1800,41 @@ async def test_confirmatory_feature_loading_uses_one_outcome_blind_source_author
             holdout_target_source_path=None,
             experiment=config,
         )
+
+
+@pytest.mark.asyncio
+async def test_cli_feature_build_persists_ibkr_source_class(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = replace(
+        experiment(),
+        market_data_source_class=cli.IBKR_HISTORICAL_SOURCE,
+        evidence_class=EvidenceClass.CONFIRMATORY,
+    )
+    foundation = _replay_foundation(config)
+    monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
+    monkeypatch.setattr(cli, "_load_r2_feature_foundation", AsyncMock(return_value=foundation))
+    settings = Settings(research_root=tmp_path, image="test-image")
+
+    await cli._materialise_r2_features(
+        settings,
+        FixedClock(),
+        foundation_bundle_path=Path("foundation.json"),
+        foundation_receipt_path=Path("foundation-receipt.json"),
+        foundation_promotion_path=Path("foundation-promotion.json"),
+        holdout_target_source_path=Path("target-source.json"),
+        experiment_path=Path("experiment.json"),
+        feature_set_name="L0",
+        output_path=Path("ibkr-features.json"),
+    )
+
+    assert json.loads(capsys.readouterr().out)["rows"] == 1
+    manifest = ParquetR2FeatureStore(tmp_path, FixedClock()).read_manifest(
+        Path("ibkr-features.json")
+    )
+    assert manifest.market_data_source_class is cli.IBKR_HISTORICAL_SOURCE
 
 
 def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(

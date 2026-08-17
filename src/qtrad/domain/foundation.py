@@ -1,7 +1,9 @@
 """Causal foundation configuration, panels and frozen midpoint targets."""
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import json
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import InitVar, dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -62,6 +64,7 @@ PANEL_DATASET_CONTRACT = "qtrad-research-panel-v1"
 TARGET_DATASET_CONTRACT = "qtrad-research-targets-v1"
 _MINUTE = timedelta(minutes=1)
 _HORIZONS = frozenset(timedelta(minutes=minutes) for minutes in (5, 15, 30, 60))
+_TARGET_DATASET_VERIFIED = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,18 +394,13 @@ class TargetRow:
     upper_log_excursion: float | None
     lower_log_excursion: float | None
     excursion_disposition: ExcursionDisposition
+    _target_id: str = dataclass_field(init=False, repr=False, compare=False)
 
     CONTRACT: ClassVar[str] = TARGET_DATASET_CONTRACT
 
     @property
     def target_id(self) -> str:
-        return target_identity(
-            instrument_id=self.instrument_id,
-            decision_time=self.decision_time,
-            horizon=self.horizon,
-            target_basis=self.target_basis,
-            target_revision_policy=self.target_revision_policy,
-        )
+        return self._target_id
 
     def __post_init__(self) -> None:
         for value, field in (
@@ -410,7 +408,7 @@ class TargetRow:
             (self.target_start_time, "target start_time"),
             (self.target_end_time, "target end_time"),
             (self.target_freeze_at, "target freeze_at"),
-            (self.target_available_at, "target available_at"),
+            (self.target_available_at, "target availability"),
         ):
             require_utc(value, field)
         if (
@@ -429,6 +427,17 @@ class TargetRow:
                 raise ValueError("valid excursions require both path values")
             if not isfinite(self.upper_log_excursion) or not isfinite(self.lower_log_excursion):
                 raise ValueError("excursions must be finite")
+        object.__setattr__(
+            self,
+            "_target_id",
+            target_identity(
+                instrument_id=self.instrument_id,
+                decision_time=self.decision_time,
+                horizon=self.horizon,
+                target_basis=self.target_basis,
+                target_revision_policy=self.target_revision_policy,
+            ),
+        )
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -457,24 +466,65 @@ class TargetRow:
         }
 
 
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode()
+
+
+def _target_dataset_chunks(
+    rows: Sequence[TargetRow],
+    *,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+) -> Iterator[bytes]:
+    yield b'{"contract":'
+    yield _json_bytes(TARGET_DATASET_CONTRACT)
+    yield b',"foundation_configuration_id":'
+    yield _json_bytes(foundation_configuration_id)
+    yield b',"observation_dataset_id":'
+    yield _json_bytes(observation_dataset_id)
+    yield b',"rows":['
+    for index, row in enumerate(rows):
+        if index:
+            yield b","
+        yield _json_bytes(row.as_json())
+    yield b'],"schema_version":'
+    yield _json_bytes(1)
+    yield b"}"
+
+
+def _target_dataset_identity(
+    rows: Sequence[TargetRow],
+    *,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+) -> str:
+    digest = sha256()
+    for chunk in _target_dataset_chunks(
+        rows,
+        observation_dataset_id=observation_dataset_id,
+        foundation_configuration_id=foundation_configuration_id,
+    ):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class TargetDataset:
     rows: tuple[TargetRow, ...]
     observation_dataset_id: str
     foundation_configuration_id: str
     dataset_id: str
+    _verified: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verified: object | None) -> None:
         if tuple(sorted(self.rows, key=_target_key)) != self.rows:
             raise ValueError("target rows must use deterministic ordering")
-        expected = _hash_json(
-            {
-                "contract": TARGET_DATASET_CONTRACT,
-                "schema_version": 1,
-                "observation_dataset_id": self.observation_dataset_id,
-                "foundation_configuration_id": self.foundation_configuration_id,
-                "rows": [row.as_json() for row in self.rows],
-            }
+        if _verified is _TARGET_DATASET_VERIFIED:
+            return
+        expected = _target_dataset_identity(
+            self.rows,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
         )
         if self.dataset_id != expected:
             raise ValueError("target dataset ID does not match its semantic rows")
@@ -490,6 +540,30 @@ class TargetDataset:
         }
 
     @classmethod
+    def _from_verified_rows(
+        cls,
+        rows: Sequence[TargetRow],
+        *,
+        observation_dataset_id: str,
+        foundation_configuration_id: str,
+        dataset_id: str,
+    ) -> "TargetDataset":
+        expected = _target_dataset_identity(
+            rows,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+        )
+        if dataset_id != expected:
+            raise ValueError("target dataset ID does not authenticate its rows")
+        return cls(
+            rows=tuple(rows),
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+            dataset_id=dataset_id,
+            _verified=_TARGET_DATASET_VERIFIED,
+        )
+
+    @classmethod
     def create(
         cls,
         rows: Sequence[TargetRow],
@@ -498,19 +572,17 @@ class TargetDataset:
         foundation_configuration_id: str,
     ) -> "TargetDataset":
         ordered = tuple(sorted(rows, key=_target_key))
+        dataset_id = _target_dataset_identity(
+            ordered,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+        )
         return cls(
             rows=ordered,
             observation_dataset_id=observation_dataset_id,
             foundation_configuration_id=foundation_configuration_id,
-            dataset_id=_hash_json(
-                {
-                    "contract": TARGET_DATASET_CONTRACT,
-                    "schema_version": 1,
-                    "observation_dataset_id": observation_dataset_id,
-                    "foundation_configuration_id": foundation_configuration_id,
-                    "rows": [row.as_json() for row in ordered],
-                }
-            ),
+            dataset_id=dataset_id,
+            _verified=_TARGET_DATASET_VERIFIED,
         )
 
 
@@ -604,8 +676,6 @@ def target_identity(
 
 def _hash_json(value: object) -> str:
     canonical = to_json_value(value)
-    import json
-
     return sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

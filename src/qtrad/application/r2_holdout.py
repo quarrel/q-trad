@@ -18,7 +18,7 @@ from typing import Any, cast
 import numpy as np
 
 from qtrad.domain.events import JsonValue
-from qtrad.domain.foundation import TARGET_DATASET_CONTRACT, TargetDataset, TargetRow
+from qtrad.domain.foundation import TargetDataset, TargetRow
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import R2_HOLDOUT_SOURCE_BINDING_CONTRACT, R2OofBundle
 from qtrad.domain.r2_evaluation import SelectionDecision, SelectionManifest
@@ -47,12 +47,12 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutForecastRow,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
-    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
-    R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    holdout_opportunity_digest,
+    holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_models import (
     PreprocessingFit,
@@ -363,17 +363,6 @@ class FinalTrainingRow:
             raise ValueError("final-training target must be finite")
 
 
-def _target_dataset_payload(dataset: TargetDataset) -> dict[str, JsonValue]:
-    return {
-        "contract": TARGET_DATASET_CONTRACT,
-        "schema_version": 1,
-        "dataset_id": dataset.dataset_id,
-        "observation_dataset_id": dataset.observation_dataset_id,
-        "foundation_configuration_id": dataset.foundation_configuration_id,
-        "rows": [row.as_json() for row in dataset.rows],
-    }
-
-
 def _require_shared_opportunities(
     selection: R2HoldoutSelectionManifest,
     opportunities: Sequence[HoldoutTargetOpportunity],
@@ -381,37 +370,17 @@ def _require_shared_opportunities(
     primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
     if not isinstance(primary_horizon, int) or primary_horizon <= 0:
         raise ValueError("selection is missing its primary target horizon")
-    ordered = tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
-    if len({item.opportunity_id for item in ordered}) != len(ordered):
-        raise ValueError("holdout opportunities must be unique")
-    expected = {
-        opportunity_id: (
-            target_id,
-            instrument_id,
-            decision_time,
-            horizon_seconds,
-            disposition,
-        )
-        for (
-            opportunity_id,
-            target_id,
-            instrument_id,
-            decision_time,
-            horizon_seconds,
-            disposition,
-        ) in (selection.holdout_opportunity_registry)
-    }
-    actual = {
-        item.opportunity_id: (
-            item.target_id,
-            item.instrument_id,
-            item.decision_time,
-            item.target_horizon_seconds,
-            item.disposition,
-        )
-        for item in ordered
-    }
-    if actual != expected:
+    ordered = tuple(opportunities)
+    expected_count = selection.evaluation_policy.get("holdout_opportunity_count")
+    expected_digest = selection.evaluation_policy.get("holdout_opportunity_digest")
+    if (
+        isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or expected_count <= 0
+        or not isinstance(expected_digest, str)
+    ):
+        raise ValueError("selection is missing its compact opportunity summary")
+    if len(ordered) != expected_count or holdout_opportunity_digest(ordered) != expected_digest:
         raise ValueError("holdout opportunities differ from the frozen shared registry")
     if any(
         item.target_horizon_seconds != primary_horizon
@@ -620,8 +589,6 @@ def freeze_holdout_selection(
     evaluation_policy: Mapping[str, JsonValue] | None = None,
     confirmatory_authority: VerifiedConfirmatoryHoldoutAuthority | None = None,
     holdout_target_source: R2HoldoutTargetSource,
-    holdout_opportunity_registry: R2HoldoutOpportunityRegistry,
-    pre_holdout_projection: R2HoldoutTargetProjection,
 ) -> R2HoldoutSelectionManifest:
     """Create PR A from an independently verified, still-pending R2.F1 selection."""
     evaluated = _selection_values(prior_selection)
@@ -848,63 +815,25 @@ def freeze_holdout_selection(
         or holdout_target_source.target_instruments != tuple(verified_experiment.target_instruments)
     ):
         raise ValueError("outcome-blind target source differs from the verified experiment")
-    if pre_holdout_projection.primary_horizon_seconds != primary_horizon:
-        raise ValueError("target projection differs from the frozen primary horizon")
-    if pre_holdout_projection.holdout_start != prior_selection.holdout_range[0]:
-        raise ValueError("target projection differs from the frozen holdout boundary")
-    pre_holdout_projection.verify_source(holdout_target_source)
-    if (
-        holdout_opportunity_registry.primary_horizon_seconds != primary_horizon
-        or holdout_opportunity_registry.holdout_range != prior_selection.holdout_range
-    ):
-        raise ValueError("opportunity registry differs from the frozen holdout policy")
-    holdout_opportunity_registry.verify_source(holdout_target_source)
-    frozen_opportunity_registry = tuple(
-        (
-            item.opportunity_id,
-            item.target_id,
-            item.instrument_id,
-            item.decision_time,
-            item.target_horizon_seconds,
-            item.disposition,
-        )
-        for item in holdout_opportunity_registry.opportunities
-    )
+    if holdout_target_source.primary_horizon_seconds != primary_horizon:
+        raise ValueError("target source differs from the frozen primary horizon")
+    if holdout_target_source.holdout_range != prior_selection.holdout_range:
+        raise ValueError("target source differs from the frozen holdout boundary")
+    (
+        pre_holdout_projection_id,
+        opportunity_registry_id,
+        opportunity_count,
+        opportunity_digest,
+    ) = holdout_selection_compact_bindings(holdout_target_source)
     frozen_evaluation_policy["target_dataset_id"] = holdout_target_source.source_target_dataset_id
     frozen_evaluation_policy["holdout_target_source_id"] = holdout_target_source.source_id
-    frozen_evaluation_policy["holdout_target_source_artifact"] = holdout_target_source.as_json()
     frozen_evaluation_policy["pre_holdout_target_dataset_id"] = (
-        pre_holdout_projection.projected_target_dataset.dataset_id
+        holdout_target_source.pre_holdout_target_dataset.dataset_id
     )
-    frozen_evaluation_policy["pre_holdout_target_dataset"] = _target_dataset_payload(
-        pre_holdout_projection.projected_target_dataset
-    )
-    frozen_evaluation_policy["pre_holdout_projection_id"] = pre_holdout_projection.projection_id
-    frozen_evaluation_policy["pre_holdout_projection"] = pre_holdout_projection.as_json()
-    frozen_evaluation_policy["holdout_opportunity_registry_id"] = (
-        holdout_opportunity_registry.registry_id
-    )
-    frozen_evaluation_policy["holdout_opportunity_registry_artifact"] = (
-        holdout_opportunity_registry.as_json()
-    )
-    frozen_evaluation_policy["holdout_opportunity_registry"] = [
-        [
-            opportunity_id,
-            target_id,
-            instrument_id,
-            decision_time.isoformat(),
-            horizon_seconds,
-            disposition.value,
-        ]
-        for (
-            opportunity_id,
-            target_id,
-            instrument_id,
-            decision_time,
-            horizon_seconds,
-            disposition,
-        ) in (frozen_opportunity_registry)
-    ]
+    frozen_evaluation_policy["pre_holdout_projection_id"] = pre_holdout_projection_id
+    frozen_evaluation_policy["holdout_opportunity_registry_id"] = opportunity_registry_id
+    frozen_evaluation_policy["holdout_opportunity_count"] = opportunity_count
+    frozen_evaluation_policy["holdout_opportunity_digest"] = opportunity_digest
 
     if tuple(sorted(set(controls))) != controls:
         raise ValueError("G2 control configuration IDs must be unique and ordered")
@@ -950,7 +879,6 @@ def freeze_holdout_selection(
         questions=questions,
         holdout_range=prior_selection.holdout_range,
         experiment_count=len(evaluated),
-        holdout_opportunity_registry=frozen_opportunity_registry,
         configuration_registry=frozen_configuration_registry,
         runtime_identities=runtime_identities,
         frozen_metadata=frozen_metadata,
@@ -1236,7 +1164,6 @@ def _failed_final_fit(
     disposition: FinalFitDisposition,
     reason: str,
     feature_count: int,
-    training_evidence: Sequence[FinalTrainingRow] = (),
     training_feature_dataset_id: str | None = None,
     training_target_dataset_id: str | None = None,
     target_instrument_id: str | None = None,
@@ -1259,9 +1186,6 @@ def _failed_final_fit(
     )
     fit_preprocessing = dict(
         preprocessing or {"feature_count": feature_count, "policy_id": policy.policy_id}
-    )
-    fit_preprocessing.setdefault(
-        "training_rows", [_training_row_json(row) for row in training_evidence]
     )
     if training_feature_dataset_id is None or training_target_dataset_id is None:
         raise ValueError("final fit is missing authenticated training child IDs")
@@ -1313,18 +1237,6 @@ def _failed_final_fit(
     )
 
 
-def _training_row_json(row: FinalTrainingRow) -> dict[str, JsonValue]:
-    return {
-        "target_id": row.target_id,
-        "instrument_id": row.instrument_id,
-        "decision_time": row.decision_time.isoformat(),
-        "target_end_time": (row.target_end_time or row.decision_time).isoformat(),
-        "target_available_at": row.target_available_at.isoformat(),
-        "features": list(row.features),
-        "target": row.target,
-    }
-
-
 def _final_disposition(value: object) -> FinalFitDisposition:
     try:
         return FinalFitDisposition(str(getattr(value, "value", value)))
@@ -1357,7 +1269,6 @@ def _preprocessing_payload(
     schema: R2PreprocessingSchema,
     inner: PreprocessingFit | None,
     outer: PreprocessingFit | None,
-    rows: Sequence[FinalTrainingRow],
     identity_order: Sequence[str],
     solver: str,
     weighting_policy: str,
@@ -1373,7 +1284,6 @@ def _preprocessing_payload(
         "schema": schema.as_json(),
         "inner": inner.as_json() if inner is not None else None,
         "outer": outer.as_json() if outer is not None else None,
-        "training_rows": [_training_row_json(row) for row in rows],
         "training_feature_dataset_id": training_feature_dataset_id,
         "training_target_dataset_id": training_target_dataset_id,
         "training_target_source_dataset_id": training_target_source_dataset_id,
@@ -1552,7 +1462,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             forced_failure=True,
         )
     if not ordered:
@@ -1574,7 +1483,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
         )
     schema = derive_r2_preprocessing_schema(training_feature_dataset.feature_schema)
     r2_rows = tuple(_as_r2_training_row(row) for row in ordered)
@@ -1673,7 +1581,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
         )
     inner_fit_ids = tuple(selected.inner_fit_target_ids)
     inner_validation_ids = tuple(selected.inner_validation_target_ids)
@@ -1691,7 +1598,6 @@ def fit_final_ridge(
         schema=schema,
         inner=selected.inner_preprocessing,
         outer=selected.outer_preprocessing,
-        rows=ordered,
         identity_order=identity_order,
         solver=solver,
         weighting_policy=weighting_policy,
@@ -1734,7 +1640,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )
@@ -1760,7 +1665,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )
@@ -1807,7 +1711,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )
@@ -1971,10 +1874,10 @@ def build_holdout_forecasts(
         feature_datasets=feature_datasets,
     )
     expected_shared_opportunities = tuple(
-        sorted(item[0] for item in selection.holdout_opportunity_registry)
+        sorted(item.opportunity_id for item in ordered_opportunities)
     )
     expected_shared_pairs = tuple(
-        sorted((item[0], item[1]) for item in selection.holdout_opportunity_registry)
+        sorted((item.opportunity_id, item.target_id) for item in ordered_opportunities)
     )
     for dataset in feature_by_configuration.values():
         if dataset is None:
@@ -2355,12 +2258,20 @@ def seal_holdout_forecasts(
         for configuration_id in expected_configurations
         if registry_by_configuration[configuration_id] is not ModelFamily.ZERO_RETURN
     }
-    expected_shared_opportunities = tuple(
-        sorted(item[0] for item in selection.holdout_opportunity_registry)
-    )
-    expected_shared_pairs = tuple(
-        sorted((item[0], item[1]) for item in selection.holdout_opportunity_registry)
-    )
+    feature_opportunity_sets = {
+        (dataset.expected_opportunity_ids, dataset.opportunity_target_ids)
+        for dataset in feature_by_configuration.values()
+        if dataset is not None
+    }
+    if len(feature_opportunity_sets) > 1:
+        raise ValueError("feature datasets disagree on the shared opportunity registry")
+    if feature_opportunity_sets:
+        expected_shared_opportunities, expected_shared_pairs = next(iter(feature_opportunity_sets))
+    elif forecasts:
+        expected_shared_opportunities = forecasts[0].expected_opportunity_ids
+        expected_shared_pairs = forecasts[0].opportunity_target_ids
+    else:
+        raise ValueError("seal requires a shared opportunity registry")
     fit_by_configuration: dict[str, tuple[R2FinalFit, ...]] = {}
     for fit in fits:
         if fit.selection_manifest_id != selection.manifest_id:

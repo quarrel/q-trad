@@ -1,5 +1,6 @@
 """Pure R1.B builders for the causal panel and frozen midpoint targets."""
 
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
@@ -34,10 +35,25 @@ def build_asof_panel(
     """Build every configured MID cell using only revisions visible at its cutoff."""
 
     _require_dataset(dataset, config)
-    source_active_intervals = source_active_intervals or {}
+    source_active_intervals = (
+        _normalise_active_intervals(source_active_intervals)
+        if source_active_intervals is not None
+        else None
+    )
     index = _observation_index(dataset.rows)
     rows: list[PanelRow] = []
-    for decision_time in _grid_times(config.range_start, config.range_end, config.grid_resolution):
+    decision_times = (
+        _grid_times(config.range_start, config.range_end, config.grid_resolution)
+        if source_active_intervals is None
+        else _active_grid_times(
+            source_active_intervals,
+            config.ordered_instruments,
+            config.range_start,
+            config.range_end,
+            config.grid_resolution,
+        )
+    )
+    for decision_time in decision_times:
         feature_data_asof = decision_time
         latest_feature_bar_end = decision_time - config.selected_feature_lag
         for instrument_id in config.ordered_instruments:
@@ -106,7 +122,7 @@ def build_asof_panel(
                                 interval_end=latest_feature_bar_end,
                                 feature_data_asof=feature_data_asof,
                                 gaps=gaps,
-                                source_active_intervals=source_active_intervals,
+                                source_active_intervals=source_active_intervals or {},
                             ),
                         )
                     )
@@ -117,13 +133,65 @@ def build_asof_panel(
     )
 
 
+def _normalise_active_intervals(
+    intervals_by_instrument: Mapping[str, Sequence[tuple[datetime, datetime]]],
+) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+    """Merge overlapping or touching half-open source-active intervals once per instrument."""
+    normalised: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
+    for instrument_id, raw_intervals in intervals_by_instrument.items():
+        merged: list[tuple[datetime, datetime]] = []
+        for interval_start, interval_end in sorted(raw_intervals):
+            if interval_end <= interval_start:
+                continue
+            if merged and interval_start <= merged[-1][1]:
+                previous_start, previous_end = merged[-1]
+                merged[-1] = (previous_start, max(previous_end, interval_end))
+            else:
+                merged.append((interval_start, interval_end))
+        normalised[instrument_id] = tuple(merged)
+    return normalised
+
+
+def _active_grid_times(
+    intervals_by_instrument: Mapping[str, Sequence[tuple[datetime, datetime]]],
+    instruments: Sequence[str],
+    start: datetime,
+    end: datetime,
+    resolution: timedelta,
+) -> tuple[datetime, ...]:
+    """Return configured-grid decision times covered by at least one active interval."""
+    active_times: set[datetime] = set()
+    for instrument_id in instruments:
+        for interval_start, interval_end in intervals_by_instrument.get(instrument_id, ()):
+            window_start = max(start, interval_start)
+            window_end = min(end, interval_end)
+            if window_start >= window_end:
+                continue
+            steps = (window_start - start) // resolution
+            current = start + steps * resolution
+            if current < window_start:
+                current += resolution
+            while current < window_end:
+                active_times.add(current)
+                current += resolution
+    return tuple(sorted(active_times))
+
+
 def build_frozen_targets(
     dataset: ObservationDataset,
     config: FoundationConfig,
     *,
     horizons: Sequence[timedelta] | None = None,
+    source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]] | None = None,
 ) -> TargetDataset:
-    """Build frozen endpoint returns directly from observations, never from the panel."""
+    """Build frozen endpoint returns directly from observations, never from the panel.
+
+    When active intervals are supplied, every grid-aligned decision inside an instrument's
+    active interval is emitted. Missing bars, including an end bar after a late session close,
+    remain explicit invalid target rows; times with no active interval are not opportunities.
+    The interval-aware path enumerates per-instrument active grid minutes instead of the dense
+    wall-clock range.
+    """
 
     _require_dataset(dataset, config)
     selected_horizons = tuple((config.primary_vertical_horizon,) if horizons is None else horizons)
@@ -142,10 +210,48 @@ def build_frozen_targets(
         for instrument_id in config.ordered_instruments
         if InstrumentRole(config.instrument_roles[instrument_id]) is InstrumentRole.TARGET
     )
-    for decision_time in _grid_times(config.range_start, config.range_end, config.grid_resolution):
-        for instrument_id in target_instruments:
+    active_intervals = (
+        _normalise_active_intervals(source_active_intervals)
+        if source_active_intervals is not None
+        else {}
+    )
+    active_starts = {
+        instrument_id: tuple(start for start, _ in intervals)
+        for instrument_id, intervals in active_intervals.items()
+    }
+    if source_active_intervals is None:
+        decision_times_by_instrument = {
+            instrument_id: _grid_times(
+                config.range_start,
+                config.range_end,
+                config.grid_resolution,
+            )
+            for instrument_id in target_instruments
+        }
+    else:
+        decision_times_by_instrument = {
+            instrument_id: _active_grid_times(
+                active_intervals,
+                (instrument_id,),
+                config.range_start,
+                config.range_end,
+                config.grid_resolution,
+            )
+            for instrument_id in target_instruments
+        }
+    for instrument_id in target_instruments:
+        for decision_time in decision_times_by_instrument[instrument_id]:
             for horizon in selected_horizons:
                 target_end = decision_time + horizon
+                if source_active_intervals is not None:
+                    intervals = active_intervals.get(instrument_id, ())
+                    interval_index = (
+                        bisect_right(active_starts.get(instrument_id, ()), decision_time) - 1
+                    )
+                    if interval_index < 0 or not (
+                        intervals[interval_index][0] <= decision_time < intervals[interval_index][1]
+                    ):
+                        continue
                 freeze_at = target_end + config.target_revision_delay
                 start_row, start_state = _select_target_row(
                     index.get((instrument_id, config.target_basis, decision_time), ()),

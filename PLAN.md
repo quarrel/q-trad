@@ -46,12 +46,17 @@ orders or production broker connectivity.
   representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
   replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
   and the real locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
-  (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
+  (selection-v4 compact authority with source/projection/opportunity binding IDs, ordered opportunity digest and count,
+  outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
   implemented and tested with implementation-only fixtures. The fixture-confirmatory C2a F2/G1 authority
   path and both C2b phases are implemented: verified G1 exclusively authorises unopened G2 preparation,
   create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
   and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
-  No real holdout, research conclusion or effectiveness evidence exists.
+  A tracked, bounded 20-week sparse confirmatory fixture now exercises the exact production CLI and
+  persistence path through Stage 8, four feature verification receipts, OOF build and independent
+  receipt, F2 promotion, compact G1 selection and independently verified unopened G2 preparation.
+  This is implementation-only evidence: no holdout outcome was opened or consumed, and no real
+  research conclusion or effectiveness evidence exists.
 - Before the first real confirmatory R2 run, the active evidence-handoff simplification programme has converged the Stage 6 through R2 boundaries on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
 - PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
