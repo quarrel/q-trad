@@ -183,7 +183,7 @@ def test_ibkr_stage8_source_lineage_is_series_stable() -> None:
 
 def test_source_active_index_matches_scan_and_counts_bounded_work() -> None:
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
-    intervals = {
+    intervals: dict[str, tuple[tuple[datetime, datetime], ...]] = {
         "fx:aud-usd": (
             (start, start + timedelta(minutes=2)),
             (start + timedelta(minutes=3), start + timedelta(minutes=5)),
@@ -869,7 +869,7 @@ def test_empty_pooled_context_is_unavailable_at_zero_threshold() -> None:
     thresholds[FeatureFamily.POOLED_CROSS_ASSET] = 0.0
     config = replace(config, feature_coverage_thresholds=thresholds)
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
-    active = {
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] = {
         instrument: ((start, start + timedelta(minutes=2)),)
         for instrument in config.ordered_instruments
     }

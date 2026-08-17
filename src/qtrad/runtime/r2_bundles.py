@@ -785,6 +785,7 @@ def _verify_feature_manifest_binding(
     declared_manifest = payload.get("manifest")
     if not isinstance(declared_manifest, Mapping):
         raise ValueError(f"R2 feature binding has no manifest payload: {reference.path}")
+    declared_manifest = cast(Mapping[str, object], declared_manifest)
     manifest_payload = manifest.as_json()
     expected_manifest_fields = {
         "contract",

@@ -3294,7 +3294,7 @@ def _expand_evaluation_payload(
             or index != len(grouped[field])
         ):
             raise ValueError("evaluation report part row ordering or shape is invalid")
-        grouped[field].append(dict(value))
+        grouped[field].append(dict(cast(Mapping[str, object], value)))
     expanded = {
         key: value
         for key, value in payload.items()
