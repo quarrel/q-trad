@@ -66,6 +66,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    R2PreHoldoutTargetProjection,
     holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
@@ -893,6 +894,49 @@ def test_causal_metadata_identity_streams_rows(
         }
     )
     assert metadata.dataset_id == expected_id
+
+
+def test_holdout_child_identities_stream_serialised_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_dataset = _target_dataset()
+    pre_projection = R2PreHoldoutTargetProjection.create_from_target_dataset(
+        target_dataset,
+        holdout_start=NOW + timedelta(days=1),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+    )
+    target_source = _target_source()
+    target_projection = R2HoldoutTargetProjection.create_from_source(target_source)
+    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(target_source)
+
+    assert pre_projection.projection_id == holdout_domain._semantic_id(
+        pre_projection.semantic_json()
+    )
+    assert target_projection.projection_id == holdout_domain._semantic_id(
+        target_projection.semantic_json()
+    )
+    assert opportunity_registry.registry_id == holdout_domain._semantic_id(
+        opportunity_registry.semantic_json()
+    )
+
+    payloads = (
+        pre_projection.as_json(),
+        target_projection.as_json(),
+        opportunity_registry.as_json(),
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("identity verification must not materialise semantic JSON")
+
+    monkeypatch.setattr(TargetDataset, "as_json", forbidden)
+    monkeypatch.setattr(R2PreHoldoutTargetProjection, "semantic_json", forbidden)
+    monkeypatch.setattr(R2HoldoutTargetProjection, "semantic_json", forbidden)
+    monkeypatch.setattr(R2HoldoutOpportunityRegistry, "semantic_json", forbidden)
+
+    assert R2PreHoldoutTargetProjection.from_json(payloads[0]) == pre_projection
+    assert R2HoldoutTargetProjection.from_json(payloads[1]) == target_projection
+    assert R2HoldoutOpportunityRegistry.from_json(payloads[2]) == opportunity_registry
 
 
 def test_target_projection_rejects_a_different_source_dataset() -> None:

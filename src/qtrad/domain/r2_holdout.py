@@ -133,6 +133,105 @@ def _target_dataset_chunks(dataset: TargetDataset) -> Iterator[bytes]:
     )
 
 
+def _pre_holdout_projection_identity(
+    *,
+    source_target_dataset_id: str,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+    holdout_start: datetime,
+    primary_horizon_seconds: int,
+    target_instruments: Sequence[str],
+    projection_policy: str,
+    projected_target_dataset: TargetDataset,
+    projected_target_dataset_id: str,
+) -> str:
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "contract": lambda: _single_json(R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT),
+                "foundation_configuration_id": lambda: _single_json(foundation_configuration_id),
+                "holdout_start": lambda: _single_json(holdout_start.isoformat()),
+                "observation_dataset_id": lambda: _single_json(observation_dataset_id),
+                "primary_horizon_seconds": lambda: _single_json(primary_horizon_seconds),
+                "projected_target_dataset": lambda: _target_dataset_chunks(
+                    projected_target_dataset
+                ),
+                "projected_target_dataset_id": lambda: _single_json(projected_target_dataset_id),
+                "projection_policy": lambda: _single_json(projection_policy),
+                "schema_version": lambda: _single_json(1),
+                "source_target_dataset_id": lambda: _single_json(source_target_dataset_id),
+                "target_instruments": lambda: _json_array_chunks(target_instruments, _json_bytes),
+            }
+        )
+    )
+
+
+def _holdout_target_projection_identity(
+    *,
+    source_target_dataset_id: str,
+    source_evidence_id: str,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+    holdout_start: datetime,
+    primary_horizon_seconds: int,
+    projection_policy: str,
+    projected_target_dataset: TargetDataset,
+    projected_target_dataset_id: str,
+) -> str:
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "contract": lambda: _single_json(R2_HOLDOUT_TARGET_PROJECTION_CONTRACT),
+                "foundation_configuration_id": lambda: _single_json(foundation_configuration_id),
+                "holdout_start": lambda: _single_json(holdout_start.isoformat()),
+                "observation_dataset_id": lambda: _single_json(observation_dataset_id),
+                "primary_horizon_seconds": lambda: _single_json(primary_horizon_seconds),
+                "projected_target_dataset": lambda: _target_dataset_chunks(
+                    projected_target_dataset
+                ),
+                "projected_target_dataset_id": lambda: _single_json(projected_target_dataset_id),
+                "projection_policy": lambda: _single_json(projection_policy),
+                "schema_version": lambda: _single_json(1),
+                "source_evidence_id": lambda: _single_json(source_evidence_id),
+                "source_target_dataset_id": lambda: _single_json(source_target_dataset_id),
+            }
+        )
+    )
+
+
+def _opportunity_registry_identity(
+    *,
+    source_target_dataset_id: str,
+    source_evidence_id: str,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+    holdout_range: Sequence[datetime],
+    primary_horizon_seconds: int,
+    opportunities: Iterable[object],
+) -> str:
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "contract": lambda: _single_json(R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT),
+                "foundation_configuration_id": lambda: _single_json(foundation_configuration_id),
+                "holdout_range": lambda: _json_array_chunks(
+                    holdout_range,
+                    lambda item: _json_bytes(cast(datetime, item).isoformat()),
+                ),
+                "observation_dataset_id": lambda: _single_json(observation_dataset_id),
+                "opportunities": lambda: _json_array_chunks(
+                    opportunities,
+                    lambda item: _json_bytes(cast(HoldoutTargetOpportunity, item).as_json()),
+                ),
+                "primary_horizon_seconds": lambda: _single_json(primary_horizon_seconds),
+                "schema_version": lambda: _single_json(1),
+                "source_evidence_id": lambda: _single_json(source_evidence_id),
+                "source_target_dataset_id": lambda: _single_json(source_target_dataset_id),
+            }
+        )
+    )
+
+
 def _target_index_identity(
     *,
     contract: str,
@@ -2626,7 +2725,17 @@ class R2PreHoldoutTargetProjection:
             != self.foundation_configuration_id
         ):
             raise ValueError("pre-holdout projection child lineage is invalid")
-        if self.projection_id != _semantic_id(self.semantic_json()):
+        if self.projection_id != _pre_holdout_projection_identity(
+            source_target_dataset_id=self.source_target_dataset_id,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
+            holdout_start=self.holdout_start,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            target_instruments=self.target_instruments,
+            projection_policy=self.projection_policy,
+            projected_target_dataset=self.projected_target_dataset,
+            projected_target_dataset_id=self.projected_target_dataset_id,
+        ):
             raise ValueError("pre-holdout projection ID does not authenticate its content")
 
     @classmethod
@@ -2645,19 +2754,6 @@ class R2PreHoldoutTargetProjection:
             primary_horizon_seconds=primary_horizon_seconds,
             target_instruments=instruments,
         )
-        unbound = {
-            "contract": cls.CONTRACT,
-            "schema_version": cls.SCHEMA_VERSION,
-            "source_target_dataset_id": source.dataset_id,
-            "observation_dataset_id": source.observation_dataset_id,
-            "foundation_configuration_id": source.foundation_configuration_id,
-            "holdout_start": holdout_start.isoformat(),
-            "primary_horizon_seconds": primary_horizon_seconds,
-            "target_instruments": list(instruments),
-            "projection_policy": cls.POLICY,
-            "projected_target_dataset": projected.as_json(),
-            "projected_target_dataset_id": projected.dataset_id,
-        }
         return cls(
             source_target_dataset_id=source.dataset_id,
             observation_dataset_id=source.observation_dataset_id,
@@ -2668,7 +2764,17 @@ class R2PreHoldoutTargetProjection:
             projection_policy=cls.POLICY,
             projected_target_dataset=projected,
             projected_target_dataset_id=projected.dataset_id,
-            projection_id=_semantic_id(unbound),
+            projection_id=_pre_holdout_projection_identity(
+                source_target_dataset_id=source.dataset_id,
+                observation_dataset_id=source.observation_dataset_id,
+                foundation_configuration_id=source.foundation_configuration_id,
+                holdout_start=holdout_start,
+                primary_horizon_seconds=primary_horizon_seconds,
+                target_instruments=instruments,
+                projection_policy=cls.POLICY,
+                projected_target_dataset=projected,
+                projected_target_dataset_id=projected.dataset_id,
+            ),
         )
 
     def verify_source(self, source: TargetDataset) -> None:
@@ -2792,7 +2898,17 @@ class R2HoldoutTargetProjection:
             != self.foundation_configuration_id
         ):
             raise ValueError("projected target sources differ from the projection artifact")
-        if self.projection_id != _semantic_id(self.semantic_json()):
+        if self.projection_id != _holdout_target_projection_identity(
+            source_target_dataset_id=self.source_target_dataset_id,
+            source_evidence_id=self.source_evidence_id,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
+            holdout_start=self.holdout_start,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            projection_policy=self.projection_policy,
+            projected_target_dataset=self.projected_target_dataset,
+            projected_target_dataset_id=self.projected_target_dataset_id,
+        ):
             raise ValueError("target projection ID does not authenticate its content")
 
     @classmethod
@@ -2801,19 +2917,6 @@ class R2HoldoutTargetProjection:
         source: R2HoldoutTargetSource,
     ) -> R2HoldoutTargetProjection:
         projected = source.pre_holdout_target_dataset
-        semantic = {
-            "contract": cls.CONTRACT,
-            "schema_version": cls.SCHEMA_VERSION,
-            "source_target_dataset_id": source.source_target_dataset_id,
-            "source_evidence_id": source.source_id,
-            "observation_dataset_id": source.observation_dataset_id,
-            "foundation_configuration_id": source.foundation_configuration_id,
-            "holdout_start": source.holdout_range[0].isoformat(),
-            "primary_horizon_seconds": source.primary_horizon_seconds,
-            "projection_policy": cls.POLICY,
-            "projected_target_dataset": projected.as_json(),
-            "projected_target_dataset_id": projected.dataset_id,
-        }
         return cls(
             source_target_dataset_id=source.source_target_dataset_id,
             source_evidence_id=source.source_id,
@@ -2824,7 +2927,17 @@ class R2HoldoutTargetProjection:
             projection_policy=cls.POLICY,
             projected_target_dataset=projected,
             projected_target_dataset_id=projected.dataset_id,
-            projection_id=_semantic_id(semantic),
+            projection_id=_holdout_target_projection_identity(
+                source_target_dataset_id=source.source_target_dataset_id,
+                source_evidence_id=source.source_id,
+                observation_dataset_id=source.observation_dataset_id,
+                foundation_configuration_id=source.foundation_configuration_id,
+                holdout_start=source.holdout_range[0],
+                primary_horizon_seconds=source.primary_horizon_seconds,
+                projection_policy=cls.POLICY,
+                projected_target_dataset=projected,
+                projected_target_dataset_id=projected.dataset_id,
+            ),
         )
 
     def verify_source(self, source: R2HoldoutTargetSource) -> None:
@@ -2946,7 +3059,15 @@ class R2HoldoutOpportunityRegistry:
                 raise ValueError("opportunity registry differs from the primary horizon")
             if not self.holdout_range[0] <= item.decision_time < self.holdout_range[1]:
                 raise ValueError("opportunity registry contains a row outside the holdout range")
-        if self.registry_id != _semantic_id(self.semantic_json()):
+        if self.registry_id != _opportunity_registry_identity(
+            source_target_dataset_id=self.source_target_dataset_id,
+            source_evidence_id=self.source_evidence_id,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
+            holdout_range=self.holdout_range,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            opportunities=self.opportunities,
+        ):
             raise ValueError("opportunity registry ID does not authenticate its content")
 
     @classmethod
@@ -2974,13 +3095,18 @@ class R2HoldoutOpportunityRegistry:
                 key=lambda item: item.opportunity_id,
             )
         )
-        semantic = {
-            "contract": cls.CONTRACT,
-            "schema_version": cls.SCHEMA_VERSION,
-            **{key: _contract_json(value) for key, value in raw.items()},
-        }
         constructor = cast(Callable[..., R2HoldoutOpportunityRegistry], cls)
-        return constructor(**raw, registry_id=_semantic_id(semantic))
+        opportunities = raw["opportunities"]
+        registry_id = _opportunity_registry_identity(
+            source_target_dataset_id=cast(str, raw["source_target_dataset_id"]),
+            source_evidence_id=cast(str, raw["source_evidence_id"]),
+            observation_dataset_id=cast(str, raw["observation_dataset_id"]),
+            foundation_configuration_id=cast(str, raw["foundation_configuration_id"]),
+            holdout_range=cast(Sequence[datetime], raw["holdout_range"]),
+            primary_horizon_seconds=cast(int, raw["primary_horizon_seconds"]),
+            opportunities=opportunities,
+        )
+        return constructor(**raw, registry_id=registry_id)
 
     def verify_source(self, source: R2HoldoutTargetSource) -> None:
         if (
