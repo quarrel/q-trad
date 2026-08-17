@@ -9,7 +9,7 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
-from typing import ClassVar
+from typing import ClassVar, cast
 from uuid import UUID
 
 from qtrad.domain.events import JsonValue, to_json_value
@@ -64,6 +64,7 @@ PANEL_DATASET_CONTRACT = "qtrad-research-panel-v1"
 TARGET_DATASET_CONTRACT = "qtrad-research-targets-v1"
 _MINUTE = timedelta(minutes=1)
 _HORIZONS = frozenset(timedelta(minutes=minutes) for minutes in (5, 15, 30, 60))
+_PANEL_DATASET_VERIFIED = object()
 _TARGET_DATASET_VERIFIED = object()
 
 
@@ -331,18 +332,16 @@ class PanelDataset:
     observation_dataset_id: str
     foundation_configuration_id: str
     dataset_id: str
+    _verified: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
-        if tuple(sorted(self.rows, key=_panel_key)) != self.rows:
-            raise ValueError("panel rows must use deterministic ordering")
-        expected = _hash_json(
-            {
-                "contract": PANEL_DATASET_CONTRACT,
-                "schema_version": 1,
-                "observation_dataset_id": self.observation_dataset_id,
-                "foundation_configuration_id": self.foundation_configuration_id,
-                "rows": [row.as_json() for row in self.rows],
-            }
+    def __post_init__(self, _verified: object | None) -> None:
+        if _verified is _PANEL_DATASET_VERIFIED:
+            return
+        _validate_panel_rows(self.rows)
+        expected = _panel_dataset_identity(
+            self.rows,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
         )
         if self.dataset_id != expected:
             raise ValueError("panel dataset ID does not match its semantic rows")
@@ -356,19 +355,18 @@ class PanelDataset:
         foundation_configuration_id: str,
     ) -> "PanelDataset":
         ordered = tuple(sorted(rows, key=_panel_key))
+        _validate_panel_rows(ordered)
+        dataset_id = _panel_dataset_identity(
+            ordered,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+        )
         return cls(
             rows=ordered,
             observation_dataset_id=observation_dataset_id,
             foundation_configuration_id=foundation_configuration_id,
-            dataset_id=_hash_json(
-                {
-                    "contract": PANEL_DATASET_CONTRACT,
-                    "schema_version": 1,
-                    "observation_dataset_id": observation_dataset_id,
-                    "foundation_configuration_id": foundation_configuration_id,
-                    "rows": [row.as_json() for row in ordered],
-                }
-            ),
+            dataset_id=dataset_id,
+            _verified=_PANEL_DATASET_VERIFIED,
         )
 
 
@@ -644,8 +642,62 @@ class HorizonCoverageSummary:
         }
 
 
+def _validate_panel_rows(rows: Sequence[PanelRow]) -> None:
+    if not isinstance(rows, tuple):
+        raise ValueError("panel rows must use deterministic ordering")
+    previous_key: tuple[datetime, str, str] | None = None
+    seen_keys: set[tuple[object, ...]] = set()
+    for row in rows:
+        key = cast(tuple[datetime, str, str], _panel_key(row))
+        if previous_key is not None and key < previous_key:
+            raise ValueError("panel rows must use deterministic ordering")
+        if key in seen_keys:
+            raise ValueError("panel rows must have unique semantic keys")
+        seen_keys.add(key)
+        previous_key = key
+
+
 def _panel_key(row: PanelRow) -> tuple[object, ...]:
     return row.decision_time, row.instrument_id, row.basis.value
+
+
+def _panel_dataset_chunks(
+    rows: Sequence[PanelRow],
+    *,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+) -> Iterator[bytes]:
+    """Yield the legacy canonical payload without materialising its row array."""
+    yield b'{"contract":'
+    yield _json_bytes(PANEL_DATASET_CONTRACT)
+    yield b',"foundation_configuration_id":'
+    yield _json_bytes(foundation_configuration_id)
+    yield b',"observation_dataset_id":'
+    yield _json_bytes(observation_dataset_id)
+    yield b',"rows":['
+    for index, row in enumerate(rows):
+        if index:
+            yield b","
+        yield _json_bytes(row.as_json())
+    yield b'],"schema_version":'
+    yield _json_bytes(1)
+    yield b"}"
+
+
+def _panel_dataset_identity(
+    rows: Sequence[PanelRow],
+    *,
+    observation_dataset_id: str,
+    foundation_configuration_id: str,
+) -> str:
+    digest = sha256()
+    for chunk in _panel_dataset_chunks(
+        rows,
+        observation_dataset_id=observation_dataset_id,
+        foundation_configuration_id=foundation_configuration_id,
+    ):
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _target_key(row: TargetRow) -> tuple[object, ...]:

@@ -1,11 +1,13 @@
 """Small, provider-independent contracts for causal research inputs."""
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import json
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from math import ceil
-from typing import ClassVar
+from typing import ClassVar, cast
 from uuid import UUID
 
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
@@ -15,6 +17,7 @@ from qtrad.domain.time import require_utc
 
 OBSERVATION_DATASET_CONTRACT = "qtrad-research-observations-v1"
 OBSERVATION_SCHEMA_VERSION = 1
+_OBSERVATION_DATASET_VERIFIED = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,19 +155,13 @@ class ObservationDataset:
     source_dataset_ids: tuple[str, ...]
     selection_policies: Mapping[str, JsonValue]
     dataset_id: str
+    _verified: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
-        ordered = tuple(sorted(self.rows, key=ObservationRow.semantic_key))
-        if ordered != self.rows:
-            raise ValueError("observation rows must use canonical semantic ordering")
-        if len({row.semantic_key() for row in self.rows}) != len(self.rows):
-            raise ValueError("observation rows must have unique semantic keys")
-        if len({row.revision_key() for row in self.rows}) != len(self.rows):
-            raise ValueError("observation rows must have unique source revision lineage")
-        if len({(row.stream_id, row.stream_version) for row in self.rows}) != len(self.rows):
-            raise ValueError("observation rows must have unique canonical stream versions")
-        _require_contiguous_revisions(self.rows)
-        expected = observation_dataset_id(
+    def __post_init__(self, _verified: object | None) -> None:
+        if _verified is _OBSERVATION_DATASET_VERIFIED:
+            return
+        _validate_observation_rows(self.rows)
+        expected = _observation_dataset_identity(
             self.rows,
             configuration=self.configuration,
             source_dataset_ids=self.source_dataset_ids,
@@ -183,18 +180,21 @@ class ObservationDataset:
         selection_policies: Mapping[str, JsonValue] | None = None,
     ) -> "ObservationDataset":
         ordered = tuple(sorted(rows, key=ObservationRow.semantic_key))
-        policies = selection_policies or {}
+        policies = {} if selection_policies is None else dict(selection_policies)
+        _validate_observation_rows(ordered)
+        dataset_id = _observation_dataset_identity(
+            ordered,
+            configuration=configuration,
+            source_dataset_ids=source_dataset_ids,
+            selection_policies=policies,
+        )
         return cls(
             rows=ordered,
             configuration=dict(configuration),
             source_dataset_ids=tuple(source_dataset_ids),
-            selection_policies=dict(policies),
-            dataset_id=observation_dataset_id(
-                ordered,
-                configuration=configuration,
-                source_dataset_ids=source_dataset_ids,
-                selection_policies=policies,
-            ),
+            selection_policies=policies,
+            dataset_id=dataset_id,
+            _verified=_OBSERVATION_DATASET_VERIFIED,
         )
 
 
@@ -272,6 +272,54 @@ class RevisionDelayReport:
         }
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _observation_dataset_chunks(
+    rows: Sequence[ObservationRow],
+    *,
+    configuration: Mapping[str, JsonValue],
+    source_dataset_ids: Sequence[str],
+    selection_policies: Mapping[str, JsonValue],
+) -> Iterator[bytes]:
+    """Yield the legacy canonical payload without materialising its row array."""
+    yield b'{"configuration":'
+    yield _canonical_json_bytes(configuration)
+    yield b',"contract":'
+    yield _canonical_json_bytes(OBSERVATION_DATASET_CONTRACT)
+    yield b',"rows":['
+    for index, row in enumerate(rows):
+        if index:
+            yield b","
+        yield _canonical_json_bytes(row.as_json())
+    yield b'],"schema_version":'
+    yield _canonical_json_bytes(OBSERVATION_SCHEMA_VERSION)
+    yield b',"selection_policies":'
+    yield _canonical_json_bytes(selection_policies)
+    yield b',"source_dataset_ids":'
+    yield _canonical_json_bytes(list(source_dataset_ids))
+    yield b"}"
+
+
+def _observation_dataset_identity(
+    rows: Sequence[ObservationRow],
+    *,
+    configuration: Mapping[str, JsonValue],
+    source_dataset_ids: Sequence[str],
+    selection_policies: Mapping[str, JsonValue],
+) -> str:
+    digest = sha256()
+    for chunk in _observation_dataset_chunks(
+        rows,
+        configuration=configuration,
+        source_dataset_ids=source_dataset_ids,
+        selection_policies=selection_policies,
+    ):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def observation_dataset_id(
     rows: Sequence[ObservationRow],
     *,
@@ -280,22 +328,13 @@ def observation_dataset_id(
     selection_policies: Mapping[str, JsonValue],
 ) -> str:
     """Return a stable semantic identity independent of physical representation."""
-
-    import hashlib
-    import json
-
-    payload = {
-        "contract": OBSERVATION_DATASET_CONTRACT,
-        "schema_version": OBSERVATION_SCHEMA_VERSION,
-        "configuration": configuration,
-        "source_dataset_ids": list(source_dataset_ids),
-        "selection_policies": selection_policies,
-        "rows": [row.as_json() for row in sorted(rows, key=ObservationRow.semantic_key)],
-    }
-    canonical = to_json_value(payload)
-    return hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    ordered = tuple(sorted(rows, key=ObservationRow.semantic_key))
+    return _observation_dataset_identity(
+        ordered,
+        configuration=configuration,
+        source_dataset_ids=source_dataset_ids,
+        selection_policies=selection_policies,
+    )
 
 
 def build_observation_rows(
@@ -499,6 +538,32 @@ def _percentile_seconds(values: Sequence[timedelta], percentile: float) -> float
 def _ceil_duration(value: timedelta, unit: timedelta) -> timedelta:
     units = ceil(value.total_seconds() / unit.total_seconds())
     return unit * units
+
+
+def _validate_observation_rows(rows: Sequence[ObservationRow]) -> None:
+    if not isinstance(rows, tuple):
+        raise ValueError("observation rows must use canonical semantic ordering")
+    previous_key: tuple[str, str, datetime, str, str, str, int, int] | None = None
+    semantic_keys: set[tuple[object, ...]] = set()
+    revision_keys: set[tuple[object, ...]] = set()
+    stream_keys: set[tuple[str, int]] = set()
+    for row in rows:
+        semantic_key = cast(tuple[str, str, datetime, str, str, str, int, int], row.semantic_key())
+        if previous_key is not None and semantic_key < previous_key:
+            raise ValueError("observation rows must use canonical semantic ordering")
+        if semantic_key in semantic_keys:
+            raise ValueError("observation rows must have unique semantic keys")
+        revision_key = row.revision_key()
+        if revision_key in revision_keys:
+            raise ValueError("observation rows must have unique source revision lineage")
+        stream_key = (row.stream_id, row.stream_version)
+        if stream_key in stream_keys:
+            raise ValueError("observation rows must have unique canonical stream versions")
+        semantic_keys.add(semantic_key)
+        revision_keys.add(revision_key)
+        stream_keys.add(stream_key)
+        previous_key = semantic_key
+    _require_contiguous_revisions(rows)
 
 
 def _require_contiguous_revisions(rows: Sequence[ObservationRow]) -> None:
