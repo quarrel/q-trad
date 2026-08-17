@@ -99,9 +99,7 @@ def write_partitioned_rows(
             )
         header_payload = dict(header)
         if "header_sha256" not in header_payload:
-            header_payload["header_sha256"] = sha256(
-                canonical_bytes(header_payload)
-            ).hexdigest()
+            header_payload["header_sha256"] = sha256(canonical_bytes(header_payload)).hexdigest()
         return {
             **header_payload,
             "storage": PARTITIONED_ROWS_STORAGE,

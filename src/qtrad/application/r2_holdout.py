@@ -1237,8 +1237,6 @@ def _failed_final_fit(
     )
 
 
-
-
 def _final_disposition(value: object) -> FinalFitDisposition:
     try:
         return FinalFitDisposition(str(getattr(value, "value", value)))

@@ -260,9 +260,7 @@ def test_compact_feature_binding_omits_rows_and_manifest_chunks(tmp_path: Path) 
         dict[str, object],
         json.loads((tmp_path / feature_paths["L0"]).read_bytes()),
     )
-    compact = verification._dataset_payload(
-        datasets["L0"], manifest_payload, compact=True
-    )
+    compact = verification._dataset_payload(datasets["L0"], manifest_payload, compact=True)
 
     assert "rows" not in compact
     assert "chunks" not in compact

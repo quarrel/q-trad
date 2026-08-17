@@ -60,9 +60,9 @@ def test_partitioned_rows_round_trip_is_deterministic_and_reads_each_part_once(
     second_paths = partitioned_manifest_part_paths(
         tmp_path / "second", "rows.json", second_payload, identity_field="dataset_id"
     )
-    assert [
-        (tmp_path / "first" / path).read_bytes() for path in first_paths
-    ] == [(tmp_path / "second" / path).read_bytes() for path in second_paths]
+    assert [(tmp_path / "first" / path).read_bytes() for path in first_paths] == [
+        (tmp_path / "second" / path).read_bytes() for path in second_paths
+    ]
 
     reads: dict[Path, int] = {}
     original_read_bytes = Path.read_bytes
@@ -98,9 +98,7 @@ def test_partitioned_rows_split_at_encoded_bound_and_reject_oversized_singleton(
         for reference in references
     )
     assert (
-        load_partitioned_rows(
-            tmp_path / "split", "rows.json", payload, identity_field="dataset_id"
-        )
+        load_partitioned_rows(tmp_path / "split", "rows.json", payload, identity_field="dataset_id")
         == rows
     )
 
@@ -130,9 +128,7 @@ def test_partitioned_rows_reject_tamper_missing_noncanonical_and_orphan(
     encoded = first_path.read_bytes()
     first_path.write_bytes(encoded + b"\n")
     with pytest.raises(ValueError, match="digest mismatch"):
-        load_partitioned_rows(
-            tmp_path / "valid", "rows.json", payload, identity_field="dataset_id"
-        )
+        load_partitioned_rows(tmp_path / "valid", "rows.json", payload, identity_field="dataset_id")
 
     first_path.unlink()
     with pytest.raises(ValueError, match="missing or not regular"):
