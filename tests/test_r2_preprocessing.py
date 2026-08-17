@@ -15,6 +15,7 @@ from qtrad.application.r2_baselines import (
     build_coefficient_stability_summary,
     build_local_ridge_fold,
     replay_local_ridge_forecasts,
+    validation_targets_for_instrument,
     verify_coefficient_stability_summary,
     verify_local_ridge_forecast_coverage,
 )
@@ -1324,3 +1325,28 @@ def test_join_training_rows_uses_verified_target_ids_without_rehash(
         config.primary_horizon,
     )
     assert tuple(row.target_id for row in joined) == fold.training_target_ids
+
+
+def test_validation_target_selection_excludes_invalid_targets() -> None:
+    verified, _features, config, fold = _bound_fixture()
+    invalid_row = replace(
+        verified.targets.rows[8],
+        log_return=None,
+        return_disposition=ReturnDisposition.UNAVAILABLE_BY_FREEZE,
+    )
+    invalid_targets = TargetDataset.create(
+        (*verified.targets.rows[:8], invalid_row, *verified.targets.rows[9:]),
+        observation_dataset_id=verified.targets.observation_dataset_id,
+        foundation_configuration_id=verified.targets.foundation_configuration_id,
+    )
+    verified_values = vars(verified).copy()
+    verified_values["targets"] = invalid_targets
+    invalid_verified = cast(R1FoundationBindings, SimpleNamespace(**verified_values))
+    selected = validation_targets_for_instrument(
+        invalid_verified,
+        config,
+        outer_fold_id=fold.fold_id,
+        target_instrument_id=config.confirmatory_target_instruments[0],
+        horizon=config.primary_horizon,
+    )
+    assert tuple(row.target_id for row in selected) == (verified.targets.rows[9].target_id,)

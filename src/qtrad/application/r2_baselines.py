@@ -20,7 +20,7 @@ from qtrad.application.r2_preprocessing import (
 )
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.forecasts import ForecastDataset, ForecastRow, ReturnUnit
-from qtrad.domain.foundation import TargetRow
+from qtrad.domain.foundation import ReturnDisposition, TargetRow
 from qtrad.domain.r2_baselines import (
     CoefficientStabilityRow,
     CoefficientStabilitySummary,
@@ -590,6 +590,8 @@ def validation_targets_for_instrument(
             raise ValueError("outer validation target is outside its authenticated interval")
         if experiment.holdout_range[0] <= target.decision_time < experiment.holdout_range[1]:
             raise ValueError("outer validation membership contains a locked-holdout target")
+        if target.return_disposition is not ReturnDisposition.VALID or target.log_return is None:
+            continue
         if target.instrument_id == target_instrument_id and target.horizon == horizon:
             selected.append(target)
     return tuple(sorted(selected, key=lambda item: (item.decision_time, item.target_id)))
