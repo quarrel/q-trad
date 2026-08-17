@@ -60,6 +60,7 @@ from qtrad.domain.r2_holdout import (
     R2FinalFittingPolicy,
     R2HoldoutConsumedMarker,
     R2HoldoutFeatureRow,
+    R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
     R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
@@ -1211,12 +1212,31 @@ def test_holdout_transfer_auth_failure_leaves_source_available(
     original_verify = holdout_runtime.verify_holdout_preparation
     calls = 0
 
-    def fail_destination(path: Path, *args: object, **kwargs: object) -> object:
+    def fail_destination(
+        path: Path,
+        *,
+        _confirmatory_token: object | None = None,
+        holdout_target_source: R2HoldoutTargetSource,
+        training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+        immediate_parent_authority: Mapping[str, object] | None = None,
+        _payload_cache: holdout_runtime._PayloadCache | None = None,
+        _allow_incomplete_transfer: bool = False,
+        _expected_destination_root_id: str | None = None,
+    ) -> R2HoldoutForecastSeal:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise RuntimeError("destination authentication failed")
-        return original_verify(path, *args, **kwargs)
+        return original_verify(
+            path,
+            _confirmatory_token=_confirmatory_token,
+            holdout_target_source=holdout_target_source,
+            training_feature_datasets=training_feature_datasets,
+            immediate_parent_authority=immediate_parent_authority,
+            _payload_cache=_payload_cache,
+            _allow_incomplete_transfer=_allow_incomplete_transfer,
+            _expected_destination_root_id=_expected_destination_root_id,
+        )
 
     monkeypatch.setattr(holdout_runtime, "verify_holdout_preparation", fail_destination)
     with pytest.raises(RuntimeError, match="destination authentication"):
@@ -1971,8 +1991,27 @@ def test_terminal_outcomes_round_trip_with_forced_part_bound(
     original_bound = partitioned_rows_runtime._MAX_PART_BYTES
     original_verify = holdout_runtime.verify_holdout_preparation
 
-    def verify_then_lower(path: Path, *args: object, **kwargs: object) -> object:
-        result = original_verify(path, *args, **kwargs)
+    def verify_then_lower(
+        path: Path,
+        *,
+        _confirmatory_token: object | None = None,
+        holdout_target_source: R2HoldoutTargetSource,
+        training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+        immediate_parent_authority: Mapping[str, object] | None = None,
+        _payload_cache: holdout_runtime._PayloadCache | None = None,
+        _allow_incomplete_transfer: bool = False,
+        _expected_destination_root_id: str | None = None,
+    ) -> R2HoldoutForecastSeal:
+        result = original_verify(
+            path,
+            _confirmatory_token=_confirmatory_token,
+            holdout_target_source=holdout_target_source,
+            training_feature_datasets=training_feature_datasets,
+            immediate_parent_authority=immediate_parent_authority,
+            _payload_cache=_payload_cache,
+            _allow_incomplete_transfer=_allow_incomplete_transfer,
+            _expected_destination_root_id=_expected_destination_root_id,
+        )
         monkeypatch.setattr(partitioned_rows_runtime, "_MAX_PART_BYTES", 900)
         return result
 

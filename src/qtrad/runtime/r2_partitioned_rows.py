@@ -137,15 +137,15 @@ def partitioned_manifest_part_paths(
         if relative != expected_path or part_index != expected_index:
             raise ValueError("partitioned R2 part path or index is not canonical")
         _sha256_text(digest, "partitioned R2 part digest")
-        if type(row_count) is not int or cast(int, row_count) <= 0:
+        if type(row_count) is not int or row_count <= 0:
             raise ValueError("partitioned R2 part row count must be a positive integer")
         part_path = _safe_child(root, cast(str, relative))
         if part_path.stat().st_size > _MAX_PART_BYTES:
             raise ValueError(f"partitioned R2 part exceeds the 64 MiB limit: {relative}")
         result.append(cast(str, relative))
-        total_rows += cast(int, row_count)
+        total_rows += row_count
     declared_count = payload.get("row_count")
-    if type(declared_count) is not int or cast(int, declared_count) < 0:
+    if type(declared_count) is not int or declared_count < 0:
         raise ValueError("partitioned R2 manifest row count must be a non-negative integer")
     if total_rows != declared_count:
         raise ValueError("partitioned R2 manifest row count differs from its parts")

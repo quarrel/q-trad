@@ -159,7 +159,9 @@ def _partitioned_payload(
         grouped: dict[str, list[object]] = {
             field: [] for field in fields if field not in mapping_fields
         }
-        grouped_mappings: dict[str, object] = {field: {} for field in mapping_fields}
+        grouped_mappings: dict[str, dict[str, object] | None] = {
+            field: {} for field in mapping_fields
+        }
         nullable_fields: set[str] = set()
         for row in rows:
             field = row.get("field")
@@ -172,8 +174,8 @@ def _partitioned_payload(
                     grouped_mappings[field] = None
                 elif set(row) == {"field", "key", "value"} and isinstance(row["key"], str):
                     mapping = grouped_mappings[field]
-                    if not isinstance(mapping, dict):
-                        raise ValueError("partitioned holdout mapping row is invalid")
+                    if mapping is None:
+                        raise ValueError("partitioned R2 mapping row is invalid")
                     mapping[row["key"]] = row["value"]
                 else:
                     raise ValueError("partitioned holdout mapping row is invalid")
