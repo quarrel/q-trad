@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -781,3 +782,131 @@ def test_stage8_receipt_from_previous_target_opportunity_policy_is_rejected(
     receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="receipt"):
         authenticate_ibkr_foundation(foundation, receipt=receipt)
+
+
+def test_stage8_child_writer_materialises_one_kind_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = 0
+    peak = 0
+    order: list[str] = []
+
+    def rows_for_kind(_build: object, kind: str) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
+        nonlocal active, peak
+        order.append(kind)
+        active += 1
+        peak = max(peak, active)
+
+        def rows() -> Iterable[Mapping[str, JsonValue]]:
+            nonlocal active
+            try:
+                yield {"row": kind}
+            finally:
+                active -= 1
+
+        return rows(), kind
+
+    def write_kind(
+        _child_root: Path,
+        _bundle_root: Path,
+        kind: str,
+        rows: Iterable[Mapping[str, JsonValue]],
+        _dataset_id: str,
+        _lineage: Mapping[str, JsonValue],
+    ) -> list[JsonValue]:
+        assert tuple(rows) == ({"row": kind},)
+        return [{"kind": kind}]
+
+    monkeypatch.setattr(foundation_runtime, "_child_rows_and_id", rows_for_kind)
+    monkeypatch.setattr(foundation_runtime, "_write_child_parts", write_kind)
+
+    children, semantic_children = foundation_runtime._write_children_v3(
+        tmp_path / "foundation.json.children",
+        tmp_path,
+        cast(Any, object()),
+        {"source": "fixture"},
+    )
+
+    assert peak == 1
+    assert active == 0
+    assert order == list(foundation_runtime._CHILD_KINDS)
+    assert tuple(children) == foundation_runtime._CHILD_KINDS
+    assert semantic_children == {kind: kind for kind in foundation_runtime._CHILD_KINDS}
+
+
+def test_stage8_repeated_tiny_builds_have_identical_manifest_and_tree(
+    tmp_path: Path,
+) -> None:
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    first_parent = tmp_path / "first"
+    second_parent = tmp_path / "second"
+    first_parent.mkdir()
+    second_parent.mkdir()
+
+    write_ibkr_foundation(
+        first_parent / "foundation.json",
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=1,
+    )
+    write_ibkr_foundation(
+        second_parent / "foundation.json",
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=8,
+    )
+
+    def tree(parent: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(parent).as_posix(): path.read_bytes()
+            for path in parent.rglob("*")
+            if path.is_file()
+        }
+
+    assert tree(first_parent) == tree(second_parent)
+    assert json.loads((first_parent / "foundation.json").read_bytes()) == json.loads(
+        (second_parent / "foundation.json").read_bytes()
+    )
+
+
+def test_stage8_verifier_materialises_one_kind_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foundation, stage7_manifest, stage7_receipt, _receipt = _verified_fixture(tmp_path)
+    original = foundation_runtime._child_rows_and_id
+    active = 0
+    peak = 0
+    calls: list[str] = []
+
+    def rows_for_kind(build: Any, kind: str) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
+        nonlocal active, peak
+        rows, dataset_id = original(build, kind)
+        calls.append(kind)
+        active += 1
+        peak = max(peak, active)
+
+        def tracked_rows() -> Iterable[Mapping[str, JsonValue]]:
+            nonlocal active
+            try:
+                yield from rows
+            finally:
+                active -= 1
+
+        return tracked_rows(), dataset_id
+
+    monkeypatch.setattr(foundation_runtime, "_child_rows_and_id", rows_for_kind)
+    receipt = tmp_path / "foundation-receipt-replayed.json"
+    verify_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=receipt,
+        workers=1,
+    )
+
+    assert peak == 1
+    assert active == 0
+    assert calls == list(foundation_runtime._CHILD_KINDS)

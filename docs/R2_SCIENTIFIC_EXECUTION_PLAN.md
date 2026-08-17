@@ -1,6 +1,6 @@
 # q-trad R2 decision-grade scientific execution plan
 
-**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification and PR-S0 run enablement are merged and complete; PR #144's pre-F2 scientific-policy amendment is pending merge
+**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification, PR-S0 run enablement and PR #144's pre-F2 scientific-policy amendment are merged and complete
 **Scope:** first real decision-grade `R2-IBKR-HISTORICAL` run through F2, G1, unopened G2, irreversible reveal and R2.H  
 **Safety boundary:** offline research only; IBKR paper historical market data; no broker orders, production trading endpoint or real-capital operation  
 **Primary scientific question:** do the fixed local or pooled Ridge controls produce stable out-of-sample information about 15-minute future midpoint returns beyond the zero-return control?  
@@ -167,7 +167,7 @@ The instruction to execute this plan does not by itself authorise irreversible h
 
 # 3. PR-S0 and pre-F2 scientific-policy amendment
 
-**State:** PR-S0 is complete and merged; the pre-F2 scientific-policy amendment is proposed by PR #144 and becomes current on merge.
+**State:** PR-S0, PR #144 and the pre-F2 scientific-policy amendment are complete and current authority.
 
 PR-S0 itself did not alter scientific contracts, thresholds, models, features or evidence semantics. Before the first real F2 run, PR #144 explicitly amends that boundary for only the three pre-F2 corrections in Section 3.2. No other scientific change is authorised by this run-enablement work.
 
@@ -196,7 +196,7 @@ Do not rewrite historical chronology merely for neatness.
 
 **Evidence impact:** no decision-grade R2/F2 result, locked-holdout result or holdout outcome exists under the superseded semantics. Earlier synthetic and bounded implementation fixtures are superseded or regenerated under the amended identities; no scientific result is retroactively reclassified. The retained H4 invalidation and superseded Stage 8 promotion remain immutable historical evidence and grant no current authority.
 
-**Authority:** this amendment is reviewed in PR #144 before replacement Stage 8 construction or any real F2 execution.
+**Authority:** this amendment was reviewed and merged in PR #144 before replacement Stage 8 construction or any real F2 execution.
 
 ## 3.3 Close the two thin CLI gaps if they still exist at exact head
 

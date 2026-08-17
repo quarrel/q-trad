@@ -33,6 +33,7 @@ from qtrad.runtime.ibkr_results import (
 )
 from qtrad.runtime.provider_history_v3 import (
     ProviderHistoryV3PartReference,
+    ProviderHistoryV3Rows,
     _read_manifest,
     _read_part,
     authenticate_provider_history_v3,
@@ -123,9 +124,12 @@ def test_v3_authentication_never_reads_stage6_or_unselected_parts(
 
     rows = list(authenticated.observations)
     assert rows
+    assert isinstance(authenticated.observations, ProviderHistoryV3Rows)
+    assert authenticated.observations.part_read_count == 1
+    assert authenticated.observations.max_cached_rows == len(rows)
     assert len(part_reads) == 1
     assert list(authenticated.observations)
-    assert len(part_reads) == 1
+    assert authenticated.observations.part_read_count == 1
     selected = authenticate_provider_history_v3(
         manifest,
         receipt=stage7_receipt,

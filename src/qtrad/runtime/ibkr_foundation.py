@@ -8,7 +8,7 @@ import json
 import resource
 import shutil
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -1347,10 +1347,9 @@ def _payload_byte_count(payload: str) -> int:
 
 
 def _child_payload_chunks(
-    rows: Sequence[Mapping[str, JsonValue]],
+    rows: Iterable[Mapping[str, JsonValue]],
 ) -> Iterator[tuple[str, ...]]:
     """Partition variable-sized rows deterministically before Parquet encoding."""
-
     payloads: list[str] = []
     payload_bytes = 0
     emitted = False
@@ -1408,7 +1407,7 @@ def _write_child_parts(
     child_root: Path,
     bundle_root: Path,
     kind: str,
-    rows: tuple[dict[str, JsonValue], ...],
+    rows: Iterable[Mapping[str, JsonValue]],
     dataset_id: str,
     lineage: Mapping[str, JsonValue],
 ) -> list[JsonValue]:
@@ -1554,16 +1553,18 @@ def _preflight_child_tree(
 def _verify_children(
     bundle_root: Path,
     children: Mapping[str, object],
-    expected_rows: Mapping[str, tuple[dict[str, JsonValue], ...]],
+    expected_rows: Mapping[str, Iterable[Mapping[str, JsonValue]]],
     expected_dataset_ids: Mapping[str, str],
     expected_lineage: Mapping[str, JsonValue],
     *,
     child_kinds: Sequence[str] | None = None,
+    verify_tree: bool = True,
 ) -> None:
     kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
     if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
-    _preflight_child_tree(bundle_root, children, kinds)
+    if verify_tree:
+        _preflight_child_tree(bundle_root, children, kinds)
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
     for kind in kinds:
@@ -1573,7 +1574,7 @@ def _verify_children(
             raise ValueError("IBKR foundation child parts are invalid")
         if len(raw_parts) > _MAX_CHILD_PARTS:
             raise ValueError("IBKR foundation child part count exceeds its bound")
-        observed_rows: list[dict[str, JsonValue]] = []
+        expected_rows_iterator = iter(expected_rows[kind])
         previous_path = ""
         for part_index, raw_part in enumerate(raw_parts):
             reference = _child_reference(raw_part, kind)
@@ -1662,16 +1663,27 @@ def _verify_children(
                 "child row hash",
             ):
                 raise ValueError("IBKR foundation child row identity does not match")
-            observed_rows.extend(rows)
+            for observed_row in rows:
+                try:
+                    expected_row = next(expected_rows_iterator)
+                except StopIteration as exc:
+                    raise ValueError(f"IBKR foundation {kind} contains unexpected rows") from exc
+                if observed_row != expected_row:
+                    raise ValueError(f"IBKR foundation {kind} differs from independent replay")
             expected_files.update(
                 {
                     manifest_reference,
                     manifest_file,
                 }
             )
-        if tuple(observed_rows) != expected_rows[kind]:
-            raise ValueError(f"IBKR foundation {kind} differs from independent replay")
-
+        try:
+            next(expected_rows_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError(f"IBKR foundation {kind} is missing persisted rows")
+    if not verify_tree:
+        return
     if len(child_root_names) != 1:
         raise ValueError("IBKR foundation child references use multiple roots")
     child_root = bundle_root / next(iter(child_root_names))
@@ -1840,79 +1852,62 @@ def _verify_children_blind(
     return decoded
 
 
-def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonValue], ...]]:
+def _child_rows_and_id(
+    build: IBKRFoundationBuild,
+    kind: str,
+) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
     observations = cast(ObservationDataset, build.observations)
     panel = cast(PanelDataset, build.panel)
     targets = cast(TargetDataset, build.targets)
     if build.target_index is None or build.causal_metadata is None:
         raise ValueError("foundation outcome-blind extensions are unavailable")
-    blind_observations = R2OutcomeBlindObservationView.from_dataset(
-        observations,
-        holdout_start=build.configuration.holdout_range[0],
-    )
-    blind_panel = R2OutcomeBlindPanelView.from_dataset(
-        panel,
-        holdout_start=build.configuration.holdout_range[0],
-    )
-    g2_observations = R2G2ObservationView.from_dataset(
-        observations,
-        holdout_range=build.configuration.holdout_range,
-    )
-    g2_panel = R2G2PanelView.from_dataset(
-        panel,
-        holdout_range=build.configuration.holdout_range,
-    )
-    pre_holdout_target = _pre_holdout_target_projection(build, targets)
-    return {
-        "observations": tuple(row.as_json() for row in observations.rows),
-        "panel": tuple(row.as_json() for row in panel.rows),
-        "targets": tuple(row.as_json() for row in targets.rows),
-        "folds": tuple(row.as_json() for row in build.folds.folds),
-        "target-index": tuple(item.as_json() for item in build.target_index.targets),
-        "causal-metadata": tuple(item.as_json() for item in build.causal_metadata.rows),
-        "blind-observations": tuple(row.as_json() for row in blind_observations.rows),
-        "blind-panel": tuple(row.as_json() for row in blind_panel.rows),
-        "g2-observations": tuple(row.as_json() for row in g2_observations.rows),
-        "g2-panel": tuple(row.as_json() for row in g2_panel.rows),
-        "pre-holdout-target": (pre_holdout_target.as_json(),),
-    }
 
-
-def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
-    observations = cast(ObservationDataset, build.observations)
-    panel = cast(PanelDataset, build.panel)
-    if build.target_index is None or build.causal_metadata is None:
-        raise ValueError("foundation outcome-blind extensions are unavailable")
-    blind_observations = R2OutcomeBlindObservationView.from_dataset(
-        observations,
-        holdout_start=build.configuration.holdout_range[0],
-    )
-    blind_panel = R2OutcomeBlindPanelView.from_dataset(
-        panel,
-        holdout_start=build.configuration.holdout_range[0],
-    )
-    g2_observations = R2G2ObservationView.from_dataset(
-        observations,
-        holdout_range=build.configuration.holdout_range,
-    )
-    g2_panel = R2G2PanelView.from_dataset(
-        panel,
-        holdout_range=build.configuration.holdout_range,
-    )
-    pre_holdout_target = _pre_holdout_target_projection(build, cast(TargetDataset, build.targets))
-    return {
-        "observations": observations.dataset_id,
-        "panel": panel.dataset_id,
-        "targets": build.targets.dataset_id,
-        "folds": build.folds.dataset_id,
-        "target-index": build.target_index.dataset_id,
-        "causal-metadata": build.causal_metadata.dataset_id,
-        "blind-observations": blind_observations.projection_id,
-        "blind-panel": blind_panel.projection_id,
-        "g2-observations": g2_observations.projection_id,
-        "g2-panel": g2_panel.projection_id,
-        "pre-holdout-target": pre_holdout_target.projection_id,
-    }
+    if kind == "observations":
+        return ((row.as_json() for row in observations.rows), observations.dataset_id)
+    if kind == "panel":
+        return ((row.as_json() for row in panel.rows), panel.dataset_id)
+    if kind == "targets":
+        return ((row.as_json() for row in targets.rows), targets.dataset_id)
+    if kind == "folds":
+        return ((row.as_json() for row in build.folds.folds), build.folds.dataset_id)
+    if kind == "target-index":
+        return (
+            (item.as_json() for item in build.target_index.targets),
+            build.target_index.dataset_id,
+        )
+    if kind == "causal-metadata":
+        return (
+            (item.as_json() for item in build.causal_metadata.rows),
+            build.causal_metadata.dataset_id,
+        )
+    if kind == "blind-observations":
+        view = R2OutcomeBlindObservationView.from_dataset(
+            observations,
+            holdout_start=build.configuration.holdout_range[0],
+        )
+        return ((row.as_json() for row in view.rows), view.projection_id)
+    if kind == "blind-panel":
+        view = R2OutcomeBlindPanelView.from_dataset(
+            panel,
+            holdout_start=build.configuration.holdout_range[0],
+        )
+        return ((row.as_json() for row in view.rows), view.projection_id)
+    if kind == "g2-observations":
+        view = R2G2ObservationView.from_dataset(
+            observations,
+            holdout_range=build.configuration.holdout_range,
+        )
+        return ((row.as_json() for row in view.rows), view.projection_id)
+    if kind == "g2-panel":
+        view = R2G2PanelView.from_dataset(
+            panel,
+            holdout_range=build.configuration.holdout_range,
+        )
+        return ((row.as_json() for row in view.rows), view.projection_id)
+    if kind == "pre-holdout-target":
+        projection = _pre_holdout_target_projection(build, targets)
+        return ((projection.as_json(),), projection.projection_id)
+    raise ValueError(f"unsupported IBKR foundation child kind: {kind}")
 
 
 def _pre_holdout_target_projection(
@@ -2236,6 +2231,7 @@ def _v3_payload(
     build: IBKRFoundationBuild,
     source: ProviderHistorySourceEvidence,
     children: Mapping[str, JsonValue],
+    semantic_children: Mapping[str, str],
     metadata: Mapping[str, JsonValue],
     lineage: Mapping[str, JsonValue],
 ) -> dict[str, JsonValue]:
@@ -2256,7 +2252,7 @@ def _v3_payload(
         },
         "children": dict(children),
         "child_lineage": dict(lineage),
-        "semantic_children": cast(JsonValue, _child_dataset_ids(build)),
+        "semantic_children": cast(JsonValue, dict(semantic_children)),
         "active_intervals": {
             instrument: [[start.isoformat(), end.isoformat()] for start, end in intervals]
             for instrument, intervals in sorted(build.active_intervals.items())
@@ -2442,10 +2438,11 @@ def _v3_manifest(
     build: IBKRFoundationBuild,
     source: ProviderHistorySourceEvidence,
     children: Mapping[str, JsonValue],
+    semantic_children: Mapping[str, str],
     metadata: Mapping[str, JsonValue],
     lineage: Mapping[str, JsonValue],
 ) -> tuple[dict[str, JsonValue], bytes]:
-    payload = _v3_payload(build, source, children, metadata, lineage)
+    payload = _v3_payload(build, source, children, semantic_children, metadata, lineage)
     foundation_id = _v3_foundation_id(payload)
     closure_id = _v3_closure_id(foundation_id, children)
     identity: dict[str, JsonValue] = {
@@ -2661,13 +2658,21 @@ def _write_children_v3(
     bundle_root: Path,
     build: IBKRFoundationBuild,
     lineage: Mapping[str, JsonValue],
-) -> dict[str, JsonValue]:
-    rows = _child_rows(build)
-    ids = _child_dataset_ids(build)
-    return {
-        kind: _write_child_parts(child_root, bundle_root, kind, rows[kind], ids[kind], lineage)
-        for kind in _CHILD_KINDS
-    }
+) -> tuple[dict[str, JsonValue], dict[str, str]]:
+    children: dict[str, JsonValue] = {}
+    semantic_children: dict[str, str] = {}
+    for kind in _CHILD_KINDS:
+        rows, dataset_id = _child_rows_and_id(build, kind)
+        children[kind] = _write_child_parts(
+            child_root,
+            bundle_root,
+            kind,
+            rows,
+            dataset_id,
+            lineage,
+        )
+        semantic_children[kind] = dataset_id
+    return children, semantic_children
 
 
 def _write_ibkr_foundation_v3(
@@ -2693,8 +2698,12 @@ def _write_ibkr_foundation_v3(
     child_root = destination.parent / f"{destination.name}{_CHILD_DIRECTORY_SUFFIX}"
     child_root.mkdir()
     try:
-        children = _write_children_v3(child_root, destination.parent, build, lineage)
-        _document, encoded = _v3_manifest(build, source, children, metadata, lineage)
+        children, semantic_children = _write_children_v3(
+            child_root, destination.parent, build, lineage
+        )
+        _document, encoded = _v3_manifest(
+            build, source, children, semantic_children, metadata, lineage
+        )
         _preflight_child_tree(destination.parent, children, _CHILD_KINDS)
         _write_create_only(destination, encoded)
     except BaseException:
@@ -2722,19 +2731,39 @@ def _verify_ibkr_foundation_v3(
     replay = build_ibkr_foundation(source, authenticated.configuration)
     metadata = _stage7_metadata_v3(source, stage7_manifest)
     lineage = _v3_lineage(source, metadata)
+    semantic_children_value = _mapping(
+        authenticated.payload["semantic_children"],
+        "Stage 8 semantic children",
+    )
+    semantic_children = {
+        kind: _text(semantic_children_value[kind], f"Stage 8 semantic child {kind}")
+        for kind in _CHILD_KINDS
+    }
     if (
-        _v3_payload(replay, source, authenticated.children, metadata, lineage)
+        _v3_payload(
+            replay,
+            source,
+            authenticated.children,
+            semantic_children,
+            metadata,
+            lineage,
+        )
         != authenticated.payload
     ):
         raise ValueError("Stage 8 metadata differs from independent replay")
-    _verify_children(
-        authenticated.path.parent,
-        authenticated.children,
-        _child_rows(replay),
-        _child_dataset_ids(replay),
-        lineage,
-        child_kinds=_supported_child_kinds(authenticated.children),
-    )
+    for kind in _CHILD_KINDS:
+        rows, dataset_id = _child_rows_and_id(replay, kind)
+        if dataset_id != semantic_children[kind]:
+            raise ValueError(f"Stage 8 replay semantic child {kind} differs")
+        _verify_children(
+            authenticated.path.parent,
+            {kind: authenticated.children[kind]},
+            {kind: rows},
+            {kind: dataset_id},
+            lineage,
+            child_kinds=(kind,),
+            verify_tree=False,
+        )
     _write_create_only(receipt, _json_bytes(_v3_receipt(authenticated)) + b"\n")
     return replay
 
