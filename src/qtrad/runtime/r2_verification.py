@@ -102,6 +102,7 @@ from qtrad.domain.r2_evaluation import (
     SelectionDecision,
     SelectionGateOutcome,
     SelectionManifest,
+    semantic_id,
 )
 from qtrad.domain.r2_features import (
     _VERIFIED_FEATURE_DATASET_TOKEN,
@@ -1920,6 +1921,33 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
     )
 
 
+_EVALUATION_PART_FIELDS = ("metric_slices", "bucket_definitions")
+
+
+def _partition_evaluation_payload(
+    output: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Persist large report arrays as bounded parts while retaining one report identity."""
+    header = dict(payload)
+    rows: list[dict[str, object]] = []
+    for field in _EVALUATION_PART_FIELDS:
+        raw = header.pop(field, None)
+        if not isinstance(raw, list):
+            raise ValueError(f"evaluation report field is not a list: {field}")
+        for index, value in enumerate(raw):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"evaluation report field contains a non-object row: {field}")
+            rows.append({"field": field, "index": index, "value": dict(value)})
+    return write_partitioned_rows(
+        output,
+        relative_path,
+        header=header,
+        identity_field="report_id",
+        rows=rows,
+        expected_row_count=len(rows),
+    )
+
+
 def _holdout_source_binding_payload(source_id: str, closure_id: str) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
@@ -3032,6 +3060,7 @@ def _build_oof_bundle(
         "evidence_class": experiment.evidence_class.value,
     }
     evaluation_path = "evaluation/report.json"
+    evaluation_payload = _partition_evaluation_payload(output, evaluation_path, evaluation_payload)
     children[evaluation_path] = evaluation_payload
     evaluation_ref = _child_reference(evaluation_path, evaluation_payload)
     evaluation_refs.append(evaluation_ref)
@@ -3241,7 +3270,54 @@ def _load_selection(path: Path) -> dict[str, object]:
     return value
 
 
-def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) -> dict[str, object]:
+def _expand_evaluation_payload(
+    root: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Reconstruct the logical report once for a consumer that needs its large arrays."""
+    if payload.get("storage") != "qtrad-r2-partitioned-json-rows-v1":
+        return dict(payload)
+    from qtrad.runtime.r2_partitioned_rows import load_partitioned_rows
+
+    rows = load_partitioned_rows(root, relative_path, payload, identity_field="report_id")
+    grouped: dict[str, list[dict[str, object]]] = {field: [] for field in _EVALUATION_PART_FIELDS}
+    for row in rows:
+        if set(row) != {"field", "index", "value"}:
+            raise ValueError("evaluation report part row has unknown or missing fields")
+        field = row["field"]
+        index = row["index"]
+        value = row["value"]
+        if (
+            not isinstance(field, str)
+            or field not in grouped
+            or type(index) is not int
+            or not isinstance(value, Mapping)
+            or index != len(grouped[field])
+        ):
+            raise ValueError("evaluation report part row ordering or shape is invalid")
+        grouped[field].append(dict(value))
+    expanded = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    }
+    for field in _EVALUATION_PART_FIELDS:
+        expanded[field] = grouped[field]
+    report_id = expanded.get("report_id")
+    logical_payload = {
+        key: value for key, value in expanded.items() if key not in {"report_id", "source_class"}
+    }
+    if not isinstance(report_id, str) or semantic_id(logical_payload) != report_id:
+        raise ValueError("evaluation report parts do not authenticate the report identity")
+    return expanded
+
+
+def _oof_child_payload(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    contract: str,
+    *,
+    expand_evaluation_parts: bool = False,
+) -> dict[str, object]:
     matches: list[dict[str, object]] = []
     references = [*bundle.evaluation_children, *bundle.forecast_manifests]
     if bundle.holdout_target_source is not None:
@@ -3265,6 +3341,8 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
             raise ValueError(
                 "OOF child bytes or semantic identity differ from its bundle reference"
             )
+        if expand_evaluation_parts and contract == R2_EVALUATION_CONTRACT:
+            payload = _expand_evaluation_payload(bundle_path.parent, reference.path, payload)
         matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
@@ -6363,6 +6441,7 @@ def _authenticate_oof_closure(
                 if feature_payload.get("storage") == "qtrad-r2-feature-manifest-binding-v1":
                     feature_bindings.append((reference, feature_payload))
             if reference.contract in {
+                R2_EVALUATION_CONTRACT,
                 "qtrad-research-forecasts-v1",
                 "qtrad-r2-forecast-coverage-v2",
             }:

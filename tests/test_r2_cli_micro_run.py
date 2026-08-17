@@ -801,6 +801,35 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
             str(preparation_root),
         ]
     )
+    bundle = verification.verify_r2_oof_bundle(oof_manifest)
+    expanded_report = verification._oof_child_payload(
+        oof_manifest,
+        bundle,
+        "qtrad-r2-evaluation-v2",
+        expand_evaluation_parts=True,
+    )
+    assert isinstance(expanded_report["metric_slices"], list)
+    assert isinstance(expanded_report["bucket_definitions"], list)
+    report_part = next((oof_root / "evaluation" / "report.json.parts").glob("part-*.json"))
+    original_part = report_part.read_bytes()
+    report_part.write_bytes(original_part + b" ")
+    try:
+        with pytest.raises(ValueError, match="digest"):
+            verification._oof_child_payload(
+                oof_manifest,
+                bundle,
+                "qtrad-r2-evaluation-v2",
+                expand_evaluation_parts=True,
+            )
+    finally:
+        report_part.write_bytes(original_part)
+    orphan = report_part.parent / "orphan.json"
+    orphan.write_bytes(b"{}")
+    try:
+        with pytest.raises(ValueError, match="orphan"):
+            verification._authenticate_oof_closure(oof_manifest)
+    finally:
+        orphan.unlink()
 
     foundation_document = json.loads(foundation.read_bytes())
     assert foundation.stat().st_size < 4 * 1024 * 1024
@@ -812,9 +841,18 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     assert "rows" not in oof_document
     descriptor_document = json.loads((oof_root / "evaluation" / "run-descriptor.json").read_bytes())
     assert descriptor_document["feature_sets"] == ["L0", "L1", "P0", "P1"]
-    assert all(
-        path.stat().st_size < 4 * 1024 * 1024 for path in oof_root.rglob("*") if path.is_file()
-    )
+    evaluation_report_path = oof_root / "evaluation" / "report.json"
+    evaluation_report = json.loads(evaluation_report_path.read_bytes())
+    assert evaluation_report["storage"] == "qtrad-r2-partitioned-json-rows-v1"
+    assert evaluation_report["row_count"] > 0
+    assert "metric_slices" not in evaluation_report
+    assert "bucket_definitions" not in evaluation_report
+    oof_files = tuple(path for path in oof_root.rglob("*") if path.is_file())
+    assert sum(path.stat().st_size for path in oof_files) < 128 * 1024 * 1024
+    assert evaluation_report_path.stat().st_size < 4 * 1024 * 1024
+    assert all(path.stat().st_size < 64 * 1024 * 1024 for path in oof_files)
+    large_files = tuple(path for path in oof_files if path.stat().st_size >= 4 * 1024 * 1024)
+    assert all(path.parent.name.endswith(".parts") for path in large_files)
 
     preparation_document = json.loads((preparation_root / "manifest.json").read_bytes())
 
