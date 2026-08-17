@@ -167,6 +167,7 @@ IBKR_HISTORICAL_FEATURE_WINDOWS = (timedelta(minutes=1), timedelta(minutes=5))
 IBKR_HISTORICAL_MINIMUM_TRAINING_ROWS = 100
 IBKR_HISTORICAL_MINIMUM_INNER_VALIDATION_ROWS = 20
 IBKR_HISTORICAL_MINIMUM_OUTER_VALIDATION_ROWS = 20
+IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT = 0.9
 
 
 def validate_ibkr_historical_profile(
@@ -254,6 +255,13 @@ def validate_ibkr_historical_profile(
             "IBKR historical profile pooled weighting policy differs from the fixed policy"
         )
     if (
+        experiment.acceptance_thresholds.get("minimum_common_support")
+        != IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT
+    ):
+        raise ValueError(
+            "IBKR historical profile common-support threshold differs from the fixed policy"
+        )
+    if (
         experiment.minimum_training_rows != IBKR_HISTORICAL_MINIMUM_TRAINING_ROWS
         or experiment.minimum_inner_validation_rows != IBKR_HISTORICAL_MINIMUM_INNER_VALIDATION_ROWS
         or experiment.minimum_outer_validation_rows != IBKR_HISTORICAL_MINIMUM_OUTER_VALIDATION_ROWS
@@ -272,6 +280,7 @@ __all__ = [
     "IBKR_HISTORICAL_FEATURE_WINDOWS",
     "IBKR_HISTORICAL_GROUPS",
     "IBKR_HISTORICAL_HORIZON",
+    "IBKR_HISTORICAL_MINIMUM_COMMON_SUPPORT",
     "IBKR_HISTORICAL_MINIMUM_INNER_VALIDATION_ROWS",
     "IBKR_HISTORICAL_MINIMUM_OUTER_VALIDATION_ROWS",
     "IBKR_HISTORICAL_MINIMUM_TRAINING_ROWS",

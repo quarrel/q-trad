@@ -131,6 +131,11 @@ Before F2 the verified foundation must support at least:
 - exactly three chronological OOF validation periods of two weeks each; and
 - a final locked holdout of at least four weeks.
 
+The authorised `ibkr-historical-v1` confirmatory profile also requires a predeclared
+`minimum_common_support` acceptance threshold of `0.9` (90%). This is the minimum realised
+pairwise common-support ratio for an accepted comparison; it does not relax the separate per-target
+valid-coverage gate above.
+
 The source-specific experiment implementation also requires the holdout to be the final 20% of the foundation range and requires exactly three folds. The configuration below is constructed to satisfy all of these constraints simultaneously rather than weakening any of them.
 
 ## 2.4 Evidence and authority

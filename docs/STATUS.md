@@ -130,6 +130,9 @@ remains offline/replay.
   OOF integration authority owned by PR-R2. Current software provenance is inspectable separately from
   scientific semantic IDs, and no fresh representative execution or qualifying bundle exists, so
   R2.F1/R2.H remain pending. No confirmatory model-selection or effectiveness claim is made.
+- The fixed `ibkr-historical-v1` confirmatory profile records the authorised 90% (`0.9`)
+  minimum pairwise common-support acceptance threshold; this is separate from per-target valid
+  coverage and does not change the current fixture-only/no-effectiveness-claim state.
 - The disposable R2.G2 holdout machinery is implemented with versioned selection, outcome-blind feature
   preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
   irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
