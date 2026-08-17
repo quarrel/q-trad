@@ -24,6 +24,7 @@ import qtrad.runtime.r2_verification as verification
 from qtrad.__main__ import build_parser
 from qtrad.adapters.parquet.foundation import ParquetFoundationArtifactStore
 from qtrad.adapters.parquet.observations import ParquetObservationStore
+from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
 from qtrad.application.r2_features import build_raw_feature_rows, feature_schema_for_set
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
@@ -665,11 +666,27 @@ def _build_confirmatory_fixture(
         promotion_id=promotion_id,
         promotion_path=promotion_path,
     )
+    feature_store = ParquetR2FeatureStore(
+        research_root, cast(Clock, SimpleNamespace(now=lambda: experiment.holdout_range[0]))
+    )
+    feature_receipt_paths: dict[str, Path] = {}
+    for name, feature_path in sorted(feature_paths.items()):
+        manifest = feature_store.read_manifest(feature_path)
+        receipt = verification.build_r2_feature_verification_receipt(
+            manifest, foundation_authority, experiment
+        )
+        receipt_path = research_root / "features" / f"{name}-receipt.json"
+        verification.write_r2_feature_verification_receipt(receipt_path, receipt)
+        verification.authenticate_r2_feature_verification_receipt(
+            receipt_path, manifest, foundation_authority, experiment
+        )
+        feature_receipt_paths[name] = receipt_path
     bundle_path = build_oof_bundle(
         verified=fixture_verified,
         foundation_authority=foundation_authority,
         experiment=experiment,
         feature_manifest_paths=feature_paths,
+        feature_receipt_paths=feature_receipt_paths,
         research_root=research_root,
         clock=cast(Clock, SimpleNamespace(now=lambda: experiment.holdout_range[0])),
         output=root / "oof",
@@ -1674,9 +1691,10 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
         "sklearn_identity": "fixture-sklearn",
     }
     call_counts = {"feature_recompute": 0, "local_fit": 0, "pooled_fit": 0}
+    pooled_configuration_counts: list[int] = []
     original_verify_rows = verification.verify_raw_feature_rows
     original_local_fit = verification.build_local_ridge_oof
-    original_pooled_fit = verification.build_pooled_ridge_oof
+    original_pooled_fit = verification.build_pooled_ridge_oof_sequential
 
     def spy_verify_rows(*args: Any, **kwargs: Any) -> int:
         call_counts["feature_recompute"] += 1
@@ -1688,12 +1706,16 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
 
     def spy_pooled_fit(*args: Any, **kwargs: Any) -> Any:
         call_counts["pooled_fit"] += 1
-        return original_pooled_fit(*args, **kwargs)
+        result = original_pooled_fit(*args, **kwargs)
+        pooled_configuration_counts.append(
+            len({item.fit.model_family for item in result.fold_results})
+        )
+        return result
 
     monkeypatch.setattr(verification, "runtime_identities", lambda: identities)
     monkeypatch.setattr(verification, "verify_raw_feature_rows", spy_verify_rows)
     monkeypatch.setattr(verification, "build_local_ridge_oof", spy_local_fit)
-    monkeypatch.setattr(verification, "build_pooled_ridge_oof", spy_pooled_fit)
+    monkeypatch.setattr(verification, "build_pooled_ridge_oof_sequential", spy_pooled_fit)
     replay_foundation_path = tmp_path / "replay-foundation.json"
     promotion_path = tmp_path / "promotion.json"
     promotion_path.write_bytes(canonical_bytes({"promotion_sha256": "c" * 64}))
@@ -1707,7 +1729,8 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
     replay_foundation_path.write_bytes(
         (tmp_path / "research" / "fixture-foundation.json").read_bytes()
     )
-    assert call_counts == {"feature_recompute": 4, "local_fit": 1, "pooled_fit": 1}
+    assert call_counts == {"feature_recompute": 0, "local_fit": 1, "pooled_fit": 1}
+    assert pooled_configuration_counts == [2]
 
     experiment_path = tmp_path / "experiment.json"
     experiment_payload = cast(dict[str, object], json.loads(experiment_path.read_bytes()))
@@ -1784,7 +1807,8 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
         )
 
     assert parent_calls == {"semantic": 0, "folds": 0}
-    assert call_counts == {"feature_recompute": 8, "local_fit": 2, "pooled_fit": 2}
+    assert call_counts == {"feature_recompute": 0, "local_fit": 2, "pooled_fit": 2}
+    assert pooled_configuration_counts == [2, 2]
     assert not (bundle_path.parent / "replay-inputs").exists()
 
 

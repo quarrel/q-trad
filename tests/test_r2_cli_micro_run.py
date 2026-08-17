@@ -720,6 +720,8 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     assert oof_receipt.is_file()
     oof_document = json.loads(oof_manifest.read_bytes())
     assert "rows" not in oof_document
+    descriptor_document = json.loads((oof_root / "evaluation" / "run-descriptor.json").read_bytes())
+    assert descriptor_document["feature_sets"] == ["L0", "L1", "P0", "P1"]
     assert all(
         path.stat().st_size < 4 * 1024 * 1024 for path in oof_root.rglob("*") if path.is_file()
     )

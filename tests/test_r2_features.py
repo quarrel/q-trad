@@ -52,9 +52,11 @@ from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_SOURCE_CLASS,
     ProviderHistoricalObservation,
 )
+from qtrad.domain.r2_bundles import ArtifactReference
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
+    R2FeatureVerificationReceipt,
     RawFeatureRow,
     RawFeatureValue,
     feature_registry,
@@ -70,6 +72,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.domain.research import ObservationRow
+from qtrad.runtime import r2_bundles as r2_bundle_runtime
 from qtrad.runtime import r2_verification
 from qtrad.runtime.settings import Settings
 from tests.test_r1_observations import _bar, _candidate, _dataset
@@ -1299,6 +1302,160 @@ def test_feature_receipt_loading_skips_parent_row_replay(
     assert tuple(datasets["fixture"].rows) == rows
     assert manifests["fixture"].semantic_dataset_id == manifest.semantic_dataset_id
     assert receipts["fixture"].verification_id
+
+
+def test_compact_feature_binding_authenticates_receipt_metadata(
+    tmp_path: Path,
+) -> None:
+    store, manifest, _rows, _config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+    dataset = store.load(Path("features.json"))
+    receipt = R2FeatureVerificationReceipt.from_json(json.loads(receipt_path.read_bytes()))
+    payload = r2_verification._dataset_payload(dataset, manifest, receipt=receipt, compact=True)
+    receipt_authority = {
+        "contract": receipt.CONTRACT,
+        "verification_id": receipt.verification_id,
+        "manifest_id": receipt.manifest_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "semantic_dataset_id": receipt.semantic_dataset_id,
+        "foundation_verification_id": receipt.foundation_verification_id,
+        "completed_checks": list(receipt.completed_checks),
+    }
+    descriptor: dict[str, object] = {
+        "foundation_authority": {
+            "foundation_id": foundation.foundation_id,
+            "closure_id": foundation.closure_id,
+            "verification_id": foundation.verification_id,
+            "promotion_id": foundation.promotion_id,
+        },
+        "runtime_inputs": {
+            "feature_manifests": {"fixture": str(tmp_path / "features.json")},
+            "feature_receipts": {"fixture": str(receipt_path)},
+        },
+        "feature_verification_receipts": {"fixture": receipt_authority},
+    }
+    reference = ArtifactReference(
+        dataset.CONTRACT,
+        dataset.dataset_id,
+        "features.json",
+        "0" * 64,
+    )
+    r2_bundle_runtime._verify_feature_manifest_binding(tmp_path, reference, payload, descriptor)
+
+    missing_receipt = {
+        **descriptor,
+        "runtime_inputs": {
+            **cast(dict[str, object], descriptor["runtime_inputs"]),
+            "feature_receipts": {},
+        },
+    }
+    with pytest.raises(ValueError, match="no receipt locator"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, missing_receipt
+        )
+
+    mismatched_authority = {
+        **descriptor,
+        "feature_verification_receipts": {
+            "fixture": {**receipt_authority, "verification_id": "0" * 64}
+        },
+    }
+    with pytest.raises(ValueError, match="receipt authority differs"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, mismatched_authority
+        )
+
+    def receipt_with(
+        *,
+        verifier_contract: str = receipt.verifier_contract,
+        completed_checks: tuple[str, ...] = receipt.completed_checks,
+    ) -> R2FeatureVerificationReceipt:
+        return R2FeatureVerificationReceipt.create(
+            manifest_contract=receipt.manifest_contract,
+            manifest_schema_version=receipt.manifest_schema_version,
+            manifest_id=receipt.manifest_id,
+            manifest_sha256=receipt.manifest_sha256,
+            semantic_dataset_id=receipt.semantic_dataset_id,
+            feature_set_name=receipt.feature_set_name,
+            feature_set_id=receipt.feature_set_id,
+            raw_feature_schema_id=receipt.raw_feature_schema_id,
+            feature_schema=receipt.feature_schema,
+            observation_dataset_id=receipt.observation_dataset_id,
+            panel_dataset_id=receipt.panel_dataset_id,
+            target_dataset_id=receipt.target_dataset_id,
+            fold_dataset_id=receipt.fold_dataset_id,
+            experiment_configuration_id=receipt.experiment_configuration_id,
+            source_class=receipt.source_class,
+            evidence_class=receipt.evidence_class,
+            holdout_excluded=receipt.holdout_excluded,
+            foundation_semantic_id=receipt.foundation_semantic_id,
+            foundation_closure_id=receipt.foundation_closure_id,
+            foundation_verification_id=receipt.foundation_verification_id,
+            foundation_promotion_id=receipt.foundation_promotion_id,
+            verifier_contract=verifier_contract,
+            verifier_version=receipt.verifier_version,
+            completed_checks=completed_checks,
+        )
+
+    for suffix, contract, checks in (
+        ("custom", "custom-verifier", receipt.completed_checks),
+        ("incomplete", receipt.verifier_contract, receipt.completed_checks[:-1]),
+    ):
+        unsupported_receipt = receipt_with(
+            verifier_contract=contract,
+            completed_checks=checks,
+        )
+        unsupported_path = tmp_path / f"{suffix}-receipt.json"
+        r2_verification.write_r2_feature_verification_receipt(unsupported_path, unsupported_receipt)
+        unsupported_authority = {
+            **receipt_authority,
+            "verification_id": unsupported_receipt.verification_id,
+            "completed_checks": list(unsupported_receipt.completed_checks),
+        }
+        unsupported_descriptor = {
+            **descriptor,
+            "runtime_inputs": {
+                **cast(dict[str, object], descriptor["runtime_inputs"]),
+                "feature_receipts": {"fixture": str(unsupported_path)},
+            },
+            "feature_verification_receipts": {"fixture": unsupported_authority},
+        }
+        with pytest.raises(ValueError, match="verifier contract or checks"):
+            r2_bundle_runtime._verify_feature_manifest_binding(
+                tmp_path, reference, payload, unsupported_descriptor
+            )
+
+    other_foundation = cast(
+        Any,
+        SimpleNamespace(
+            foundation_id=foundation.foundation_id,
+            closure_id=foundation.closure_id,
+            verification_id="c" * 64,
+            promotion_id=None,
+        ),
+    )
+    other_receipt = r2_verification.build_r2_feature_verification_receipt(
+        manifest, other_foundation, _config
+    )
+    other_receipt_path = tmp_path / "other-receipt.json"
+    r2_verification.write_r2_feature_verification_receipt(other_receipt_path, other_receipt)
+    cross_foundation = {
+        **descriptor,
+        "runtime_inputs": {
+            **cast(dict[str, object], descriptor["runtime_inputs"]),
+            "feature_receipts": {"fixture": str(other_receipt_path)},
+        },
+        "feature_verification_receipts": {
+            "fixture": {
+                **receipt_authority,
+                "verification_id": other_receipt.verification_id,
+                "foundation_verification_id": other_receipt.foundation_verification_id,
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="foundation authority"):
+        r2_bundle_runtime._verify_feature_manifest_binding(
+            tmp_path, reference, payload, cross_foundation
+        )
 
 
 def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(

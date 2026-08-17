@@ -27,7 +27,10 @@ from qtrad.domain.r2_evaluation import (
     R2_LOCAL_COMPARATOR_CONTRACT,
     R2_SELECTION_CONTRACT,
 )
-from qtrad.domain.r2_features import R2_FEATURE_DATASET_CONTRACT
+from qtrad.domain.r2_features import (
+    R2_FEATURE_DATASET_CONTRACT,
+    R2FeatureVerificationReceipt,
+)
 from qtrad.domain.r2_holdout import (
     R2_CONFIRMATORY_OPENED_CONTRACT,
     R2_FINAL_FIT_CONTRACT,
@@ -50,6 +53,17 @@ from qtrad.domain.r2_models import R2_PREPROCESSING_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
 R2_EVALUATION_REGISTER_CONTRACT = "qtrad-r2-evaluation-register-v2"
+_R2_FEATURE_VERIFIER_CONTRACT = "qtrad-r2-feature-verifier-v1"
+_R2_FEATURE_VERIFIER_VERSION = "1"
+_R2_FEATURE_VERIFICATION_CHECKS = (
+    "foundation-authority",
+    "manifest-bindings",
+    "manifest-tree",
+    "feature-row-hashes",
+    "feature-semantic-dataset",
+    "causal-feature-replay",
+    "holdout-exclusion",
+)
 
 _IDENTITY_FIELDS = frozenset(
     {
@@ -213,7 +227,6 @@ def load_forecast_manifest(path: Path) -> R2ForecastManifest:
     return R2ForecastManifest.from_json(payload)
 
 
-
 def write_r2_oof_bundle(
     output: Path,
     bundle: R2OofBundle,
@@ -272,10 +285,7 @@ def write_r2_oof_bundle(
         for relative in partition_paths:
             (output / relative).unlink(missing_ok=True)
         directories = sorted(
-            {
-                (output / relative).parent
-                for relative in partition_paths
-            },
+            {(output / relative).parent for relative in partition_paths},
             key=lambda item: len(item.parts),
             reverse=True,
         )
@@ -367,6 +377,7 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
         PARTITIONED_ROWS_STORAGE,
         partitioned_manifest_part_paths,
     )
+
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
     binding_payload: dict[str, object] | None = None
     feature_bindings: list[tuple[ArtifactReference, dict[str, object]]] = []
@@ -496,6 +507,7 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
                     "experiment",
                     "research_root",
                     "feature_manifests",
+                    "feature_receipts",
                 }
                 if (
                     bundle.holdout_target_source is not None
@@ -512,6 +524,28 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
                     "P1",
                 }:
                     raise ValueError("canonical OOF descriptor feature locators are incomplete")
+                feature_receipts = runtime.get("feature_receipts")
+                if not isinstance(feature_receipts, dict) or set(feature_receipts) != {
+                    "L0",
+                    "L1",
+                    "P0",
+                    "P1",
+                }:
+                    raise ValueError("canonical OOF descriptor receipt locators are incomplete")
+                for name, raw_receipt_path in feature_receipts.items():
+                    if not isinstance(raw_receipt_path, str):
+                        raise ValueError(
+                            f"canonical OOF descriptor receipt locator is malformed: {name}"
+                        )
+                    receipt_path = Path(raw_receipt_path)
+                    if (
+                        not receipt_path.is_absolute()
+                        or receipt_path.is_symlink()
+                        or not receipt_path.is_file()
+                    ):
+                        raise ValueError(
+                            f"canonical OOF descriptor receipt locator is unavailable: {name}"
+                        )
             elif "foundation_authority" in child or "runtime_inputs" in child:
                 raise ValueError("synthetic OOF descriptor cannot bind runtime authority")
         contract = child.get("contract")
@@ -719,6 +753,7 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
             identity_field=_identity_field_for_contract(reference.contract),
         )
 
+
 def _verify_feature_manifest_binding(
     _root: Path,
     reference: ArtifactReference,
@@ -740,11 +775,7 @@ def _verify_feature_manifest_binding(
     if not isinstance(raw_path, str):
         raise ValueError(f"R2 feature binding has no locator for {feature_set_name}")
     manifest_path = Path(raw_path)
-    if (
-        not manifest_path.is_absolute()
-        or manifest_path.is_symlink()
-        or not manifest_path.is_file()
-    ):
+    if not manifest_path.is_absolute() or manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError(f"R2 feature binding locator is unavailable: {feature_set_name}")
     from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
 
@@ -772,6 +803,109 @@ def _verify_feature_manifest_binding(
                 "R2 feature binding manifest differs from its runtime locator: "
                 f"{reference.path} ({field})"
             )
+    raw_receipts = raw_runtime.get("feature_receipts")
+    if not isinstance(raw_receipts, Mapping):
+        raise ValueError("R2 feature binding has no feature receipt locators")
+    raw_descriptor_receipts = descriptor.get("feature_verification_receipts")
+    if not isinstance(raw_descriptor_receipts, Mapping):
+        raise ValueError("R2 feature binding has no semantic feature receipt authority")
+    raw_receipt_path = raw_receipts.get(feature_set_name)
+    if not isinstance(raw_receipt_path, str):
+        raise ValueError(f"R2 feature binding has no receipt locator for {feature_set_name}")
+    receipt_path = Path(raw_receipt_path)
+    if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ValueError(f"R2 feature binding receipt locator is unavailable: {feature_set_name}")
+    receipt = R2FeatureVerificationReceipt.from_json(json.loads(receipt_path.read_bytes()))
+    receipt_manifest_values: dict[str, object] = {
+        "manifest_contract": manifest_payload["contract"],
+        "manifest_schema_version": manifest_payload["schema_version"],
+        "manifest_id": manifest_payload["manifest_id"],
+        "manifest_sha256": manifest_payload["manifest_sha256"],
+        "semantic_dataset_id": manifest_payload["semantic_dataset_id"],
+        "feature_set_name": manifest_payload["feature_set_name"],
+        "feature_set_id": manifest_payload["feature_set_id"],
+        "raw_feature_schema_id": manifest_payload["raw_feature_schema_id"],
+        "feature_schema": manifest_payload["feature_schema"],
+        "observation_dataset_id": manifest_payload["observation_dataset_id"],
+        "panel_dataset_id": manifest_payload["panel_dataset_id"],
+        "target_dataset_id": manifest_payload["target_dataset_id"],
+        "fold_dataset_id": manifest_payload["fold_dataset_id"],
+        "experiment_configuration_id": manifest_payload["experiment_configuration_id"],
+        "source_class": manifest_payload["market_data_source_class"],
+        "evidence_class": manifest_payload["evidence_class"],
+        "holdout_excluded": manifest_payload["holdout_excluded"],
+    }
+    receipt_values: dict[str, object] = {
+        "manifest_contract": receipt.manifest_contract,
+        "manifest_schema_version": receipt.manifest_schema_version,
+        "manifest_id": receipt.manifest_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "semantic_dataset_id": receipt.semantic_dataset_id,
+        "feature_set_name": receipt.feature_set_name,
+        "feature_set_id": receipt.feature_set_id,
+        "raw_feature_schema_id": receipt.raw_feature_schema_id,
+        "feature_schema": [item.as_json() for item in receipt.feature_schema],
+        "observation_dataset_id": receipt.observation_dataset_id,
+        "panel_dataset_id": receipt.panel_dataset_id,
+        "target_dataset_id": receipt.target_dataset_id,
+        "fold_dataset_id": receipt.fold_dataset_id,
+        "experiment_configuration_id": receipt.experiment_configuration_id,
+        "source_class": receipt.source_class.value,
+        "evidence_class": receipt.evidence_class.value,
+        "holdout_excluded": receipt.holdout_excluded,
+    }
+    for field, expected in receipt_manifest_values.items():
+        if receipt_values[field] != expected:
+            raise ValueError(f"R2 feature receipt differs from its manifest: {field}")
+    raw_authority = descriptor.get("foundation_authority")
+    if not isinstance(raw_authority, Mapping):
+        raise ValueError("R2 feature binding has no foundation authority")
+    expected_parent = {
+        "foundation_semantic_id": raw_authority.get("foundation_id"),
+        "foundation_closure_id": raw_authority.get("closure_id"),
+        "foundation_verification_id": raw_authority.get("verification_id"),
+        "foundation_promotion_id": raw_authority.get("promotion_id"),
+    }
+    for field, expected in expected_parent.items():
+        if getattr(receipt, field) != expected:
+            raise ValueError(f"R2 feature receipt differs from its foundation authority: {field}")
+    if (
+        receipt.verifier_contract != _R2_FEATURE_VERIFIER_CONTRACT
+        or receipt.verifier_version != _R2_FEATURE_VERIFIER_VERSION
+        or receipt.completed_checks != _R2_FEATURE_VERIFICATION_CHECKS
+    ):
+        raise ValueError("R2 feature receipt verifier contract or checks are unsupported")
+    raw_verification = payload.get("verification")
+    if not isinstance(raw_verification, Mapping):
+        raise ValueError(f"R2 feature binding has no verification metadata: {reference.path}")
+    expected_verification = {
+        "contract": receipt.CONTRACT,
+        "verification_id": receipt.verification_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "semantic_dataset_id": receipt.semantic_dataset_id,
+        "foundation_verification_id": receipt.foundation_verification_id,
+        "completed_checks": list(receipt.completed_checks),
+    }
+    for field, expected in expected_verification.items():
+        if raw_verification.get(field) != expected:
+            raise ValueError(f"R2 feature binding verification differs from receipt: {field}")
+    raw_descriptor_receipt = raw_descriptor_receipts.get(feature_set_name)
+    if not isinstance(raw_descriptor_receipt, Mapping):
+        raise ValueError(f"R2 descriptor has no receipt authority for {feature_set_name}")
+    expected_descriptor_receipt = {
+        "contract": receipt.CONTRACT,
+        "verification_id": receipt.verification_id,
+        "manifest_id": receipt.manifest_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "semantic_dataset_id": receipt.semantic_dataset_id,
+        "foundation_verification_id": receipt.foundation_verification_id,
+        "completed_checks": list(receipt.completed_checks),
+    }
+    if set(raw_descriptor_receipt) != set(expected_descriptor_receipt):
+        raise ValueError(f"R2 descriptor receipt authority is malformed: {feature_set_name}")
+    for field, expected in expected_descriptor_receipt.items():
+        if raw_descriptor_receipt.get(field) != expected:
+            raise ValueError(f"R2 descriptor receipt authority differs: {feature_set_name}:{field}")
     if payload.get("dataset_id") != manifest.semantic_dataset_id:
         raise ValueError(f"R2 feature binding dataset identity differs: {reference.path}")
     for field in (

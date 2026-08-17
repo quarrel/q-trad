@@ -416,6 +416,7 @@ class AuthenticatedR2Foundation:
         self,
         *,
         feature_manifest_paths: Mapping[str, Path],
+        feature_receipt_paths: Mapping[str, Path],
         experiment_path: Path,
         research_root: Path,
     ) -> dict[str, JsonValue]:
@@ -449,6 +450,10 @@ class AuthenticatedR2Foundation:
             "feature_manifests": {
                 name: absolute_locator(path, relative_root=absolute_research_root)
                 for name, path in sorted(feature_manifest_paths.items())
+            },
+            "feature_receipts": {
+                name: absolute_locator(path, relative_root=absolute_research_root)
+                for name, path in sorted(feature_receipt_paths.items())
             },
         }
 
@@ -2502,6 +2507,8 @@ def _build_oof_bundle(
         raise ValueError("R2 experiment source class differs from the R1 foundation")
     if run_kind != "SYNTHETIC" and feature_receipt_paths is None:
         raise ValueError("canonical OOF build requires four feature verification receipts")
+    if feature_receipt_paths is not None and set(feature_receipt_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF feature verification receipts must cover exactly L0/L1/P0/P1")
     datasets: dict[str, R2FeatureDataset]
     manifests: dict[str, R2FeatureManifest]
     feature_receipts: dict[str, R2FeatureVerificationReceipt]
@@ -2648,7 +2655,8 @@ def _build_oof_bundle(
         local_datasets = (datasets["L0"], datasets["L1"])
         evaluation_local_datasets = (datasets["L1"],)
         local_feature_descriptors = tuple(
-            (dataset.feature_set_id, dataset.feature_set_name) for dataset in local_datasets
+            (dataset.feature_set_id, dataset.feature_set_name)
+            for dataset in evaluation_local_datasets
         )
         selections_local = tuple(
             build_r2_preprocessing_selection(
@@ -3089,7 +3097,7 @@ def _build_oof_bundle(
     descriptor = _descriptor_payload(
         foundation_bundle_id=verified.bundle.foundation_id,
         experiment=experiment,
-        feature_names=tuple(sorted(datasets)),
+        feature_names=tuple(sorted(feature_manifest_paths)),
         run_kind=run_kind,
         identities=identities,
         representative_profile=representative_profile,
@@ -3108,8 +3116,11 @@ def _build_oof_bundle(
     if foundation_authority is not None:
         if experiment_path is None:
             raise ValueError("canonical OOF build requires an experiment runtime locator")
+        if feature_receipt_paths is None:
+            raise ValueError("canonical OOF build requires four feature verification receipts")
         runtime_inputs = foundation_authority.runtime_json(
             feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
             experiment_path=experiment_path,
             research_root=research_root,
         )
@@ -4005,6 +4016,7 @@ def _promotion_parent_boundaries(descriptor: Mapping[str, object]) -> tuple[Path
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if "holdout_target_source" in runtime:
         expected_keys.add("holdout_target_source")
@@ -4135,6 +4147,7 @@ async def _authenticate_confirmatory_parent(
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if "holdout_target_source" in runtime:
         expected_keys.add("holdout_target_source")
@@ -5935,6 +5948,7 @@ async def _replay_authority_oof_async(
         "experiment",
         "research_root",
         "feature_manifests",
+        "feature_receipts",
     }
     if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
         expected_runtime_keys.add("holdout_target_source")
@@ -5980,6 +5994,23 @@ async def _replay_authority_oof_async(
             or not feature_path.is_file()
         ):
             raise ValueError(f"OOF runtime feature manifest is unavailable: {name}")
+    raw_receipt_paths = runtime["feature_receipts"]
+    if not isinstance(raw_receipt_paths, dict):
+        raise ValueError("OOF runtime feature receipts are malformed")
+    if set(raw_receipt_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF runtime feature receipts must cover exactly L0/L1/P0/P1")
+    feature_receipt_paths: dict[str, Path] = {}
+    for name, raw_path in cast(dict[str, object], raw_receipt_paths).items():
+        if not isinstance(raw_path, str):
+            raise ValueError(f"OOF runtime feature receipt locator is malformed: {name}")
+        feature_receipt_path = Path(raw_path)
+        if (
+            not feature_receipt_path.is_absolute()
+            or feature_receipt_path.is_symlink()
+            or not feature_receipt_path.is_file()
+        ):
+            raise ValueError(f"OOF runtime feature receipt is unavailable: {name}")
+        feature_receipt_paths[name] = feature_receipt_path
     holdout_target_source_path = (
         runtime_file("holdout_target_source")
         if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
@@ -6061,6 +6092,7 @@ async def _replay_authority_oof_async(
             foundation_authority=authority,
             experiment=experiment,
             feature_manifest_paths=feature_paths,
+            feature_receipt_paths=feature_receipt_paths,
             research_root=research_root,
             clock=clock,
             output=expected_root,

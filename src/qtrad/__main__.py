@@ -2704,7 +2704,6 @@ async def _build_r2_oof(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
-    feature_receipt_paths = parse_feature_receipt_arguments(feature_receipt_arguments)
     if foundation_receipt_path is None:
         raise ValueError("R2 OOF build requires a foundation verification receipt")
     if (
@@ -2726,6 +2725,7 @@ async def _build_r2_oof(
         outcome_blind=True,
         holdout_target_source=holdout_source_authority,
     )
+    feature_receipt_paths = parse_feature_receipt_arguments(feature_receipt_arguments)
     manifest = build_oof_bundle(
         verified=foundation_authority.semantic_inputs,
         foundation_authority=foundation_authority,
