@@ -26,7 +26,9 @@ Stage 6 receipt
   -> R2.H
 ```
 
-However, **do not begin F2 immediately**.
+The required bounded production-path micro-run now passes through independently verified unopened G2 on a correctly shaped sparse 20-week confirmatory fixture. It proves the current CLI, persistence, receipt, authority and fail-closed state transitions only; it is not scientific evidence and accessed no holdout outcomes.
+
+However, **do not begin real F2 immediately**.
 
 The H4 retained-file migration proved that the old retained Stage 8 “qualifying” result is not valid under the corrected causal contracts. Its immutable invalidation record shows:
 
@@ -702,7 +704,21 @@ qtrad research baselines features \
   --output <feature-output>
 ```
 
-Then independently verify each persisted feature manifest with the corresponding `features-verify` command, the same foundation authorities and the same `--holdout-target-source`. Each command authenticates the source once and uses the outcome-blind Stage 8 loader.
+Then independently verify each persisted feature manifest with the same foundation authorities and the same `--holdout-target-source`, writing its create-only receipt:
+
+```text
+qtrad research baselines features-verify \
+  --foundation-bundle <stage8> \
+  --foundation-receipt <stage8-receipt> \
+  --foundation-promotion <stage8-promotion> \
+  --experiment <experiment> \
+  --holdout-target-source <holdout-target-source> \
+  --feature-set <NAME> \
+  --manifest <feature-output> \
+  --receipt-output <feature-receipt>
+```
+
+Each command authenticates the source once, uses the outcome-blind Stage 8 loader and independently proves the Phase F transformation. Ordinary OOF construction authenticates these receipts and consumes each required feature child once rather than replaying Phase F.
 
 Record for each set:
 
@@ -728,7 +744,7 @@ Invoke `oof-build` with:
 - exact Stage 8 receipt;
 - exact Stage 8 promotion;
 - frozen experiment;
-- all four independently verified feature manifests; and
+- all four independently verified feature manifests and their create-only verification receipts; and
 - the authenticated outcome-blind holdout-target source.
 
 Conceptually:
@@ -743,6 +759,10 @@ qtrad research baselines oof-build \
   --feature-manifest L1=<...> \
   --feature-manifest P0=<...> \
   --feature-manifest P1=<...> \
+  --feature-receipt L0=<...> \
+  --feature-receipt L1=<...> \
+  --feature-receipt P0=<...> \
+  --feature-receipt P1=<...> \
   --holdout-target-source <holdout-target-source.json> \
   --output <oof-root-or-manifest>
 ```

@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-08-15
+**Updated:** 2026-08-17
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion after a reviewed scientific divergence, and temporary v1/v2 readers/bridges are deleted. Current normal Stage 7/8 runtime is v3-only; no replacement Stage 8 promotion exists yet.
 **Decision-grade execution authority:** `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`
@@ -62,10 +62,17 @@ remains offline/replay.
   leave-one-out model and market-group universes, VIX context, aligned eligibility-gated spreads and
   locked-holdout exclusion. `research baselines features` writes a bounded immutable chunked-Parquet
   child with separate semantic dataset and physical manifest identities; `features-verify` validates
-  its strict wide schema, chunk and lineage hashes, then independently replays every row, value and
-  lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
-  semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
-  integration and any model conclusion remain pending.
+  its strict wide schema, chunk and lineage hashes, independently replays every row, value and lineage
+  from the verified foundation, and writes a create-only boundary-specific receipt. Ordinary OOF
+  construction authenticates the four exact receipts and consumes their feature rows once rather than
+  replaying Phase F. Eligible quote imbalance fails closed until quote-size semantics are separately
+  validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative integration and any model
+  conclusion remain pending.
+- A tracked sparse 20-week micro-run now passes the exact production CLI/persistence path from normal
+  Stage 7/8 fixture writers through four feature receipts, OOF receipt, F2 promotion, compact G1 and
+  independently verified unopened G2. Every stage is bounded and the preparation records
+  `holdout_outcomes_accessed=false`; no `OPENED`, `CONSUMED`, holdout-outcome or holdout-evaluation artefact exists.
+  This is fail-fast implementation evidence only, not a real confirmatory result.
 - R2.C software now provides authenticated fold-local preprocessing and primary-horizon local-Ridge
   alpha-selection evidence. It derives exact inner-fit, inner-validation and purged membership from the
   verified R1 fold and mature target availability; authenticates the declared local R2.B feature set;
@@ -195,12 +202,11 @@ remains offline/replay.
 
 ## Next actions
 
-1. PR-C1 convergence is merged and complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate remains the release check.
-2. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
-   authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
-   holdout execution and effectiveness evidence remain separately authorised and pending.
-3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-4. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
+1. The evidence-handoff convergence, bounded exact-path micro-run and clean full local gate are complete on the current candidate. Deliver the reviewed candidate without treating its fixture outputs as scientific evidence.
+2. Build, independently verify and promote a replacement qualifying Stage 8 foundation from the retained authenticated Stage 7 authority; do not reacquire provider history without separate authorisation.
+3. Only after that replacement authority exists, execute real Phase F through unopened G2 under `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`. Real holdout reveal and effectiveness evidence remain separately authorised and pending.
+4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities
