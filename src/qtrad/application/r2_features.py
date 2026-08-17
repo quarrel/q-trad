@@ -1000,7 +1000,7 @@ def _context(
     expected = len(instruments)
     coverage = len(values) / expected if expected else None
     threshold = experiment.feature_coverage_thresholds[FeatureFamily.POOLED_CROSS_ASSET]
-    if coverage is None or coverage < threshold:
+    if coverage is None or coverage < threshold or not values:
         return None, tuple(lineage)
     mean = sum(values) / len(values)
     if name.startswith(("loo_mean_return", "loo_market_group_mean")):

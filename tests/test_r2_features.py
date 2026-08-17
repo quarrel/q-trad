@@ -859,6 +859,41 @@ def test_pooled_universes_use_fixed_leave_one_out_and_group_denominators() -> No
     assert no_group is None and lineage == ()
 
 
+def test_empty_pooled_context_is_unavailable_at_zero_threshold() -> None:
+    config = _wider_target_experiment()
+    thresholds = dict(config.feature_coverage_thresholds)
+    thresholds[FeatureFamily.POOLED_CROSS_ASSET] = 0.0
+    config = replace(config, feature_coverage_thresholds=thresholds)
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    active = {
+        instrument: ((start, start + timedelta(minutes=2)),)
+        for instrument in config.ordered_instruments
+    }
+    foundation = _minimal_foundation(
+        start,
+        start + timedelta(minutes=2),
+        config.ordered_instruments,
+        active=active,
+    )
+    panel = cast(
+        PanelRow,
+        SimpleNamespace(
+            instrument_id=config.target_instruments[0],
+            latest_feature_bar_end=start + timedelta(minutes=2),
+            feature_data_asof=start + timedelta(minutes=3),
+        ),
+    )
+    value, lineage = _context(
+        "loo_mean_return_60s",
+        panel,
+        _index(()),
+        config,
+        foundation,
+        _RowCache(),
+    )
+    assert value is None and lineage == ()
+
+
 def test_cross_market_counts_use_leave_one_out_model_universe() -> None:
     config = _wider_target_experiment()
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
