@@ -852,13 +852,16 @@ def _load_ibkr_foundation_outcome_blind(
         *(_G2_EXTENSION_CHILD_KINDS if decode_g2 else ()),
         *(("targets",) if decode_target else ()),
     )
+    decoded_child_kinds = tuple(
+        kind for kind in consumed_child_kinds if kind != "pre-holdout-target"
+    )
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
         expected_lineage,
         decode_rows=False,
-        decode_kinds=consumed_child_kinds,
+        decode_kinds=decoded_child_kinds,
         byte_kinds=consumed_child_kinds,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
@@ -890,30 +893,24 @@ def _load_ibkr_foundation_outcome_blind(
     )
     if causal_metadata.dataset_id != child_ids["causal-metadata"]:
         raise ValueError("IBKR holdout causal metadata identity is invalid")
-    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(decoded["pre-holdout-target"][0])
     projection_mismatches = []
-    if pre_holdout_target.source_target_dataset_id != child_ids["targets"]:
-        projection_mismatches.append("source target")
-    if pre_holdout_target.observation_dataset_id != child_ids["observations"]:
+    source_projection = holdout_target_source.pre_holdout_target_dataset
+    if source_projection.observation_dataset_id != child_ids["observations"]:
         projection_mismatches.append("observation")
-    if pre_holdout_target.foundation_configuration_id != configuration.configuration_id:
+    if source_projection.foundation_configuration_id != configuration.configuration_id:
         projection_mismatches.append("configuration")
-    if pre_holdout_target.holdout_start != configuration.holdout_range[0]:
-        projection_mismatches.append("holdout start")
-    if pre_holdout_target.primary_horizon_seconds != int(
-        configuration.primary_vertical_horizon.total_seconds()
-    ):
-        projection_mismatches.append("horizon")
-    if pre_holdout_target.target_instruments != tuple(
-        sorted(holdout_target_source.target_instruments)
-    ):
-        projection_mismatches.append("instruments")
-    if (
-        pre_holdout_target.projected_target_dataset
-        != holdout_target_source.pre_holdout_target_dataset
-    ):
-        projection_mismatches.append("projected rows")
-    if pre_holdout_target.projection_id != child_ids["pre-holdout-target"]:
+    expected_projection_id = R2PreHoldoutTargetProjection.compute_projection_id(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        holdout_start=configuration.holdout_range[0],
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(sorted(holdout_target_source.target_instruments)),
+        projection_policy=R2PreHoldoutTargetProjection.POLICY,
+        projected_target_dataset=source_projection,
+        projected_target_dataset_id=source_projection.dataset_id,
+    )
+    if expected_projection_id != child_ids["pre-holdout-target"]:
         projection_mismatches.append("projection ID")
     if projection_mismatches:
         raise ValueError(

@@ -1416,14 +1416,12 @@ def _target_dataset_from_json(value: Mapping[str, object]) -> TargetDataset:
                 excursion_disposition=ExcursionDisposition(str(row["excursion_disposition"])),
             )
         )
-    dataset = TargetDataset.create(
+    return TargetDataset._from_verified_rows(  # pyright: ignore[reportPrivateUsage]
         rows,
         observation_dataset_id=str(value["observation_dataset_id"]),
         foundation_configuration_id=str(value["foundation_configuration_id"]),
+        dataset_id=str(value["dataset_id"]),
     )
-    if dataset.dataset_id != str(value["dataset_id"]):
-        raise ValueError("target dataset ID does not authenticate its rows")
-    return dataset
 
 
 @dataclass(frozen=True, slots=True)
@@ -2775,6 +2773,32 @@ class R2PreHoldoutTargetProjection:
                 projected_target_dataset=projected,
                 projected_target_dataset_id=projected.dataset_id,
             ),
+        )
+
+    @classmethod
+    def compute_projection_id(
+        cls,
+        *,
+        source_target_dataset_id: str,
+        observation_dataset_id: str,
+        foundation_configuration_id: str,
+        holdout_start: datetime,
+        primary_horizon_seconds: int,
+        target_instruments: Sequence[str],
+        projection_policy: str,
+        projected_target_dataset: TargetDataset,
+        projected_target_dataset_id: str,
+    ) -> str:
+        return _pre_holdout_projection_identity(
+            source_target_dataset_id=source_target_dataset_id,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+            holdout_start=holdout_start,
+            primary_horizon_seconds=primary_horizon_seconds,
+            target_instruments=target_instruments,
+            projection_policy=projection_policy,
+            projected_target_dataset=projected_target_dataset,
+            projected_target_dataset_id=projected_target_dataset_id,
         )
 
     def verify_source(self, source: TargetDataset) -> None:

@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from numpy import ndarray, zeros
 
+import qtrad.domain.foundation as foundation_domain
 from qtrad.application.r2_baselines import (
     LocalRidgeFoldResult,
     build_coefficient_stability_summary,
@@ -23,6 +24,7 @@ from qtrad.application.r2_preprocessing import (
     build_r2_preprocessing_selection,
     equal_instrument_total_weights,
     fit_preprocessing,
+    join_training_rows,
     select_chronological_alpha,
     transform,
 )
@@ -1259,3 +1261,66 @@ def test_preprocessing_and_fold_fit_ids_exclude_build_provenance() -> None:
         sklearn_library_identity="scikit-learn==other-build",
     )
     assert changed_fit.artifact_id == fit.artifact_id
+
+
+def test_target_dataset_direct_constructor_rejects_forged_verified_id() -> None:
+    verified, _features, _config, _fold = _bound_fixture()
+    with pytest.raises(ValueError, match="does not match its semantic rows"):
+        TargetDataset(
+            rows=verified.targets.rows,
+            observation_dataset_id=verified.targets.observation_dataset_id,
+            foundation_configuration_id=verified.targets.foundation_configuration_id,
+            dataset_id="0" * 64,
+            _verified=True,
+        )
+
+
+def test_target_dataset_create_hashes_rows_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified, _features, _config, _fold = _bound_fixture()
+    calls = 0
+    original = foundation_domain._target_dataset_identity
+
+    def count_identity(
+        rows: Sequence[TargetRow],
+        *,
+        observation_dataset_id: str,
+        foundation_configuration_id: str,
+    ) -> str:
+        nonlocal calls
+        calls += 1
+        return original(
+            rows,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+        )
+
+    monkeypatch.setattr(foundation_domain, "_target_dataset_identity", count_identity)
+    recreated = TargetDataset.create(
+        verified.targets.rows,
+        observation_dataset_id=verified.targets.observation_dataset_id,
+        foundation_configuration_id=verified.targets.foundation_configuration_id,
+    )
+    assert recreated.dataset_id == verified.targets.dataset_id
+    assert calls == 1
+
+
+def test_join_training_rows_uses_verified_target_ids_without_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified, features, config, fold = _bound_fixture()
+
+    def unexpected_target_identity(**_kwargs: object) -> str:
+        raise AssertionError("preprocessing recomputed an authenticated target ID")
+
+    monkeypatch.setattr(foundation_domain, "target_identity", unexpected_target_identity)
+    joined = join_training_rows(
+        verified.targets,
+        fold,
+        features,
+        config,
+        (config.confirmatory_target_instruments[0],),
+        config.primary_horizon,
+    )
+    assert tuple(row.target_id for row in joined) == fold.training_target_ids

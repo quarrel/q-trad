@@ -179,11 +179,7 @@ def _partitioned_payload(
                     raise ValueError("partitioned holdout mapping row is invalid")
             else:
                 if set(row) == {"field", "value", "is_null"} and row["is_null"] is True:
-                    if (
-                        row["value"] is not None
-                        or field in nullable_fields
-                        or grouped[field]
-                    ):
+                    if row["value"] is not None or field in nullable_fields or grouped[field]:
                         raise ValueError("partitioned holdout null field row is invalid")
                     nullable_fields.add(field)
                 elif set(row) == {"field", "value"}:
@@ -236,8 +232,10 @@ def _compact_header_digest(payload: Mapping[str, object]) -> str:
 
 def _verify_compact_header(payload: Mapping[str, object], *, encoded: bytes | None = None) -> None:
     digest = payload.get("header_sha256")
-    if not isinstance(digest, str) or len(digest) != 64 or any(
-        character not in "0123456789abcdef" for character in digest
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise ValueError("partitioned holdout child header digest is malformed")
     if digest != _compact_header_digest(payload):
@@ -281,6 +279,7 @@ def _write_partitioned_child(
     if any(field not in fields for field in mapping_names):
         raise ValueError("partitioned mapping fields must be registered array fields")
     if array_fields:
+
         def encoded_rows() -> Iterator[Mapping[str, object]]:
             for field in fields:
                 if field in mapping_names:
@@ -303,10 +302,10 @@ def _write_partitioned_child(
                     ):
                         yield from ({"field": field, "value": value} for value in values)
                     else:
-                        raise TypeError(
-                            f"partitioned array field is not a sequence: {field}"
-                        )
+                        raise TypeError(f"partitioned array field is not a sequence: {field}")
+
         rows = encoded_rows()
+
         def mapping_count(value: object, field: str) -> int:
             if isinstance(value, Mapping):
                 return len(value)
@@ -341,6 +340,7 @@ def _write_partitioned_child(
         expected_row_count=expected_count,
     )
     return compact, _partitioned_paths(output, relative, compact, identity_field=identity_field)
+
 
 def _semantic_id(payload: Mapping[str, object], identity_key: str) -> str:
     semantic = {key: value for key, value in payload.items() if key != identity_key}
@@ -407,16 +407,14 @@ def _authenticate_cached_snapshot(root: Path, entry: _PayloadCacheEntry) -> None
     encoded = path.read_bytes()
     if len(encoded) > _MAX_BYTES or sha256(encoded).hexdigest() != entry.top_level_sha256:
         raise ValueError(
-            "cached holdout child bytes differ from its authenticated snapshot: "
-            f"{entry.relative}"
+            f"cached holdout child bytes differ from its authenticated snapshot: {entry.relative}"
         )
     expected_parts = {relative for relative, _digest in entry.part_snapshot}
     parts_root = _safe_child(root, f"{entry.relative}.parts")
     if expected_parts:
         if parts_root.is_symlink() or not parts_root.is_dir():
             raise ValueError(
-                "cached holdout part root is not a regular directory: "
-                f"{entry.relative}"
+                f"cached holdout part root is not a regular directory: {entry.relative}"
             )
         actual_parts: set[str] = set()
         for candidate in parts_root.rglob("*"):
@@ -437,11 +435,11 @@ def _authenticate_cached_snapshot(root: Path, entry: _PayloadCacheEntry) -> None
         encoded_part = part.read_bytes()
         if len(encoded_part) > _MAX_BYTES or sha256(encoded_part).hexdigest() != expected_digest:
             raise ValueError(
-                "cached holdout part bytes differ from its authenticated snapshot: "
-                f"{relative}"
+                f"cached holdout part bytes differ from its authenticated snapshot: {relative}"
             )
     if sha256(canonical_bytes(entry.payload)).hexdigest() != entry.payload_sha256:
         raise ValueError(f"cached holdout payload was mutated in memory: {entry.relative}")
+
 
 def _verify_child(
     root: Path,
@@ -772,7 +770,7 @@ def _target_dataset_from_payload(
                 ),
             )
         )
-    dataset = TargetDataset.create(
+    return TargetDataset._from_verified_rows(
         rows,
         observation_dataset_id=_text_value(
             payload["observation_dataset_id"], "target observations"
@@ -780,10 +778,8 @@ def _target_dataset_from_payload(
         foundation_configuration_id=_text_value(
             payload["foundation_configuration_id"], "target foundation"
         ),
+        dataset_id=_text_value(payload["dataset_id"], "target dataset ID"),
     )
-    if dataset.dataset_id != _text_value(payload["dataset_id"], "target dataset ID"):
-        raise ValueError(f"{field} ID does not authenticate its rows")
-    return dataset
 
 
 def _opportunities_from_selection(
@@ -1005,6 +1001,7 @@ def _feature_set_id(value: object) -> str:
         raise ValueError("holdout feature child has no feature-set identity")
     return feature_set_id
 
+
 def _preparation_authority_payload(
     selection: R2HoldoutSelectionManifest,
     seal: R2HoldoutForecastSeal,
@@ -1188,7 +1185,8 @@ def _verify_preparation_authority(
         or payload.get("schema_version") != 1
         or payload.get("selection_manifest_id") != selection.manifest_id
         or payload.get("seal_id") != seal.seal_id
-        or payload.get("authority_id") != _semantic_id(
+        or payload.get("authority_id")
+        != _semantic_id(
             {key: payload[key] for key in payload if key != "authority_id"}, "authority_id"
         )
     ):
@@ -1203,20 +1201,16 @@ def _verify_preparation_authority(
     if payload != expected:
         raise ValueError("preparation authority differs from authenticated immediate parents")
 
+
 def _replace_json(path: Path, payload: Mapping[str, object]) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"expected a regular claim file: {path}")
     temporary = path.with_name(f".{path.name}.next")
     encoded = canonical_bytes(payload)
     if temporary.exists() or temporary.is_symlink():
-        if (
-            temporary.is_symlink()
-            or not temporary.is_file()
-            or temporary.read_bytes() != encoded
-        ):
+        if temporary.is_symlink() or not temporary.is_file() or temporary.read_bytes() != encoded:
             raise ValueError(
-                "claim transition temporary differs from its intended bytes: "
-                f"{temporary}"
+                f"claim transition temporary differs from its intended bytes: {temporary}"
             )
     else:
         atomic_create(temporary, encoded)
@@ -1594,8 +1588,6 @@ def _preparation_transfer_intent(
     }
 
 
-
-
 def _preparation_usage(
     selection_manifest_id: str,
     seal_id: str,
@@ -1838,6 +1830,7 @@ def _physical_child_paths(root: Path, relative: str, *, identity_field: str) -> 
     if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
         _verify_compact_header(physical, encoded=encoded)
     return (relative, *_partitioned_paths(root, relative, physical, identity_field=identity_field))
+
 
 def _load_feature_payloads(
     root: Path,
@@ -2378,8 +2371,7 @@ def write_holdout_preparation(
     if set(supplied_training_targets) != training_target_ids:
         raise ValueError("training target authority does not match final-fit lineage")
     if any(
-        dataset.dataset_id != expected_pre_holdout
-        for dataset in supplied_training_targets.values()
+        dataset.dataset_id != expected_pre_holdout for dataset in supplied_training_targets.values()
     ):
         raise ValueError("training target authority does not match the frozen pre-holdout target")
     _write_json(
@@ -2599,10 +2591,7 @@ def verify_holdout_preparation(
         if (
             not isinstance(intent_destination_root_id, str)
             or len(intent_destination_root_id) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in intent_destination_root_id
-            )
+            or any(character not in "0123456789abcdef" for character in intent_destination_root_id)
         ):
             raise ValueError("transfer intent destination identity is malformed")
         expected_intent = _preparation_transfer_intent(
@@ -2637,9 +2626,7 @@ def verify_holdout_preparation(
         if (
             not isinstance(destination_root_id, str)
             or len(destination_root_id) != 64
-            or any(
-                character not in "0123456789abcdef" for character in destination_root_id
-            )
+            or any(character not in "0123456789abcdef" for character in destination_root_id)
         ):
             raise ValueError("preparation usage destination identity is malformed")
         expected_usage = _preparation_usage(
@@ -2673,9 +2660,7 @@ def verify_holdout_preparation(
         allowed.add(_PREPARATION_USAGE_FILE)
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
-    elif has_transfer_lineage and not (
-        _allow_incomplete_transfer and claim_state == "TRANSFERRED"
-    ):
+    elif has_transfer_lineage and not (_allow_incomplete_transfer and claim_state == "TRANSFERRED"):
         raise ValueError("transferred preparation requires a usage claim")
     for fit_id in seal.final_fit_ids:
         allowed.update(
@@ -2913,12 +2898,14 @@ def prepare_holdout_from_files(
         has_valid_transfer_intent = True
     elif existing_claim == transferred:
         raise ValueError("transferred source preparation lacks an authenticated transfer intent")
-    if existing_claim == transferred and (
-        source_usage_path.exists() or source_usage_path.is_symlink()
-    ) and (
-        source_usage_path.is_symlink()
-        or not source_usage_path.is_file()
-        or _load_object(source_usage_path).get("destination_root_id") != destination_root_id
+    if (
+        existing_claim == transferred
+        and (source_usage_path.exists() or source_usage_path.is_symlink())
+        and (
+            source_usage_path.is_symlink()
+            or not source_usage_path.is_file()
+            or _load_object(source_usage_path).get("destination_root_id") != destination_root_id
+        )
     ):
         raise FileExistsError(
             "source preparation has already been transferred to another destination"
@@ -2973,14 +2960,9 @@ def prepare_holdout_from_files(
 
     def ensure_json(path: Path, payload: Mapping[str, object]) -> None:
         if path.exists() or path.is_symlink():
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or _load_object(path) != dict(payload)
-            ):
+            if path.is_symlink() or not path.is_file() or _load_object(path) != dict(payload):
                 raise ValueError(
-                    "transfer destination differs from its authenticated source: "
-                    f"{path}"
+                    f"transfer destination differs from its authenticated source: {path}"
                 )
         else:
             _write_json(path, payload)
@@ -2998,8 +2980,7 @@ def prepare_holdout_from_files(
                 or target_path.read_bytes() != encoded
             ):
                 raise ValueError(
-                    "transfer destination differs from its authenticated source: "
-                    f"{target_path}"
+                    f"transfer destination differs from its authenticated source: {target_path}"
                 )
         else:
             atomic_create(target_path, encoded)
@@ -3975,6 +3956,7 @@ def build_holdout_bundle(
             "outcome-target.json": outcome_target_payload,
         }
     )
+
     def child_replay_specs(
         relative: str,
         *,

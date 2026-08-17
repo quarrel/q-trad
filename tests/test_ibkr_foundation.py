@@ -467,9 +467,13 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
         holdout_target_source=blind_source,
     )
     assert_parquet_reads(safe_kinds | {"folds"})
-    assert {kind for path in child_reads for kind in all_child_kinds if kind in path.parts} == (
-        safe_kinds | {"folds"}
-    )
+    expected_decoded = (safe_kinds - {"pre-holdout-target"}) | {"folds"}
+    assert "pre-holdout-target" not in {
+        kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+    }
+    assert {
+        kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+    } == expected_decoded
     assert build_id
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
 
@@ -489,9 +493,10 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
         )
         expected = safe_kinds | {"folds"} | expected_extra
         assert_parquet_reads(expected)
+        expected_decoded = (safe_kinds - {"pre-holdout-target"}) | {"folds"} | expected_extra
         assert {
             kind for path in child_reads for kind in all_child_kinds if kind in path.parts
-        } == expected
+        } == expected_decoded
 
     parquet_reads.clear()
     child_reads.clear()
