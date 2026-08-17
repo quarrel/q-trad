@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -70,8 +71,8 @@ _GRID = timedelta(minutes=1)
 _HORIZON = timedelta(minutes=15)
 _FIXTURE_WEEKS = 20
 _DECISIONS_PER_WEEK = 60
+_FEATURE_BUFFER = timedelta(minutes=5)
 _SOURCE_END = _BASE + timedelta(weeks=_FIXTURE_WEEKS, minutes=30)
-_SPLIT = _BASE + timedelta(weeks=10)
 _CANDIDATES = tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS)
 
 
@@ -86,10 +87,32 @@ def _fixture_decisions() -> tuple[datetime, ...]:
 def _fixture_intervals() -> tuple[tuple[datetime, datetime], ...]:
     return tuple(
         (
-            _BASE - timedelta(minutes=1) if week == 0 else _BASE + timedelta(weeks=week),
-            _SOURCE_END if week == _FIXTURE_WEEKS - 1 else _BASE + timedelta(weeks=week + 1),
+            decision_start - _FEATURE_BUFFER,
+            decision_start + _DECISIONS_PER_WEEK * _GRID + _HORIZON,
         )
         for week in range(_FIXTURE_WEEKS)
+        for decision_start in (_BASE + timedelta(weeks=week, days=1),)
+    )
+
+
+def _fixture_request_intervals() -> tuple[tuple[datetime, datetime], ...]:
+    intervals: list[tuple[datetime, datetime]] = []
+    cursor = _BASE - timedelta(minutes=1)
+    for _ in range(_FIXTURE_WEEKS - 1):
+        end = cursor + timedelta(days=7)
+        intervals.append((cursor, end))
+        cursor = end
+    intervals.append((cursor, _SOURCE_END))
+    return tuple(intervals)
+
+
+def _fixture_bar_times() -> tuple[datetime, ...]:
+    return tuple(
+        interval_start + offset * _GRID
+        for interval_start, _interval_end in _fixture_intervals()
+        for offset in range(
+            int(_FEATURE_BUFFER / _GRID) + _DECISIONS_PER_WEEK + int(_HORIZON / _GRID)
+        )
     )
 
 
@@ -246,13 +269,11 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
             )
         )
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            decisions = _fixture_decisions()
-            bars = []
-            for decision in decisions:
-                if request.interval_start <= decision < request.interval_end:
-                    bars.extend(decision + timedelta(minutes=offset) for offset in range(-2, 15))
-            # The two contiguous requests own disjoint intervals; guard their seam explicitly.
-            unique_bars = tuple(dict.fromkeys(bars))
+            unique_bars = tuple(
+                bar_time
+                for bar_time in _fixture_bar_times()
+                if request.interval_start <= bar_time < request.interval_end
+            )
             sequence = 1
             instrument_index = _CANDIDATES.index(str(request.instrument_id))
             for bar_time in unique_bars:
@@ -318,18 +339,17 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
             )
 
         else:
-            decisions = tuple(
-                decision
-                for decision in _fixture_decisions()
-                if request.interval_start <= decision < request.interval_end
-            )
-            sessions: list[dict[str, JsonValue]] = [
+            sessions = [
                 {
-                    "start": utc_text(decisions[0] - timedelta(minutes=1)),
-                    "end": utc_text(decisions[-1] + _HORIZON),
+                    "start": utc_text(interval_start),
+                    "end": utc_text(interval_end),
                     "active": True,
                 }
+                for interval_start, interval_end in _fixture_intervals()
+                if request.interval_start <= interval_start and interval_end <= request.interval_end
             ]
+            if not sessions:
+                raise AssertionError("fixture schedule request has no active session")
             callbacks.extend(
                 (
                     IbkrHistoricalCallbackEvidence(
@@ -424,11 +444,27 @@ def _foundation_config() -> FoundationConfig:
 
 
 def _stage8_fixture(root: Path) -> tuple[Path, Path, Path, Path, Path]:
+    intervals = _fixture_intervals()
+    assert len(intervals) == _FIXTURE_WEEKS
+    assert all(start < end for start, end in intervals)
+    assert all(left_end < right_start for (_, left_end), (right_start, _) in pairwise(intervals))
+    active_minutes = sum(int((end - start) / _GRID) for start, end in intervals)
+    expected_active_minutes = _FIXTURE_WEEKS * int(
+        (_FEATURE_BUFFER + _DECISIONS_PER_WEEK * _GRID + _HORIZON) / _GRID
+    )
+    assert active_minutes == expected_active_minutes
+    request_intervals = _fixture_request_intervals()
+    assert request_intervals[0][0] == _BASE - timedelta(minutes=1)
+    assert request_intervals[-1][1] == _SOURCE_END
+    assert all(
+        left_end == right_start for (_, left_end), (right_start, _) in pairwise(request_intervals)
+    )
+    assert all(end - start <= timedelta(days=28) for start, end in request_intervals)
     requests: list[IbkrHistoricalRequest] = []
     for index, instrument in enumerate(_CANDIDATES, start=1):
         fingerprint = _fingerprint(instrument, index)
         for kind in (IbkrHistoricalRequestKind.MIDPOINT_BARS, IbkrHistoricalRequestKind.SCHEDULE):
-            for interval_start, interval_end in _fixture_intervals():
+            for interval_start, interval_end in _fixture_request_intervals():
                 requests.append(
                     _request(instrument, fingerprint, kind, interval_start, interval_end)
                 )
@@ -501,10 +537,22 @@ def test_stage8_micro_fixture_builds_and_qualifies(tmp_path: Path) -> None:
         for value in readiness["rows_by_candidate"].values()
     )
     configuration = document["payload"]["configuration"]
+    active_intervals = document["payload"]["active_intervals"]
+    assert all(len(active_intervals[instrument]) == _FIXTURE_WEEKS for instrument in _CANDIDATES)
+    assert all(
+        sum(
+            int((datetime.fromisoformat(interval[1]) - datetime.fromisoformat(interval[0])) / _GRID)
+            for interval in active_intervals[instrument]
+        )
+        == _FIXTURE_WEEKS * int((_FEATURE_BUFFER + _DECISIONS_PER_WEEK * _GRID + _HORIZON) / _GRID)
+        for instrument in _CANDIDATES
+    )
     child_references = document["payload"]["children"]
     target_rows = sum(int(part["row_count"]) for part in child_references["targets"])
     panel_rows = sum(int(part["row_count"]) for part in child_references["panel"])
-    active_minutes_upper_bound = _FIXTURE_WEEKS * (_DECISIONS_PER_WEEK + int(_HORIZON / _GRID))
+    active_minutes_upper_bound = _FIXTURE_WEEKS * int(
+        (_FEATURE_BUFFER + _DECISIONS_PER_WEEK * _GRID + _HORIZON) / _GRID
+    )
     assert target_rows <= active_minutes_upper_bound * len(_CANDIDATES)
     assert panel_rows <= active_minutes_upper_bound * len(configuration["ordered_instruments"])
     assert document["payload"]["target_opportunity_policy_id"]
