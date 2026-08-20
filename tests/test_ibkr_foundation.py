@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ import pytest
 import qtrad.runtime.ibkr_foundation as foundation_runtime
 from qtrad import __main__ as cli
 from qtrad.application.ibkr_foundation import _ibkr_opportunity_coverage
+from qtrad.domain import foundation as foundation_domain
+from qtrad.domain import research as research_domain
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import ReturnDisposition
@@ -567,6 +570,9 @@ def test_stage8_cli_build_and_verify_round_trip(
     )
     assert json.loads(foundation.read_bytes())["contract"] == "qtrad-ibkr-historical-foundation-v2"
     assert receipt.is_file()
+    authenticated = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    assert authenticated["foundation_id"]
+    assert authenticated["verification_id"]
 
 
 def test_stage8_child_partition_bisects_adverse_encoding_expansion(
@@ -781,3 +787,242 @@ def test_stage8_receipt_from_previous_target_opportunity_policy_is_rejected(
     receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="receipt"):
         authenticate_ibkr_foundation(foundation, receipt=receipt)
+
+
+def test_stage8_child_writer_materialises_one_kind_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = 0
+    peak = 0
+    order: list[str] = []
+
+    def rows_for_kind(_build: object, kind: str) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
+        nonlocal active, peak
+        order.append(kind)
+        active += 1
+        peak = max(peak, active)
+
+        def rows() -> Iterable[Mapping[str, JsonValue]]:
+            nonlocal active
+            try:
+                yield {"row": kind}
+            finally:
+                active -= 1
+
+        return rows(), kind
+
+    def write_kind(
+        _child_root: Path,
+        _bundle_root: Path,
+        kind: str,
+        rows: Iterable[Mapping[str, JsonValue]],
+        _dataset_id: str,
+        _lineage: Mapping[str, JsonValue],
+    ) -> list[JsonValue]:
+        assert tuple(rows) == ({"row": kind},)
+        return [{"kind": kind}]
+
+    monkeypatch.setattr(foundation_runtime, "_child_rows_and_id", rows_for_kind)
+    monkeypatch.setattr(foundation_runtime, "_write_child_parts", write_kind)
+
+    children, semantic_children = foundation_runtime._write_children_v3(
+        tmp_path / "foundation.json.children",
+        tmp_path,
+        cast(Any, object()),
+        {"source": "fixture"},
+    )
+
+    assert peak == 1
+    assert active == 0
+    assert order == list(foundation_runtime._CHILD_KINDS)
+    assert tuple(children) == foundation_runtime._CHILD_KINDS
+    assert semantic_children == {kind: kind for kind in foundation_runtime._CHILD_KINDS}
+
+
+def test_stage8_repeated_tiny_builds_have_identical_manifest_and_tree(
+    tmp_path: Path,
+) -> None:
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    first_parent = tmp_path / "first"
+    second_parent = tmp_path / "second"
+    first_parent.mkdir()
+    second_parent.mkdir()
+
+    write_ibkr_foundation(
+        first_parent / "foundation.json",
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=1,
+    )
+    write_ibkr_foundation(
+        second_parent / "foundation.json",
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=8,
+    )
+
+    def tree(parent: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(parent).as_posix(): path.read_bytes()
+            for path in parent.rglob("*")
+            if path.is_file()
+        }
+
+    assert tree(first_parent) == tree(second_parent)
+    assert json.loads((first_parent / "foundation.json").read_bytes()) == json.loads(
+        (second_parent / "foundation.json").read_bytes()
+    )
+
+
+def test_stage8_verifier_materialises_one_kind_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foundation, stage7_manifest, stage7_receipt, _receipt = _verified_fixture(tmp_path)
+    original = foundation_runtime._child_rows_and_id
+    active = 0
+    peak = 0
+    calls: list[str] = []
+
+    def rows_for_kind(build: Any, kind: str) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
+        nonlocal active, peak
+        rows, dataset_id = original(build, kind)
+        calls.append(kind)
+        active += 1
+        peak = max(peak, active)
+
+        def tracked_rows() -> Iterable[Mapping[str, JsonValue]]:
+            nonlocal active
+            try:
+                yield from rows
+            finally:
+                active -= 1
+
+        return tracked_rows(), dataset_id
+
+    monkeypatch.setattr(foundation_runtime, "_child_rows_and_id", rows_for_kind)
+    receipt = tmp_path / "foundation-receipt-replayed.json"
+    verify_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=receipt,
+        workers=1,
+    )
+
+    assert peak == 1
+    assert active == 0
+    assert calls == list(foundation_runtime._CHILD_KINDS)
+
+
+def test_stage8_retained_shape_is_bounded_across_source_identity_and_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    configuration = _stage8_configuration()
+    foundation = tmp_path / "foundation.json"
+
+    captured_source: dict[str, Any] = {}
+    original_stage7_source = foundation_runtime._stage7_source_v3
+
+    def capture_source(manifest: Path, receipt: Path, config: Any) -> Any:
+        source = original_stage7_source(manifest, receipt, config)
+        captured_source["source"] = source
+        return source
+
+    monkeypatch.setattr(foundation_runtime, "_stage7_source_v3", capture_source)
+
+    original_child_rows_and_id = foundation_runtime._child_rows_and_id
+    active = 0
+    peak = 0
+
+    def child_rows_and_id(build: Any, kind: str) -> tuple[Iterable[Mapping[str, JsonValue]], str]:
+        nonlocal active, peak
+        rows, dataset_id = original_child_rows_and_id(build, kind)
+        active += 1
+        peak = max(peak, active)
+
+        def tracked_rows() -> Iterable[Mapping[str, JsonValue]]:
+            nonlocal active
+            try:
+                yield from rows
+            finally:
+                active -= 1
+
+        return tracked_rows(), dataset_id
+
+    monkeypatch.setattr(foundation_runtime, "_child_rows_and_id", child_rows_and_id)
+
+    observation_identity_calls = 0
+    original_observation_identity = research_domain._observation_dataset_identity
+
+    def observation_identity(
+        rows: Any,
+        *,
+        configuration: Mapping[str, JsonValue],
+        source_dataset_ids: Any,
+        selection_policies: Mapping[str, JsonValue],
+    ) -> str:
+        nonlocal observation_identity_calls
+        observation_identity_calls += 1
+        return original_observation_identity(
+            rows,
+            configuration=configuration,
+            source_dataset_ids=source_dataset_ids,
+            selection_policies=selection_policies,
+        )
+
+    original_observation_json = research_domain._canonical_json_bytes
+    original_panel_json = foundation_domain._json_bytes
+
+    def no_full_row_json(value: object) -> bytes:
+        if isinstance(value, dict) and "rows" in value:
+            raise AssertionError("dataset identity materialised a full row list")
+        return original_observation_json(value)
+
+    def no_full_panel_json(value: object) -> bytes:
+        if isinstance(value, dict) and "rows" in value:
+            raise AssertionError("panel identity materialised a full row list")
+        return original_panel_json(value)
+
+    panel_identity_calls = 0
+    original_panel_identity = foundation_domain._panel_dataset_identity
+
+    def panel_identity(
+        rows: Any,
+        *,
+        observation_dataset_id: str,
+        foundation_configuration_id: str,
+    ) -> str:
+        nonlocal panel_identity_calls
+        panel_identity_calls += 1
+        return original_panel_identity(
+            rows,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+        )
+
+    monkeypatch.setattr(research_domain, "_observation_dataset_identity", observation_identity)
+    monkeypatch.setattr(research_domain, "_canonical_json_bytes", no_full_row_json)
+    monkeypatch.setattr(foundation_domain, "_panel_dataset_identity", panel_identity)
+    monkeypatch.setattr(foundation_domain, "_json_bytes", no_full_panel_json)
+
+    write_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=configuration,
+        workers=1,
+    )
+
+    source = captured_source["source"]
+    observations = source.observations
+    assert observations.part_read_count == 1
+    assert observations.max_cached_rows > 0
+    assert peak == 1
+    assert active == 0
+    assert observation_identity_calls == 1
+    assert panel_identity_calls == 1

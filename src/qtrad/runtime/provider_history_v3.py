@@ -346,7 +346,7 @@ class _SourceSummary:
 
 
 class ProviderHistoryV3Rows:
-    """Re-iterable selected Stage 7 rows; parts are authenticated on consumption."""
+    """Re-iterable selected Stage 7 rows with a bounded authenticated-part cache."""
 
     def __init__(
         self,
@@ -358,8 +358,21 @@ class ProviderHistoryV3Rows:
         self._manifest = manifest
         self._selected_parts = selected_parts
         self.selection = selection
-        self._part_cache: dict[Path, tuple[ProviderHistoricalObservation, ...]] = {}
+        self._part_cache_path: Path | None = None
+        self._part_cache_rows: tuple[ProviderHistoricalObservation, ...] | None = None
+        self._part_read_count = 0
+        self._max_cached_rows = 0
         self.instruments = tuple(sorted({p.reference.instrument_id for p in selected_parts}))
+
+    @property
+    def part_read_count(self) -> int:
+        """Number of physical parts decoded by this rows view."""
+        return self._part_read_count
+
+    @property
+    def max_cached_rows(self) -> int:
+        """Peak rows retained by the bounded physical-part cache."""
+        return self._max_cached_rows
 
     def __len__(self) -> int:
         if self.selection is not None:
@@ -384,10 +397,16 @@ class ProviderHistoryV3Rows:
     def _iter_part_with_positions(
         self, part: _PartInput
     ) -> Iterator[tuple[ProviderHistoricalObservation, int]]:
-        rows = self._part_cache.get(part.path)
-        if rows is None:
+        if self._part_cache_path != part.path:
             rows = _read_part(part.path, part.reference)
-            self._part_cache[part.path] = rows
+            self._part_cache_path = part.path
+            self._part_cache_rows = rows
+            self._part_read_count += 1
+            self._max_cached_rows = max(self._max_cached_rows, len(rows))
+        else:
+            rows = self._part_cache_rows
+            if rows is None:
+                raise RuntimeError("provider-history v3 part cache is inconsistent")
         for index, row in enumerate(rows, part.global_offset + 1):
             if self.selection is not None and (
                 row.instrument_id not in self.selection.requested_instrument_ids

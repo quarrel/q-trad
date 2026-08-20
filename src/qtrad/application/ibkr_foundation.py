@@ -79,13 +79,29 @@ def build_ibkr_foundation(
     configuration: FoundationConfig,
 ) -> IBKRFoundationBuild:
     """Adapt verified provider history and replay foundation children."""
-
     provider_dataset = source_evidence.dataset
     provider_rows = source_evidence.observations
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
-    observed_instruments = tuple(sorted({row.instrument_id for row in provider_rows}))
+
+    adapted_rows: list[ObservationRow] = []
+    observed_instruments: set[str] = set()
+    source_start: datetime | None = None
+    source_end: datetime | None = None
+    previous_source_key: tuple[str, datetime, datetime] | None = None
+    for index, row in enumerate(provider_rows, start=1):
+        source_key = (row.instrument_id, row.interval_start, row.interval_end)
+        if previous_source_key is not None and source_key < previous_source_key:
+            raise ValueError("provider-history rows are not in canonical source order")
+        previous_source_key = source_key
+        observed_instruments.add(row.instrument_id)
+        source_start = (
+            row.interval_start if source_start is None else min(source_start, row.interval_start)
+        )
+        source_end = row.interval_end if source_end is None else max(source_end, row.interval_end)
+        adapted_rows.append(_adapt_observation(row, provider_dataset.dataset_sha256, index))
+
     ordered_instruments = tuple(
-        sorted(set(configuration.ordered_instruments) | set(observed_instruments) | candidate_names)
+        sorted(set(configuration.ordered_instruments) | observed_instruments | candidate_names)
     )
     roles = {
         instrument_id: (
@@ -100,14 +116,14 @@ def build_ibkr_foundation(
         instrument_roles=roles,
     )
 
-    source_start = (
-        min(row.interval_start for row in provider_rows)
-        if provider_rows
-        else configuration.range_start
-    )
-    source_end = (
-        max(row.interval_end for row in provider_rows) if provider_rows else configuration.range_end
-    )
+    if source_start is None:
+        observed_interval_start = configuration.range_start
+        observed_interval_end = configuration.range_end
+    else:
+        observed_interval_start = source_start
+        if source_end is None:
+            raise ValueError("provider-history rows have no interval end")
+        observed_interval_end = source_end
     observation_configuration: dict[str, JsonValue] = {
         "contract": "qtrad-ibkr-historical-observation-adapter-v1",
         "source_class": "IBKR_HISTORICAL_RESEARCH",
@@ -116,28 +132,14 @@ def build_ibkr_foundation(
         "ordered_instruments": list(ordered_instruments),
         "interval_start": adapted_configuration.required_observation_start.isoformat(),
         "interval_end": adapted_configuration.required_observation_end.isoformat(),
-        "observed_interval_start": source_start.isoformat() if provider_rows else None,
-        "observed_interval_end": source_end.isoformat() if provider_rows else None,
+        "observed_interval_start": observed_interval_start.isoformat(),
+        "observed_interval_end": observed_interval_end.isoformat(),
         "grid_resolution_seconds": int(adapted_configuration.grid_resolution.total_seconds()),
         "availability_basis": adapted_configuration.availability_basis.value,
         "source_dataset_id": provider_dataset.dataset_sha256,
     }
-    rows = tuple(
-        _adapt_observation(row, provider_dataset.dataset_sha256, index)
-        for index, row in enumerate(
-            sorted(
-                provider_rows,
-                key=lambda item: (
-                    item.instrument_id,
-                    item.interval_start,
-                    item.interval_end,
-                ),
-            ),
-            start=1,
-        )
-    )
     observations = ObservationDataset.create(
-        rows,
+        adapted_rows,
         configuration=observation_configuration,
         source_dataset_ids=(provider_dataset.dataset_sha256,),
         selection_policies={
@@ -146,6 +148,7 @@ def build_ibkr_foundation(
             "correction_policy": "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE",
         },
     )
+    del adapted_rows
     adapted_configuration = replace(
         adapted_configuration,
         observation_dataset_id=observations.dataset_id,
@@ -175,8 +178,8 @@ def build_ibkr_foundation(
     readiness = evaluate_ibkr_foundation_readiness(
         source_evidence,
         targets,
-        source_start=source_start,
-        source_end=source_end,
+        source_start=observed_interval_start,
+        source_end=observed_interval_end,
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,
         primary_horizon=adapted_configuration.primary_vertical_horizon,
