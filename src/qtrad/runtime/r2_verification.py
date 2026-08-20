@@ -230,6 +230,7 @@ _OOF_SELECTION_PRIMARY_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
 _OOF_SELECTION_SECONDARY_METRICS = ("RMSE",)
 _OOF_SELECTION_FINAL_FITTING_PROCEDURE = "PENDING_R2_H_INTEGRATION"
 _IMAGE_IDENTITY_CONTRACT = "qtrad-runtime-image-identity-v1"
+_DEV_IMAGE_IDENTITY_CONTRACT = "qtrad-image-identity-v1"
 R2_CLAIM_VERIFIER_CONTRACTS = MappingProxyType(
     {
         "feature": "qtrad-r2-feature-verifier-v1",
@@ -933,6 +934,12 @@ class OpenedConfirmatoryHoldout:
 
 
 def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
+    """Load the trusted image/environment provenance manifest.
+
+    The deployment contract binds its embedded application commit to the running
+    source. The legacy/dev contract identifies only the immutable environment;
+    dynamic Git checkouts supply application provenance independently.
+    """
     manifest_path = _DEPLOYMENT_IMAGE_IDENTITY_PATH if path is None else path
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise RuntimeError("the deployment image identity manifest is unavailable")
@@ -954,8 +961,22 @@ def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
         "manifest_sha256",
     }:
         raise RuntimeError("the deployment image identity manifest has unexpected fields")
-    if payload["contract"] != _IMAGE_IDENTITY_CONTRACT or payload["schema_version"] != 1:
+    if (
+        payload["contract"]
+        not in {
+            _IMAGE_IDENTITY_CONTRACT,
+            _DEV_IMAGE_IDENTITY_CONTRACT,
+        }
+        or payload["schema_version"] != 1
+    ):
         raise RuntimeError("the deployment image identity manifest contract is unsupported")
+    application_commit = payload["application_commit"]
+    if (
+        not isinstance(application_commit, str)
+        or len(application_commit) != 40
+        or any(character not in "0123456789abcdef" for character in application_commit)
+    ):
+        raise RuntimeError("the deployment image identity manifest application commit is invalid")
     manifest_hash = payload["manifest_sha256"]
     unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
     if (
@@ -990,7 +1011,10 @@ def execution_provenance() -> dict[str, str]:
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         raise RuntimeError("git did not return a verified commit identity")
     manifest = _image_identity_manifest()
-    if manifest["application_commit"] != commit:
+    if (
+        manifest["contract"] == _IMAGE_IDENTITY_CONTRACT
+        and manifest["application_commit"] != commit
+    ):
         raise RuntimeError("image identity manifest commit differs from the running source")
     image_digest = manifest["image_digest"]
     if (
