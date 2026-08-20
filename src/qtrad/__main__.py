@@ -171,7 +171,7 @@ from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     build_ibkr_holdout_target_source,
     load_ibkr_foundation,
-    load_ibkr_foundation_with_identity,
+    load_ibkr_foundation_outcome_blind_with_identity,
     preflight_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -2479,8 +2479,14 @@ def _build_ibkr_historical_experiment_cli(
         if foundation_promotion_path is not None
         else None
     )
-    foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-        foundation_path, receipt=foundation_receipt_path
+    holdout_target_source = build_ibkr_holdout_target_source(
+        foundation_path,
+        receipt=foundation_receipt_path,
+    )
+    foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
+        foundation_path,
+        receipt=foundation_receipt_path,
+        holdout_target_source=holdout_target_source,
     )
     identities = runtime_identities()
     adapter_identity = IBKRHistoricalAdapterIdentity.create(
