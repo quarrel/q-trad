@@ -582,6 +582,7 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("QTRAD_RESEARCH_ROOT", str(research_root))
     monkeypatch.setenv("QTRAD_IMAGE", _FIXTURE_IDENTITIES["image_identity"])
 
+    import qtrad.runtime.ibkr_foundation as foundation_runtime
     import qtrad.runtime.r2_verification as verification
 
     monkeypatch.setattr(verification, "runtime_identities", lambda: _FIXTURE_IDENTITIES)
@@ -590,6 +591,24 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     foundation, foundation_receipt, foundation_promotion, _stage7, _stage7_receipt = (
         _stage8_fixture(tmp_path)
     )
+    original_bounded_bytes = foundation_runtime._bounded_bytes
+    original_read_child_rows = foundation_runtime._read_child_rows
+    child_reads: list[Path] = []
+
+    def guarded_bounded_bytes(path: Path, limit: int, field: str) -> bytes:
+        if path.suffix == ".parquet":
+            assert "targets" not in path.parts, f"protected target bytes accessed: {path}"
+        return original_bounded_bytes(path, limit, field)
+
+    def guarded_read_child_rows(
+        path: Path, *, expected_row_count: int
+    ) -> tuple[dict[str, JsonValue], ...]:
+        assert "targets" not in path.parts, f"protected target rows accessed: {path}"
+        child_reads.append(path)
+        return original_read_child_rows(path, expected_row_count=expected_row_count)
+
+    monkeypatch.setattr(foundation_runtime, "_bounded_bytes", guarded_bounded_bytes)
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", guarded_read_child_rows)
     experiment = tmp_path / "experiment.json"
     cli.main(
         [
@@ -608,6 +627,7 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
             str(experiment),
         ]
     )
+    assert child_reads
     holdout_source = tmp_path / "holdout-source.json"
     cli.main(
         [
