@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -127,6 +128,81 @@ def test_image_identity_manifest_digest_is_authenticated(
     )
     with pytest.raises(RuntimeError, match="manifest digest"):
         runtime_identities()
+
+
+def test_dynamic_checkout_accepts_stale_legacy_image_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unsigned = {
+        "contract": "qtrad-image-identity-v1",
+        "schema_version": 1,
+        "application_commit": "f" * 40,
+        "image_digest": "sha256:" + "0" * 64,
+    }
+    payload = {
+        **unsigned,
+        "manifest_sha256": sha256(verification.canonical_bytes(unsigned)).hexdigest(),
+    }
+    path = tmp_path / "identity.json"
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    monkeypatch.setattr(
+        verification,
+        "_image_identity_manifest",
+        lambda: _production_image_identity_manifest(path),  # type: ignore[assignment]
+    )
+
+    identities = execution_provenance()
+
+    assert identities["git_commit"] != unsigned["application_commit"]
+    assert identities["image_digest"] == unsigned["image_digest"]
+
+
+def test_deployment_image_contract_still_binds_application_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = next(
+        part.removeprefix("git:")
+        for part in runtime_identities()["application_identity"].split("+")
+        if part.startswith("git:")
+    )
+    unsigned = {
+        "contract": "qtrad-runtime-image-identity-v1",
+        "schema_version": 1,
+        "application_commit": "f" * 40 if commit != "f" * 40 else "e" * 40,
+        "image_digest": "sha256:" + "0" * 64,
+    }
+    payload = {
+        **unsigned,
+        "manifest_sha256": sha256(verification.canonical_bytes(unsigned)).hexdigest(),
+    }
+    path = tmp_path / "identity.json"
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    monkeypatch.setattr(
+        verification,
+        "_image_identity_manifest",
+        lambda: _production_image_identity_manifest(path),  # type: ignore[assignment]
+    )
+
+    with pytest.raises(RuntimeError, match="manifest commit differs"):
+        execution_provenance()
+
+
+def test_image_identity_manifest_rejects_unsupported_contract(tmp_path: Path) -> None:
+    unsigned = {
+        "contract": "qtrad-unsupported-image-identity-v1",
+        "schema_version": 1,
+        "application_commit": "f" * 40,
+        "image_digest": "sha256:" + "0" * 64,
+    }
+    payload = {
+        **unsigned,
+        "manifest_sha256": sha256(verification.canonical_bytes(unsigned)).hexdigest(),
+    }
+    path = tmp_path / "identity.json"
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+    with pytest.raises(RuntimeError, match="contract is unsupported"):
+        _production_image_identity_manifest(path)
 
 
 def test_representative_fold_layout_preserves_dependency_embargo() -> None:

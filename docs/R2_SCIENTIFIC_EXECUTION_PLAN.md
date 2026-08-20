@@ -286,6 +286,8 @@ Do not change code after the scientific freeze merely to keep the run moving. If
 
 A documentation-only change need not change scientific identity, but avoid changing the execution commit during the run unless necessary.
 
+The trusted `/run/qtrad/image-identity.json` may use `qtrad-image-identity-v1` in a dynamic, bind-mounted development checkout. That contract is image/environment provenance only; its embedded application commit need not equal the checkout's clean Git `HEAD`. A deployment runtime manifest using `qtrad-runtime-image-identity-v1` remains strictly bound to its embedded application commit. This distinction changes execution provenance only: it does not change Stage 8 semantic, closure or verification identities. If this boundary changes before holdout access, restart the affected promotion boundary under the new exact commit while leaving prior verified foundation evidence immutable.
+
 ---
 
 # 5. Phase A — recover and authenticate the current historical parent authority
