@@ -203,7 +203,7 @@ from qtrad.runtime.r2_holdout_source import (
     R2HoldoutTargetSourceAuthority,
     load_r2_holdout_target_source_authority,
 )
-from qtrad.runtime.r2_partitioned_rows import write_partitioned_rows
+from qtrad.runtime.r2_partitioned_rows import load_partitioned_rows, write_partitioned_rows
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
@@ -1947,6 +1947,19 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
 
 _EVALUATION_PART_FIELDS = ("metric_slices", "bucket_definitions")
 
+_PREPROCESSING_SELECTION_PART_FIELDS = (
+    "outer_training_target_ids",
+    "inner_fit_target_ids",
+    "inner_validation_target_ids",
+    "purged_target_ids",
+)
+_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS = (
+    "inner_fit_target_ids",
+    "inner_validation_target_ids",
+)
+_PREPROCESSING_PART_ROW_SCHEMA = "qtrad-r2-preprocessing-selection-membership-v2"
+_PREPROCESSING_PART_ROW_FIELDS = frozenset({"scope", "field", "candidate_index", "index", "value"})
+
 
 def _partition_evaluation_payload(
     output: Path, relative_path: str, payload: Mapping[str, object]
@@ -1967,6 +1980,76 @@ def _partition_evaluation_payload(
         relative_path,
         header=header,
         identity_field="report_id",
+        rows=rows,
+        expected_row_count=len(rows),
+    )
+
+
+def _partition_preprocessing_selection_payload(
+    output: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Persist all large preprocessing membership arrays as bounded physical parts."""
+    header = dict(payload)
+    raw_selection = header.get("selection")
+    if not isinstance(raw_selection, Mapping):
+        raise ValueError("preprocessing selection payload has no selection object")
+    selection = dict(raw_selection)
+    rows: list[dict[str, object]] = []
+
+    for field in _PREPROCESSING_SELECTION_PART_FIELDS:
+        raw = selection.pop(field, None)
+        if not isinstance(raw, list):
+            raise ValueError(f"preprocessing selection field is not a list: {field}")
+        for index, value in enumerate(raw):
+            if not isinstance(value, str):
+                raise ValueError(f"preprocessing selection field contains a non-string ID: {field}")
+            rows.append(
+                {
+                    "scope": "selection",
+                    "field": field,
+                    "candidate_index": -1,
+                    "index": index,
+                    "value": value,
+                }
+            )
+
+    raw_candidates = selection.get("candidate_scores")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("preprocessing selection candidate scores are not a list")
+    compact_candidates: list[dict[str, object]] = []
+    for candidate_index, raw_candidate in enumerate(raw_candidates):
+        if not isinstance(raw_candidate, Mapping):
+            raise ValueError("preprocessing selection candidate score is not an object")
+        candidate = dict(raw_candidate)
+        for field in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS:
+            raw = candidate.pop(field, None)
+            if not isinstance(raw, list):
+                raise ValueError(f"preprocessing candidate score field is not a list: {field}")
+            for index, value in enumerate(raw):
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"preprocessing candidate score field contains a non-string ID: {field}"
+                    )
+                rows.append(
+                    {
+                        "scope": "candidate_score",
+                        "field": field,
+                        "candidate_index": candidate_index,
+                        "index": index,
+                        "value": value,
+                    }
+                )
+        compact_candidates.append(candidate)
+    selection["candidate_scores"] = compact_candidates
+    header["selection"] = selection
+    header["partition_row_schema"] = _PREPROCESSING_PART_ROW_SCHEMA
+    header["partition_selection_fields"] = list(_PREPROCESSING_SELECTION_PART_FIELDS)
+    header["partition_candidate_score_fields"] = list(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+    return write_partitioned_rows(
+        output,
+        relative_path,
+        header=header,
+        identity_field="artifact_id",
         rows=rows,
         expected_row_count=len(rows),
     )
@@ -2949,6 +3032,8 @@ def _build_oof_bundle(
     for index, selection in enumerate((*selections_local, *selections_pooled)):
         payload = cast(dict[str, object], selection.as_json())
         path = f"preprocessing/{index:04d}.json"
+        if compact_external_features:
+            payload = _partition_preprocessing_selection_payload(output, path, payload)
         children[path] = payload
         preprocessing_refs.append(_child_reference(path, payload))
 
@@ -3335,6 +3420,121 @@ def _expand_evaluation_payload(
     return expanded
 
 
+def _expand_preprocessing_selection_payload(
+    root: Path, relative_path: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Reconstruct and authenticate a logical preprocessing selection from its parts."""
+    if payload.get("storage") != "qtrad-r2-partitioned-json-rows-v1":
+        return dict(payload)
+    if (
+        payload.get("partition_row_schema") != _PREPROCESSING_PART_ROW_SCHEMA
+        or payload.get("partition_selection_fields") != list(_PREPROCESSING_SELECTION_PART_FIELDS)
+        or payload.get("partition_candidate_score_fields")
+        != list(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+    ):
+        raise ValueError("partitioned preprocessing selection row schema is invalid")
+
+    rows = load_partitioned_rows(root, relative_path, payload, identity_field="artifact_id")
+    raw_selection = payload.get("selection")
+    if not isinstance(raw_selection, Mapping):
+        raise ValueError("partitioned preprocessing selection has no selection object")
+    selection = dict(raw_selection)
+    grouped: dict[str, list[str]] = {field: [] for field in _PREPROCESSING_SELECTION_PART_FIELDS}
+    raw_candidates = selection.get("candidate_scores")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("partitioned preprocessing selection candidate scores are invalid")
+    candidate_scores: list[dict[str, object]] = []
+    candidate_members: list[dict[str, list[str]]] = []
+    for raw_candidate in raw_candidates:
+        if not isinstance(raw_candidate, Mapping):
+            raise ValueError("partitioned preprocessing candidate score is invalid")
+        candidate = dict(raw_candidate)
+        if any(field in candidate for field in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS):
+            raise ValueError("partitioned preprocessing candidate score retains membership arrays")
+        candidate_scores.append(candidate)
+        candidate_members.append(
+            {field: [] for field in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS}
+        )
+
+    last_rank = -1
+    last_index = -1
+    for row in rows:
+        if set(row) != _PREPROCESSING_PART_ROW_FIELDS:
+            raise ValueError("preprocessing selection part row has unknown or missing fields")
+        scope = row["scope"]
+        field = row["field"]
+        candidate_index = row["candidate_index"]
+        index = row["index"]
+        value = row["value"]
+        if (
+            not isinstance(scope, str)
+            or not isinstance(field, str)
+            or type(candidate_index) is not int
+            or type(index) is not int
+            or not isinstance(value, str)
+        ):
+            raise ValueError("preprocessing selection part row has invalid types")
+        if scope == "selection":
+            if candidate_index != -1 or field not in grouped:
+                raise ValueError("preprocessing selection part row scope is invalid")
+            rank = _PREPROCESSING_SELECTION_PART_FIELDS.index(field)
+            target = grouped[field]
+        elif scope == "candidate_score":
+            if (
+                field not in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS
+                or candidate_index < 0
+                or candidate_index >= len(candidate_members)
+            ):
+                raise ValueError("preprocessing candidate score part row scope is invalid")
+            rank = len(_PREPROCESSING_SELECTION_PART_FIELDS) + (
+                candidate_index * len(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+                + _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS.index(field)
+            )
+            target = candidate_members[candidate_index][field]
+        else:
+            raise ValueError("preprocessing selection part row scope is invalid")
+        if rank < last_rank or (rank == last_rank and index != last_index + 1):
+            raise ValueError("preprocessing selection part row ordering or shape is invalid")
+        if rank != last_rank and index != 0:
+            raise ValueError("preprocessing selection part row ordering or shape is invalid")
+        target.append(value)
+        last_rank = rank
+        last_index = index
+
+    for candidate, members in zip(candidate_scores, candidate_members, strict=True):
+        candidate.update(members)
+    selection["candidate_scores"] = candidate_scores
+    selection.update(grouped)
+    expanded = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "storage",
+            "identity_field",
+            "row_count",
+            "parts",
+            "header_sha256",
+            "partition_row_schema",
+            "partition_selection_fields",
+            "partition_candidate_score_fields",
+        }
+    }
+    expanded["selection"] = selection
+    artifact_id = expanded.get("artifact_id")
+    if not isinstance(artifact_id, str):
+        raise ValueError("partitioned preprocessing selection has no artifact identity")
+    try:
+        selection_object = decode_r2_preprocessing_selection(expanded)
+    except ValueError as error:
+        raise ValueError(
+            "preprocessing selection parts do not authenticate the selection"
+        ) from error
+    if selection_object.artifact_id != artifact_id:
+        raise ValueError("preprocessing selection parts do not authenticate the selection identity")
+    return expanded
+
+
 def _oof_child_payload(
     bundle_path: Path,
     bundle: R2OofBundle,
@@ -3679,16 +3879,19 @@ def _qualified_inner_validation_selections(
     selections: list[R2PreprocessingSelection] = []
     for reference in bundle.preprocessing_children:
         child_path = bundle_path.parent / reference.path
-        payload = _load_selection(child_path)
-        semantic_id = _payload_identity(payload)
+        physical_payload = _load_selection(child_path)
+        physical_semantic_id = _payload_identity(physical_payload)
         authenticated = reference_for_json(
             path=reference.path,
             contract=R2_PREPROCESSING_SELECTION_CONTRACT,
-            semantic_id=semantic_id,
-            content=payload,
+            semantic_id=physical_semantic_id,
+            content=physical_payload,
         )
         if reference != authenticated:
             raise ValueError("confirmatory F2 preprocessing child reference is unauthenticated")
+        payload = _expand_preprocessing_selection_payload(
+            bundle_path.parent, reference.path, physical_payload
+        )
         selection = decode_r2_preprocessing_selection(payload)
         if selection.artifact_id != reference.semantic_id:
             raise ValueError("confirmatory F2 preprocessing child identity differs")
@@ -6466,6 +6669,7 @@ def _authenticate_oof_closure(
                     feature_bindings.append((reference, feature_payload))
             if reference.contract in {
                 R2_EVALUATION_CONTRACT,
+                R2_PREPROCESSING_SELECTION_CONTRACT,
                 "qtrad-research-forecasts-v1",
                 "qtrad-r2-forecast-coverage-v2",
             }:

@@ -746,12 +746,24 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
     if payload.get("storage") == "qtrad-r2-partitioned-json-rows-v1":
         from qtrad.runtime.r2_partitioned_rows import partitioned_manifest_part_paths
 
-        partitioned_manifest_part_paths(
+        part_paths = partitioned_manifest_part_paths(
             root,
             reference.path,
             payload,
             identity_field=_identity_field_for_contract(reference.contract),
         )
+        parts = payload.get("parts")
+        if not isinstance(parts, list) or len(parts) != len(part_paths):
+            raise ValueError(f"R2 bundle partition manifest is malformed: {reference.path}")
+        for part_path, part in zip(part_paths, parts, strict=True):
+            if not isinstance(part, Mapping):
+                raise ValueError(f"R2 bundle partition reference is malformed: {reference.path}")
+            part_sha256 = part.get("sha256")
+            if not isinstance(part_sha256, str):
+                raise ValueError(f"R2 bundle partition reference is malformed: {reference.path}")
+            digest = sha256((root / part_path).read_bytes()).hexdigest()
+            if digest != part_sha256:
+                raise ValueError(f"R2 bundle partition digest mismatch: {part_path}")
 
 
 def _verify_feature_manifest_binding(
