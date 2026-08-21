@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
+from math import isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType, SimpleNamespace
@@ -1957,8 +1958,12 @@ _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS = (
     "inner_fit_target_ids",
     "inner_validation_target_ids",
 )
-_PREPROCESSING_PART_ROW_SCHEMA = "qtrad-r2-preprocessing-selection-membership-v2"
-_PREPROCESSING_PART_ROW_FIELDS = frozenset({"scope", "field", "candidate_index", "index", "value"})
+_PREPROCESSING_FIT_NAMES = ("inner_preprocessing", "outer_preprocessing")
+_PREPROCESSING_FIT_PART_FIELDS = ("training_target_ids", "sample_weights")
+_PREPROCESSING_PART_ROW_SCHEMA = "qtrad-r2-preprocessing-selection-membership-v3"
+_PREPROCESSING_PART_ROW_FIELDS = frozenset(
+    {"scope", "field", "candidate_index", "fit", "index", "value"}
+)
 
 
 def _partition_evaluation_payload(
@@ -2008,6 +2013,7 @@ def _partition_preprocessing_selection_payload(
                     "scope": "selection",
                     "field": field,
                     "candidate_index": -1,
+                    "fit": None,
                     "index": index,
                     "value": value,
                 }
@@ -2035,16 +2041,53 @@ def _partition_preprocessing_selection_payload(
                         "scope": "candidate_score",
                         "field": field,
                         "candidate_index": candidate_index,
+                        "fit": None,
                         "index": index,
                         "value": value,
                     }
                 )
         compact_candidates.append(candidate)
     selection["candidate_scores"] = compact_candidates
+
+    for fit_name in _PREPROCESSING_FIT_NAMES:
+        raw_fit = selection.get(fit_name)
+        if raw_fit is None:
+            continue
+        if not isinstance(raw_fit, Mapping):
+            raise ValueError(f"preprocessing fit is not an object: {fit_name}")
+        compact_fit = dict(raw_fit)
+        for field in _PREPROCESSING_FIT_PART_FIELDS:
+            raw = compact_fit.pop(field, None)
+            if not isinstance(raw, list):
+                raise ValueError(f"preprocessing fit field is not a list: {fit_name}.{field}")
+            for index, value in enumerate(raw):
+                if field == "training_target_ids":
+                    if not isinstance(value, str):
+                        raise ValueError(f"preprocessing fit IDs must be strings: {fit_name}")
+                elif (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not isfinite(float(value))
+                ):
+                    raise ValueError(f"preprocessing fit weights must be numeric: {fit_name}")
+                rows.append(
+                    {
+                        "scope": "fit",
+                        "field": field,
+                        "candidate_index": -1,
+                        "fit": fit_name,
+                        "index": index,
+                        "value": value,
+                    }
+                )
+        selection[fit_name] = compact_fit
+
     header["selection"] = selection
     header["partition_row_schema"] = _PREPROCESSING_PART_ROW_SCHEMA
     header["partition_selection_fields"] = list(_PREPROCESSING_SELECTION_PART_FIELDS)
     header["partition_candidate_score_fields"] = list(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+    header["partition_fit_names"] = list(_PREPROCESSING_FIT_NAMES)
+    header["partition_fit_fields"] = list(_PREPROCESSING_FIT_PART_FIELDS)
     return write_partitioned_rows(
         output,
         relative_path,
@@ -3431,6 +3474,8 @@ def _expand_preprocessing_selection_payload(
         or payload.get("partition_selection_fields") != list(_PREPROCESSING_SELECTION_PART_FIELDS)
         or payload.get("partition_candidate_score_fields")
         != list(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+        or payload.get("partition_fit_names") != list(_PREPROCESSING_FIT_NAMES)
+        or payload.get("partition_fit_fields") != list(_PREPROCESSING_FIT_PART_FIELDS)
     ):
         raise ValueError("partitioned preprocessing selection row schema is invalid")
 
@@ -3456,6 +3501,20 @@ def _expand_preprocessing_selection_payload(
             {field: [] for field in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS}
         )
 
+    fit_members: dict[str, dict[str, list[object]]] = {}
+    for fit_name in _PREPROCESSING_FIT_NAMES:
+        raw_fit = selection.get(fit_name)
+        if raw_fit is None:
+            continue
+        if not isinstance(raw_fit, Mapping):
+            raise ValueError(f"partitioned preprocessing fit is invalid: {fit_name}")
+        if any(field in raw_fit for field in _PREPROCESSING_FIT_PART_FIELDS):
+            raise ValueError(f"partitioned preprocessing fit retains membership arrays: {fit_name}")
+        fit_members[fit_name] = {field: [] for field in _PREPROCESSING_FIT_PART_FIELDS}
+
+    selection_rank_count = len(_PREPROCESSING_SELECTION_PART_FIELDS)
+    candidate_rank_count = len(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+    fit_rank_base = selection_rank_count + len(candidate_scores) * candidate_rank_count
     last_rank = -1
     last_index = -1
     for row in rows:
@@ -3464,6 +3523,7 @@ def _expand_preprocessing_selection_payload(
         scope = row["scope"]
         field = row["field"]
         candidate_index = row["candidate_index"]
+        fit_name = row["fit"]
         index = row["index"]
         value = row["value"]
         if (
@@ -3471,26 +3531,54 @@ def _expand_preprocessing_selection_payload(
             or not isinstance(field, str)
             or type(candidate_index) is not int
             or type(index) is not int
-            or not isinstance(value, str)
         ):
             raise ValueError("preprocessing selection part row has invalid types")
         if scope == "selection":
-            if candidate_index != -1 or field not in grouped:
+            if candidate_index != -1 or fit_name is not None or field not in grouped:
                 raise ValueError("preprocessing selection part row scope is invalid")
+            if not isinstance(value, str):
+                raise ValueError("preprocessing selection part row value is invalid")
             rank = _PREPROCESSING_SELECTION_PART_FIELDS.index(field)
-            target = grouped[field]
+            target = cast(list[object], grouped[field])
         elif scope == "candidate_score":
             if (
-                field not in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS
+                fit_name is not None
+                or field not in _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS
                 or candidate_index < 0
                 or candidate_index >= len(candidate_members)
             ):
                 raise ValueError("preprocessing candidate score part row scope is invalid")
-            rank = len(_PREPROCESSING_SELECTION_PART_FIELDS) + (
-                candidate_index * len(_PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS)
+            if not isinstance(value, str):
+                raise ValueError("preprocessing candidate score part value is invalid")
+            rank = selection_rank_count + (
+                candidate_index * candidate_rank_count
                 + _PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS.index(field)
             )
-            target = candidate_members[candidate_index][field]
+            target = cast(list[object], candidate_members[candidate_index][field])
+        elif scope == "fit":
+            if (
+                candidate_index != -1
+                or not isinstance(fit_name, str)
+                or fit_name not in fit_members
+                or field not in _PREPROCESSING_FIT_PART_FIELDS
+            ):
+                raise ValueError("preprocessing fit part row scope is invalid")
+            if field == "training_target_ids":
+                if not isinstance(value, str):
+                    raise ValueError("preprocessing fit ID value is invalid")
+            elif (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(float(value))
+            ):
+                raise ValueError("preprocessing fit weight value is invalid")
+            fit_index = _PREPROCESSING_FIT_NAMES.index(fit_name)
+            rank = (
+                fit_rank_base
+                + fit_index * len(_PREPROCESSING_FIT_PART_FIELDS)
+                + (_PREPROCESSING_FIT_PART_FIELDS.index(field))
+            )
+            target = fit_members[fit_name][field]
         else:
             raise ValueError("preprocessing selection part row scope is invalid")
         if rank < last_rank or (rank == last_rank and index != last_index + 1):
@@ -3505,6 +3593,17 @@ def _expand_preprocessing_selection_payload(
         candidate.update(members)
     selection["candidate_scores"] = candidate_scores
     selection.update(grouped)
+    for fit_name, members in fit_members.items():
+        if len(members["training_target_ids"]) != len(members["sample_weights"]):
+            raise ValueError(
+                f"preprocessing fit membership and weights are not aligned: {fit_name}"
+            )
+        raw_fit = selection[fit_name]
+        if not isinstance(raw_fit, Mapping):
+            raise ValueError(f"partitioned preprocessing fit is invalid: {fit_name}")
+        fit = dict(raw_fit)
+        fit.update(members)
+        selection[fit_name] = fit
     expanded = {
         key: value
         for key, value in payload.items()
@@ -3518,6 +3617,8 @@ def _expand_preprocessing_selection_payload(
             "partition_row_schema",
             "partition_selection_fields",
             "partition_candidate_score_fields",
+            "partition_fit_names",
+            "partition_fit_fields",
         }
     }
     expanded["selection"] = selection
