@@ -631,6 +631,27 @@ def test_exact_return_and_five_minute_window_use_six_endpoints_and_five_pairs() 
     assert coverage == 1.0
 
 
+def test_empty_range_is_unavailable_at_zero_threshold() -> None:
+    config = experiment()
+    thresholds = dict(config.feature_coverage_thresholds)
+    thresholds[FeatureFamily.LOCAL_VOLATILITY_RANGE] = 0.0
+    config = replace(config, feature_coverage_thresholds=thresholds)
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    end = start + timedelta(minutes=6)
+    foundation = _minimal_foundation(start, end)
+    value, lineage = _rolling(
+        "mean_log_range_300s",
+        "fx:aud-usd",
+        _index(()),
+        end,
+        end + timedelta(minutes=1),
+        foundation,
+        config,
+        _RowCache(),
+    )
+    assert value is None and lineage == ()
+
+
 def test_rolling_gap_inactive_boundary_closure_and_lineage_fail_closed() -> None:
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     rows = _dataset(

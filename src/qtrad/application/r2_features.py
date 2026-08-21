@@ -837,7 +837,11 @@ def _rolling(
         return window.interval_coverage, window.range_lineage
     threshold = experiment.feature_coverage_thresholds[FeatureFamily.LOCAL_VOLATILITY_RANGE]
     if name.startswith("mean_log_range_"):
-        if window.range_coverage is None or window.range_coverage < threshold:
+        if (
+            window.range_coverage is None
+            or window.range_coverage < threshold
+            or not window.range_values
+        ):
             return None, window.range_lineage
         return sum(window.range_values) / len(window.range_values), window.range_lineage
     if window.return_coverage is None or window.return_coverage < threshold:
