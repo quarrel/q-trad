@@ -1350,3 +1350,34 @@ def test_validation_target_selection_excludes_invalid_targets() -> None:
         horizon=config.primary_horizon,
     )
     assert tuple(row.target_id for row in selected) == (verified.targets.rows[9].target_id,)
+
+
+def test_validation_target_selection_excludes_target_available_at_holdout_start() -> None:
+    verified, _features, config, fold = _bound_fixture()
+    holdout_start = config.holdout_range[0]
+    configuration_id = config.configuration_id
+    boundary_row = replace(
+        verified.targets.rows[8],
+        target_freeze_at=holdout_start,
+        target_available_at=holdout_start,
+    )
+    boundary_targets = TargetDataset.create(
+        (*verified.targets.rows[:8], boundary_row, *verified.targets.rows[9:]),
+        observation_dataset_id=verified.targets.observation_dataset_id,
+        foundation_configuration_id=verified.targets.foundation_configuration_id,
+    )
+    verified_values = vars(verified).copy()
+    verified_values["targets"] = boundary_targets
+    boundary_verified = cast(R1FoundationBindings, SimpleNamespace(**verified_values))
+
+    selected = validation_targets_for_instrument(
+        boundary_verified,
+        config,
+        outer_fold_id=fold.fold_id,
+        target_instrument_id=config.confirmatory_target_instruments[0],
+        horizon=config.primary_horizon,
+    )
+
+    assert config.configuration_id == configuration_id
+    assert boundary_row.target_id == verified.targets.rows[8].target_id
+    assert tuple(row.target_id for row in selected) == (verified.targets.rows[9].target_id,)

@@ -590,7 +590,11 @@ def validation_targets_for_instrument(
             raise ValueError("outer validation target is outside its authenticated interval")
         if experiment.holdout_range[0] <= target.decision_time < experiment.holdout_range[1]:
             raise ValueError("outer validation membership contains a locked-holdout target")
-        if target.return_disposition is not ReturnDisposition.VALID or target.log_return is None:
+        if (
+            target.return_disposition is not ReturnDisposition.VALID
+            or target.log_return is None
+            or target.target_available_at >= experiment.holdout_range[0]
+        ):
             continue
         if target.instrument_id == target_instrument_id and target.horizon == horizon:
             selected.append(target)
