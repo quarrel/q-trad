@@ -306,8 +306,8 @@ def test_compact_preprocessing_selection_parts_round_trip_and_tamper(
         unscaled_feature_names=(),
         dropped_all_null_feature_names=(),
         dropped_zero_variance_feature_names=(),
-        training_target_ids=("fit",),
-        sample_weights=(1.0,),
+        training_target_ids=tuple(f"fit-{index}" for index in range(4096)),
+        sample_weights=(1.0,) * 4096,
     )
     alpha = AlphaSelection(
         disposition=FitDisposition.READY,
@@ -380,6 +380,13 @@ def test_compact_preprocessing_selection_parts_round_trip_and_tamper(
         for candidate in candidate_scores
         for field in verification._PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS
     )
+    for fit_name in verification._PREPROCESSING_FIT_NAMES:
+        compact_fit = compact_selection[fit_name]
+        assert isinstance(compact_fit, dict)
+        assert all(
+            field not in compact_fit for field in verification._PREPROCESSING_FIT_PART_FIELDS
+        )
+    assert len(canonical_bytes(compact)) < 64 * 1024 * 1024
     assert cast(list[object], compact["parts"])
 
     with pytest.raises(FileExistsError):
@@ -404,6 +411,7 @@ def test_compact_preprocessing_selection_parts_round_trip_and_tamper(
                 "scope": "candidate_score",
                 "field": "inner_fit_target_ids",
                 "candidate_index": 99,
+                "fit": None,
                 "index": 0,
                 "value": "malformed",
             },
@@ -413,6 +421,73 @@ def test_compact_preprocessing_selection_parts_round_trip_and_tamper(
         verification._expand_preprocessing_selection_payload(
             tmp_path, "preprocessing/0000.json", compact
         )
+
+    def reject_row(row: dict[str, object], match: str) -> None:
+        monkeypatch.setattr(
+            verification,
+            "load_partitioned_rows",
+            lambda *_args, **_kwargs: (row,),
+        )
+        with pytest.raises(ValueError, match=match):
+            verification._expand_preprocessing_selection_payload(
+                tmp_path, "preprocessing/0000.json", compact
+            )
+
+    reject_row(
+        {
+            "scope": "candidate_score",
+            "field": "unknown",
+            "candidate_index": 0,
+            "fit": None,
+            "index": 0,
+            "value": "bad",
+        },
+        "scope",
+    )
+    reject_row(
+        {
+            "scope": "candidate_score",
+            "field": "inner_fit_target_ids",
+            "candidate_index": 0,
+            "fit": None,
+            "index": True,
+            "value": "bad",
+        },
+        "invalid types",
+    )
+    reject_row(
+        {
+            "scope": "candidate_score",
+            "field": "inner_fit_target_ids",
+            "candidate_index": 0,
+            "fit": None,
+            "index": 0,
+            "value": True,
+        },
+        "value",
+    )
+    reject_row(
+        {
+            "scope": "fit",
+            "field": "sample_weights",
+            "candidate_index": -1,
+            "fit": "inner_preprocessing",
+            "index": 0,
+            "value": True,
+        },
+        "weight",
+    )
+    reject_row(
+        {
+            "scope": "fit",
+            "field": "training_target_ids",
+            "candidate_index": -1,
+            "fit": "inner_preprocessing",
+            "index": 0,
+            "value": "only-id",
+        },
+        "aligned",
+    )
     monkeypatch.undo()
 
     part = cast(list[dict[str, object]], compact["parts"])[0]
