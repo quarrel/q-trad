@@ -844,7 +844,7 @@ def _rolling(
         ):
             return None, window.range_lineage
         return sum(window.range_values) / len(window.range_values), window.range_lineage
-    if window.return_coverage is None or window.return_coverage < threshold:
+    if window.return_coverage is None or window.return_coverage < threshold or not window.returns:
         return None, window.return_lineage
     if name.startswith("realised_std_"):
         mean = sum(window.returns) / len(window.returns)
