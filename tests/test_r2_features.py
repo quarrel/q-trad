@@ -652,6 +652,32 @@ def test_empty_range_is_unavailable_at_zero_threshold() -> None:
     assert value is None and lineage == ()
 
 
+def test_empty_return_aggregates_are_unavailable_at_zero_threshold() -> None:
+    config = experiment()
+    thresholds = dict(config.feature_coverage_thresholds)
+    thresholds[FeatureFamily.LOCAL_VOLATILITY_RANGE] = 0.0
+    config = replace(config, feature_coverage_thresholds=thresholds)
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    end = start + timedelta(minutes=6)
+    foundation = _minimal_foundation(start, end)
+    for feature_name in (
+        "realised_std_300s",
+        "mean_absolute_return_300s",
+        "return_sign_balance_300s",
+    ):
+        value, lineage = _rolling(
+            feature_name,
+            "fx:aud-usd",
+            _index(()),
+            end,
+            end + timedelta(minutes=1),
+            foundation,
+            config,
+            _RowCache(),
+        )
+        assert value is None and lineage == ()
+
+
 def test_rolling_gap_inactive_boundary_closure_and_lineage_fail_closed() -> None:
     start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     rows = _dataset(
