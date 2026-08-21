@@ -28,7 +28,20 @@ from qtrad.domain.r2_bundles import (
     R2OofBundle,
 )
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
-from qtrad.domain.r2_readiness import EvidenceClass
+from qtrad.domain.r2_models import (
+    LOCAL_INSTRUMENT_IDENTITY_POLICY,
+    LOCAL_INSTRUMENT_MEMBERSHIP_POLICY,
+    LOCAL_INTERCEPT_POLICY,
+    AlphaCandidateScore,
+    AlphaSelection,
+    FitDisposition,
+    PreprocessingFeatureDefinition,
+    PreprocessingFeatureKind,
+    PreprocessingFit,
+    R2PreprocessingSchema,
+    R2PreprocessingSelection,
+)
+from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.runtime.r2_bundles import (
     atomic_create,
     canonical_bytes,
@@ -273,6 +286,142 @@ def test_compact_feature_binding_omits_rows_and_manifest_chunks(tmp_path: Path) 
         "feature_set_name",
         "feature_set_id",
     }
+
+
+def test_compact_preprocessing_selection_parts_round_trip_and_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = hashlib.sha256(b"selection").hexdigest()
+    schema = R2PreprocessingSchema.create(
+        (PreprocessingFeatureDefinition("feature", PreprocessingFeatureKind.CONTINUOUS),)
+    )
+    fit = PreprocessingFit(
+        feature_names=("feature",),
+        indicator_feature_names=(),
+        medians=(0.0,),
+        means=(0.0,),
+        scales=(1.0,),
+        active_feature_names=("feature",),
+        unscaled_feature_names=(),
+        dropped_all_null_feature_names=(),
+        dropped_zero_variance_feature_names=(),
+        training_target_ids=("fit",),
+        sample_weights=(1.0,),
+    )
+    alpha = AlphaSelection(
+        disposition=FitDisposition.READY,
+        outer_training_target_ids=("fit", "validation", "purged"),
+        inner_fit_target_ids=("fit",),
+        inner_validation_target_ids=("validation",),
+        purged_target_ids=("purged",),
+        inner_preprocessing=fit,
+        candidate_scores=(
+            AlphaCandidateScore(
+                alpha=0.1,
+                disposition=FitDisposition.READY,
+                loss=1.0,
+                failure=None,
+                inner_fit_target_ids=("fit",),
+                inner_validation_target_ids=("validation",),
+            ),
+        ),
+        selected_alpha=0.1,
+        outer_preprocessing=fit,
+    )
+    selection = R2PreprocessingSelection.create(
+        r2_feature_dataset_id=digest,
+        target_dataset_id=digest,
+        fold_dataset_id=digest,
+        experiment_configuration_id=digest,
+        model_family=ModelFamily.LOCAL_RIDGE,
+        horizon=timedelta(minutes=15),
+        outer_fold_id="fold-1",
+        outer_fold_membership_hash=digest,
+        target_instruments=("EURUSD",),
+        inner_validation_start=datetime(2026, 1, 1, tzinfo=UTC),
+        inner_validation_end=datetime(2026, 1, 2, tzinfo=UTC),
+        purge_boundary=datetime(2026, 1, 1, tzinfo=UTC),
+        feature_schema_id=digest,
+        feature_set_id=digest,
+        preprocessing_schema_id=schema.preprocessing_schema_id,
+        preprocessing_schema=schema,
+        evidence_class=EvidenceClass.IMPLEMENTATION,
+        application_image_identity="test-image",
+        sklearn_library_identity="test-sklearn",
+        preprocessing_policy="TRAINING_MEDIAN_STANDARDISE_V1",
+        inner_validation_policy="CHRONOLOGICAL_TAIL_PURGED_V1",
+        alpha_grid=(0.1,),
+        ridge_solver="test-solver",
+        ridge_tolerance=1e-6,
+        ridge_max_iterations=10,
+        loss_policy="MSE",
+        pooled_weighting_policy="LOCAL",
+        instrument_identity_policy=LOCAL_INSTRUMENT_IDENTITY_POLICY,
+        intercept_policy=LOCAL_INTERCEPT_POLICY,
+        instrument_membership_policy=LOCAL_INSTRUMENT_MEMBERSHIP_POLICY,
+        holdout_excluded=True,
+        selection=alpha,
+    )
+    logical = selection.as_json()
+    compact = verification._partition_preprocessing_selection_payload(
+        tmp_path, "preprocessing/0000.json", logical
+    )
+    compact_selection = cast(dict[str, object], compact["selection"])
+    assert compact["storage"] == "qtrad-r2-partitioned-json-rows-v1"
+    assert all(
+        field not in compact_selection
+        for field in verification._PREPROCESSING_SELECTION_PART_FIELDS
+    )
+    candidate_scores = cast(list[dict[str, object]], compact_selection["candidate_scores"])
+    assert candidate_scores
+    assert all(
+        field not in candidate
+        for candidate in candidate_scores
+        for field in verification._PREPROCESSING_CANDIDATE_SCORE_PART_FIELDS
+    )
+    assert cast(list[object], compact["parts"])
+
+    with pytest.raises(FileExistsError):
+        verification._partition_preprocessing_selection_payload(
+            tmp_path, "preprocessing/0000.json", logical
+        )
+
+    expanded = verification._expand_preprocessing_selection_payload(
+        tmp_path, "preprocessing/0000.json", compact
+    )
+    assert expanded == logical
+    assert (
+        verification.decode_r2_preprocessing_selection(expanded).artifact_id
+        == selection.artifact_id
+    )
+
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: (
+            {
+                "scope": "candidate_score",
+                "field": "inner_fit_target_ids",
+                "candidate_index": 99,
+                "index": 0,
+                "value": "malformed",
+            },
+        ),
+    )
+    with pytest.raises(ValueError, match="scope"):
+        verification._expand_preprocessing_selection_payload(
+            tmp_path, "preprocessing/0000.json", compact
+        )
+    monkeypatch.undo()
+
+    part = cast(list[dict[str, object]], compact["parts"])[0]
+    part_path = tmp_path / str(part["path"])
+    part_path.write_bytes(part_path.read_bytes() + b"tamper")
+    with pytest.raises(ValueError, match="digest"):
+        verification._expand_preprocessing_selection_payload(
+            tmp_path, "preprocessing/0000.json", compact
+        )
 
 
 def test_oof_build_staging_discards_post_partition_failure(
