@@ -374,7 +374,56 @@ micro-run must exercise every planned deliverable and state transition; a shortc
 the code under test does not satisfy this gate. Treat the result as implementation evidence only, not
 scientific evidence. Do not start a multi-hour or 10+ minute retained-data run until this micro-run
 succeeds end to end; any failure blocks the larger run until the owning mechanism and regression are
-fixed.
+fixed. A micro-run is representative only for the dimensions it actually exercises. Before
+retained-scale launch, inventory every variable-length or nested output and its immediate persistence
+and decoder limits. For cardinality, byte size, nesting depth, partition count, closure shape,
+transaction boundaries and resource use, either exercise a retained-equivalent bound or use a bounded
+construction or read-only projection from already-authorised inputs with explicit margin. Record the
+projection and every untested assumption. A small row slice alone is insufficient.
+
+### Retained-scale rerun escalation
+
+A failed retained-scale or 10+ minute run changes the operating mode. Preserve its truthful state and
+do not immediately rerun the next patch. Before another retained attempt:
+
+1. perform a read-only look-ahead failure audit from the failing boundary through the next durable
+   authority, not only the named child or stack frame that failed;
+2. inventory every sibling output and variable-length or nested collection produced by the same path,
+   every per-file, part, aggregate, memory and transaction limit, every create-only destination and
+   orphan/symlink rule, and every downstream decoder, authenticator, verifier and promotion consumer;
+3. use retained metadata and counts without outcome access, or bounded synthetic constructions with
+   the same identity shape, to project each scale-sensitive boundary with explicit margin;
+4. fix the owning mechanism, add regressions at the real trust and persistence boundary, and run the
+   exact production CLI through every already-authorised planned deliverable and reversible or
+   fail-closed state transition; a validation or rerun never grants provider, promotion, holdout,
+   irreversible or other special-state authority; and
+5. record the audit, projections, remaining assumptions, exact destinations and downstream stop
+   conditions in the orchestrator-owned progress tracker named by the active plan, or another named
+   durable execution record when no tracker exists, before authorising the rerun.
+
+For this gate, the stage is the launched CLI path and every artefact it can emit before the next
+durable authority; item 2 is its finite audit inventory. Search that inventory for the same failure
+class. A fix for one oversized or malformed child is incomplete when a sibling emitted by the same
+mechanism can fail next. A passing small fixture does not override contrary retained-scale evidence.
+
+If two retained attempts in that stage fail before reaching the next durable authority, a third
+attempt is blocked until a fresh independent review audits the finite inventory and its immediate
+downstream gate against every applicable scale-sensitive dimension listed above, not merely the
+failures already observed. Do not raise limits, shrink required evidence or weaken identity to make a
+rerun pass. If an immutable artefact published successfully, reuse it for verifier or downstream
+remediation; do not rebuild it merely because a later gate failed unless a demonstrated defect
+invalidates it and the active authority explicitly requires a create-only replacement.
+
+For a retained-scale command, or any command that may run or hang for 10+ minutes, establish a
+delegable observation contract before launch: exact command and code identity, start time,
+process/session identity, sanitised durable output or another reliable way to recover the final exit
+result, resource/stop limits and the authority for
+any follow-up action. Do not launch without it. When agent delegation is available, assign passive
+monitoring to `gpt-5.6-luna` at medium reasoning, or the cheapest capable equivalent; otherwise use a
+supported wait mechanism. The primary reasoning agent may inspect only on monitor notification,
+expected completion or a defined resource/stop threshold, not by periodic polling of a silent healthy
+process. A monitor may report liveness, resources and exit; it must not mutate the process or artefacts,
+infer completion from activity, or exercise downstream authority.
 
 When performance is part of the change, prefer deterministic work-count evidence over fragile wall
 clock assertions. Useful counts include:
