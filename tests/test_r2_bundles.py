@@ -57,7 +57,7 @@ from qtrad.runtime.r2_holdout_source import (
     load_r2_holdout_target_source_authority,
     write_r2_holdout_target_source,
 )
-from qtrad.runtime.r2_partitioned_rows import write_partitioned_rows
+from qtrad.runtime.r2_partitioned_rows import load_partitioned_rows, write_partitioned_rows
 from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
     authenticate_r2_oof,
@@ -1036,3 +1036,225 @@ def test_bounded_source_cleans_partial_parts_on_write_failure(
         write_r2_holdout_target_source(output, source)
     assert not output.exists()
     assert not (tmp_path / "target-source.json.parts").exists()
+
+
+def test_evaluation_membership_partition_round_trip_and_strict_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload: dict[str, object] = {
+        "contract": "qtrad-r2-evaluation-v2",
+        "schema_version": 1,
+        "source_class": "IG_NATIVE_CAPTURE",
+        "all_model_common_target_ids": [f"target-{index:05d}" for index in range(4096)],
+        "evaluated_models": [
+            {
+                "model_family": "RIDGE",
+                "expected_fold_target_keys": [
+                    [f"fold-{index:04d}", f"target-{index:05d}"] for index in range(4096)
+                ],
+            }
+        ],
+        "comparisons": [
+            {
+                "candidate": "RIDGE",
+                "comparator": "ZERO_RETURN",
+                "candidate_own_target_ids": [f"target-{index:05d}" for index in range(4096)],
+                "comparator_own_target_ids": [f"target-{index:05d}" for index in range(4096)],
+                "common_expected_target_ids": [f"target-{index:05d}" for index in range(4096)],
+                "common_target_ids": [f"target-{index:05d}" for index in range(4096)],
+            },
+            {
+                "candidate": "LASSO",
+                "comparator": "ZERO_RETURN",
+                "candidate_own_target_ids": [],
+                "comparator_own_target_ids": [],
+                "common_expected_target_ids": [],
+                "common_target_ids": [],
+            },
+            {
+                "candidate": "ELASTIC",
+                "comparator": "ZERO_RETURN",
+                "candidate_own_target_ids": ["target-empty-mix"],
+                "comparator_own_target_ids": ["target-empty-mix"],
+                "common_expected_target_ids": ["target-empty-mix"],
+                "common_target_ids": ["target-empty-mix"],
+            },
+        ],
+        "metric_slices": [
+            {
+                "metric": "CORRELATION",
+                "target_ids": [f"target-{index:05d}" for index in range(4096)],
+            },
+            {"metric": "EMPTY", "target_ids": []},
+        ],
+        "bucket_definitions": [
+            {
+                "bucket": 0,
+                "training_target_ids": [f"target-{index:05d}" for index in range(4096)],
+            },
+            {"bucket": 1, "training_target_ids": []},
+        ],
+    }
+    payload["report_id"] = verification.semantic_id(
+        {key: value for key, value in payload.items() if key != "source_class"}
+    )
+    compact = verification._partition_evaluation_payload(
+        tmp_path, "evaluation/report.json", payload
+    )
+    assert len(canonical_bytes(compact)) < 64 * 1024 * 1024
+    assert "all_model_common_target_ids" not in compact
+    assert "metric_slices" not in compact
+    assert "bucket_definitions" not in compact
+    compact_models = cast(list[object], compact["evaluated_models"])
+    assert all(
+        "expected_fold_target_keys" not in cast(dict[str, object], item) for item in compact_models
+    )
+    compact_comparisons = cast(list[object], compact["comparisons"])
+    assert all(
+        field not in cast(dict[str, object], item)
+        for item in compact_comparisons
+        for field in (
+            "candidate_own_target_ids",
+            "comparator_own_target_ids",
+            "common_expected_target_ids",
+            "common_target_ids",
+        )
+    )
+
+    expanded = verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    assert expanded == payload
+
+    parts = cast(list[object], compact["parts"])
+    assert parts
+    assert all(
+        (tmp_path / str(cast(dict[str, object], part)["path"])).stat().st_size < 64 * 1024 * 1024
+        for part in parts
+    )
+    first_part = cast(dict[str, object], parts[0])
+    part_path = tmp_path / str(first_part["path"])
+    original_rows = load_partitioned_rows(
+        tmp_path, "evaluation/report.json", compact, identity_field="report_id"
+    )
+    dictionary_unused = dict(compact)
+    dictionary_unused["partition_value_dictionary"] = [
+        *cast(list[object], compact["partition_value_dictionary"]),
+        "unused-entry",
+    ]
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: original_rows,
+    )
+    with pytest.raises(ValueError, match="unused"):
+        verification._expand_evaluation_payload(
+            tmp_path, "evaluation/report.json", dictionary_unused
+        )
+    monkeypatch.undo()
+
+    dictionary_reordered = dict(compact)
+    dictionary_values = list(cast(list[object], compact["partition_value_dictionary"]))
+    dictionary_values[0], dictionary_values[1] = dictionary_values[1], dictionary_values[0]
+    dictionary_reordered["partition_value_dictionary"] = dictionary_values
+    remapped_rows = [dict(row) for row in original_rows]
+    for row in remapped_rows:
+        if type(row["v"]) is int and row["v"] in {0, 1}:
+            row["v"] = 1 - row["v"]
+        elif isinstance(row["v"], list):
+            row["v"] = [1 - cast(int, item) if item in {0, 1} else item for item in row["v"]]
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: remapped_rows,
+    )
+    with pytest.raises(ValueError, match="order"):
+        verification._expand_evaluation_payload(
+            tmp_path, "evaluation/report.json", dictionary_reordered
+        )
+    monkeypatch.undo()
+
+    for scope, first_field, later_field in (
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 1, 0),
+    ):
+        interleaved = [dict(row) for row in original_rows]
+        scope_rows = [row for row in interleaved if row["s"] == scope]
+        if scope == 2:
+            first = next(row for row in scope_rows if row["o"] == 0 and row["f"] == first_field)
+            later = next(row for row in scope_rows if row["o"] == 2 and row["f"] == later_field)
+        else:
+            first = next(row for row in scope_rows if row["o"] == 0 and row["f"] == first_field)
+            later = next(row for row in scope_rows if row["o"] == 1 and row["f"] == later_field)
+        first_position = interleaved.index(first)
+        later_position = interleaved.index(later)
+        interleaved[first_position], interleaved[later_position] = (
+            interleaved[later_position],
+            interleaved[first_position],
+        )
+        monkeypatch.setattr(
+            verification,
+            "load_partitioned_rows",
+            lambda *_args, rows=interleaved, **_kwargs: rows,
+        )
+        with pytest.raises(ValueError, match=r"ordering|contiguous"):
+            verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+        monkeypatch.undo()
+
+    malformed = [dict(row) for row in original_rows]
+    malformed[0]["i"] = True
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: malformed,
+    )
+    with pytest.raises(ValueError, match="invalid types"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    monkeypatch.undo()
+    malformed = [dict(row) for row in original_rows]
+    nested_row = next(row for row in malformed if row["s"] == 3 and row["f"] == 1)
+    nested_row["o"] = 999
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: malformed,
+    )
+    with pytest.raises(ValueError, match="bounds"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    monkeypatch.undo()
+    malformed = [dict(row) for row in original_rows]
+    nested_row = next(row for row in malformed if row["s"] == 4 and row["f"] == 1)
+    nested_row["o"] = -1
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: malformed,
+    )
+    with pytest.raises(ValueError, match="bounds"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    monkeypatch.undo()
+    malformed = [dict(row) for row in original_rows]
+    nested_row = next(row for row in malformed if row["s"] == 3 and row["f"] == 1)
+    nested_row["o"] = True
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: malformed,
+    )
+    with pytest.raises(ValueError, match="invalid types"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    monkeypatch.undo()
+    malformed = [dict(row) for row in original_rows]
+    reset_row = next(row for row in malformed if row["s"] == 2 and row["f"] == 3 and row["o"] == 0)
+    reset_row["f"] = 0
+    monkeypatch.setattr(
+        verification,
+        "load_partitioned_rows",
+        lambda *_args, **_kwargs: malformed,
+    )
+    with pytest.raises(ValueError, match="ordering"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)
+    monkeypatch.undo()
+
+    part_path.write_bytes(part_path.read_bytes() + b"tamper")
+    with pytest.raises(ValueError, match="digest"):
+        verification._expand_evaluation_payload(tmp_path, "evaluation/report.json", compact)

@@ -1947,6 +1947,26 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
 
 
 _EVALUATION_PART_FIELDS = ("metric_slices", "bucket_definitions")
+_EVALUATION_MODEL_PART_FIELDS = ("expected_fold_target_keys",)
+_EVALUATION_COMPARISON_PART_FIELDS = (
+    "candidate_own_target_ids",
+    "comparator_own_target_ids",
+    "common_expected_target_ids",
+    "common_target_ids",
+)
+_EVALUATION_NESTED_PART_FIELDS = {
+    "metric_slices": ("target_ids",),
+    "bucket_definitions": ("training_target_ids",),
+}
+_EVALUATION_PART_SCOPES = (
+    "report",
+    "evaluated_model",
+    "comparison",
+    "metric_slices",
+    "bucket_definitions",
+)
+_EVALUATION_PART_ROW_SCHEMA = "qtrad-r2-evaluation-membership-v3"
+_EVALUATION_PART_ROW_FIELDS = frozenset({"s", "f", "o", "i", "v"})
 
 _PREPROCESSING_SELECTION_PART_FIELDS = (
     "outer_training_target_ids",
@@ -1972,14 +1992,145 @@ def _partition_evaluation_payload(
     """Persist large report arrays as bounded parts while retaining one report identity."""
     header = dict(payload)
     rows: list[dict[str, object]] = []
+    value_dictionary: list[str] = []
+    value_indexes: dict[str, int] = {}
+
+    field_register: dict[str, tuple[str, ...]] = {
+        "report": ("all_model_common_target_ids",),
+        "evaluated_model": _EVALUATION_MODEL_PART_FIELDS,
+        "comparison": _EVALUATION_COMPARISON_PART_FIELDS,
+        "metric_slices": ("metric_slices", "target_ids"),
+        "bucket_definitions": ("bucket_definitions", "training_target_ids"),
+    }
+
+    def encode_string(value: str) -> int:
+        index = value_indexes.get(value)
+        if index is None:
+            index = len(value_dictionary)
+            value_indexes[value] = index
+            value_dictionary.append(value)
+        return index
+
+    def append_row(
+        scope: str, field: str, object_index: int, member_index: int, value: object
+    ) -> None:
+        fields = field_register[scope]
+        field_index = fields.index(field)
+        if isinstance(value, str):
+            physical_value: object = encode_string(value)
+        elif (
+            scope == "evaluated_model"
+            and isinstance(value, list)
+            and len(value) == 2
+            and all(isinstance(item, str) for item in value)
+        ):
+            physical_value = [encode_string(cast(str, item)) for item in value]
+        else:
+            physical_value = value
+        rows.append(
+            {
+                "s": _EVALUATION_PART_SCOPES.index(scope),
+                "f": field_index,
+                "o": object_index,
+                "i": member_index,
+                "v": physical_value,
+            }
+        )
+
+    def string_members(field: str, value: object) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError(f"evaluation report field is not a list: {field}")
+        members: list[str] = []
+        for member in value:
+            if not isinstance(member, str):
+                raise ValueError(f"evaluation report membership is not a string: {field}")
+            members.append(member)
+        return members
+
+    all_model_common_target_ids = string_members(
+        "all_model_common_target_ids", header.pop("all_model_common_target_ids", None)
+    )
+    for member_index, member in enumerate(all_model_common_target_ids):
+        append_row("report", "all_model_common_target_ids", -1, member_index, member)
+
+    evaluated_models_raw = header.get("evaluated_models")
+    if not isinstance(evaluated_models_raw, list):
+        raise ValueError("evaluation report field is not a list: evaluated_models")
+    evaluated_models: list[dict[str, object]] = []
+    for object_index, value in enumerate(evaluated_models_raw):
+        if not isinstance(value, Mapping):
+            raise ValueError("evaluated model row is not an object")
+        compact = dict(value)
+        expected = compact.pop("expected_fold_target_keys", None)
+        if not isinstance(expected, list):
+            raise ValueError("evaluated model expected keys are not a list")
+        for member_index, pair in enumerate(expected):
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or not all(isinstance(item, str) for item in pair)
+            ):
+                raise ValueError("evaluated model expected key is not a string pair")
+            append_row(
+                "evaluated_model",
+                "expected_fold_target_keys",
+                object_index,
+                member_index,
+                pair,
+            )
+        evaluated_models.append(compact)
+    header["evaluated_models"] = evaluated_models
+
+    comparisons_raw = header.get("comparisons")
+    if not isinstance(comparisons_raw, list):
+        raise ValueError("evaluation report field is not a list: comparisons")
+    comparisons: list[dict[str, object]] = []
+    for object_index, value in enumerate(comparisons_raw):
+        if not isinstance(value, Mapping):
+            raise ValueError("comparison row is not an object")
+        compact = dict(value)
+        for field in _EVALUATION_COMPARISON_PART_FIELDS:
+            members = string_members(field, compact.pop(field, None))
+            for member_index, member in enumerate(members):
+                append_row("comparison", field, object_index, member_index, member)
+        comparisons.append(compact)
+    header["comparisons"] = comparisons
+
+    nested_object_rows: dict[str, list[dict[str, object]]] = {
+        field: [] for field in _EVALUATION_PART_FIELDS
+    }
+    nested_member_rows: dict[str, list[dict[str, object]]] = {
+        field: [] for field in _EVALUATION_PART_FIELDS
+    }
     for field in _EVALUATION_PART_FIELDS:
         raw = header.pop(field, None)
         if not isinstance(raw, list):
             raise ValueError(f"evaluation report field is not a list: {field}")
-        for index, value in enumerate(raw):
+        nested_field = _EVALUATION_NESTED_PART_FIELDS[field][0]
+        for object_index, value in enumerate(raw):
             if not isinstance(value, Mapping):
                 raise ValueError(f"evaluation report field contains a non-object row: {field}")
-            rows.append({"field": field, "index": index, "value": dict(value)})
+            compact = dict(value)
+            members = string_members(nested_field, compact.pop(nested_field, None))
+            append_row(field, field, object_index, -1, compact)
+            nested_object_rows[field].append(rows.pop())
+            for member_index, member in enumerate(members):
+                append_row(field, nested_field, object_index, member_index, member)
+                nested_member_rows[field].append(rows.pop())
+    for field in _EVALUATION_PART_FIELDS:
+        rows.extend(nested_object_rows[field])
+        rows.extend(nested_member_rows[field])
+    header["partition_row_schema"] = _EVALUATION_PART_ROW_SCHEMA
+    header["partition_row_fields"] = sorted(_EVALUATION_PART_ROW_FIELDS)
+    header["partition_scopes"] = list(_EVALUATION_PART_SCOPES)
+    header["partition_fields"] = {
+        "report": ["all_model_common_target_ids"],
+        "evaluated_model": list(_EVALUATION_MODEL_PART_FIELDS),
+        "comparison": list(_EVALUATION_COMPARISON_PART_FIELDS),
+        "metric_slices": ["target_ids"],
+        "bucket_definitions": ["training_target_ids"],
+    }
+    header["partition_value_dictionary"] = value_dictionary
     return write_partitioned_rows(
         output,
         relative_path,
@@ -3425,35 +3576,292 @@ def _load_selection(path: Path) -> dict[str, object]:
 def _expand_evaluation_payload(
     root: Path, relative_path: str, payload: Mapping[str, object]
 ) -> dict[str, object]:
-    """Reconstruct the logical report once for a consumer that needs its large arrays."""
+    """Reconstruct and authenticate the logical report from bounded membership parts."""
     if payload.get("storage") != "qtrad-r2-partitioned-json-rows-v1":
         return dict(payload)
-    from qtrad.runtime.r2_partitioned_rows import load_partitioned_rows
+    expected_fields = {
+        "report": ["all_model_common_target_ids"],
+        "evaluated_model": list(_EVALUATION_MODEL_PART_FIELDS),
+        "comparison": list(_EVALUATION_COMPARISON_PART_FIELDS),
+        "metric_slices": ["target_ids"],
+        "bucket_definitions": ["training_target_ids"],
+    }
+    value_dictionary = payload.get("partition_value_dictionary")
+    if (
+        payload.get("partition_row_schema") != _EVALUATION_PART_ROW_SCHEMA
+        or payload.get("partition_row_fields") != sorted(_EVALUATION_PART_ROW_FIELDS)
+        or payload.get("partition_scopes") != list(_EVALUATION_PART_SCOPES)
+        or payload.get("partition_fields") != expected_fields
+        or not isinstance(value_dictionary, list)
+        or any(not isinstance(value, str) for value in value_dictionary)
+        or len(set(value_dictionary)) != len(value_dictionary)
+    ):
+        raise ValueError("partitioned evaluation report row schema is invalid")
 
     rows = load_partitioned_rows(root, relative_path, payload, identity_field="report_id")
-    grouped: dict[str, list[dict[str, object]]] = {field: [] for field in _EVALUATION_PART_FIELDS}
-    for row in rows:
-        if set(row) != {"field", "index", "value"}:
-            raise ValueError("evaluation report part row has unknown or missing fields")
-        field = row["field"]
-        index = row["index"]
-        value = row["value"]
-        if (
-            not isinstance(field, str)
-            or field not in grouped
-            or type(index) is not int
-            or not isinstance(value, Mapping)
-            or index != len(grouped[field])
+    evaluated_models_raw = payload.get("evaluated_models")
+    if not isinstance(evaluated_models_raw, list):
+        raise ValueError("partitioned evaluation report models are invalid")
+    evaluated_models: list[dict[str, object]] = []
+    for value in evaluated_models_raw:
+        if not isinstance(value, Mapping) or "expected_fold_target_keys" in value:
+            raise ValueError("partitioned evaluation model retains membership arrays")
+        evaluated_models.append(dict(cast(Mapping[str, object], value)))
+    model_members: list[list[object]] = [[] for _ in evaluated_models]
+
+    comparisons_raw = payload.get("comparisons")
+    if not isinstance(comparisons_raw, list):
+        raise ValueError("partitioned evaluation report comparisons are invalid")
+    comparisons: list[dict[str, object]] = []
+    for value in comparisons_raw:
+        if not isinstance(value, Mapping) or any(
+            field in value for field in _EVALUATION_COMPARISON_PART_FIELDS
         ):
-            raise ValueError("evaluation report part row ordering or shape is invalid")
-        grouped[field].append(dict(cast(Mapping[str, object], value)))
+            raise ValueError("partitioned comparison retains membership arrays")
+        comparisons.append(dict(cast(Mapping[str, object], value)))
+    comparison_members: list[dict[str, list[object]]] = [
+        {field: [] for field in _EVALUATION_COMPARISON_PART_FIELDS} for _ in comparisons
+    ]
+
+    grouped_objects: dict[str, list[dict[str, object]]] = {
+        field: [] for field in _EVALUATION_PART_FIELDS
+    }
+    grouped_members: dict[str, list[list[object]]] = {
+        field: [] for field in _EVALUATION_PART_FIELDS
+    }
+    all_model_common_target_ids: list[object] = []
+    last_scope: str | None = None
+    last_rank = -1
+    last_object_index = -1
+    last_member_index = -1
+    value_lookup = cast(list[str], value_dictionary)
+    used_dictionary_indices: set[int] = set()
+
+    def decode_dictionary_index(index: object) -> str:
+        if type(index) is not int or not 0 <= index < len(value_lookup):
+            raise ValueError("evaluation report dictionary index is invalid")
+        if index not in used_dictionary_indices and index != len(used_dictionary_indices):
+            raise ValueError("evaluation report dictionary order is invalid")
+        used_dictionary_indices.add(index)
+        return value_lookup[index]
+
+    field_register = {
+        "report": ("all_model_common_target_ids",),
+        "evaluated_model": _EVALUATION_MODEL_PART_FIELDS,
+        "comparison": _EVALUATION_COMPARISON_PART_FIELDS,
+        "metric_slices": ("metric_slices", "target_ids"),
+        "bucket_definitions": ("bucket_definitions", "training_target_ids"),
+    }
+    for row in rows:
+        if set(row) != _EVALUATION_PART_ROW_FIELDS:
+            raise ValueError("evaluation report part row has unknown or missing fields")
+        scope_code = row["s"]
+        field_code = row["f"]
+        object_index = row["o"]
+        member_index = row["i"]
+        value = row["v"]
+        if (
+            type(scope_code) is not int
+            or type(field_code) is not int
+            or type(object_index) is not int
+            or type(member_index) is not int
+            or not 0 <= scope_code < len(_EVALUATION_PART_SCOPES)
+        ):
+            raise ValueError("evaluation report part row has invalid types")
+        scope = _EVALUATION_PART_SCOPES[scope_code]
+        fields = field_register[scope]
+        if not 0 <= field_code < len(fields):
+            raise ValueError("evaluation report part row has invalid field code")
+        field = fields[field_code]
+        if scope == "evaluated_model":
+            if not isinstance(value, list) or len(value) != 2:
+                raise ValueError("evaluation report part row has invalid value code")
+            value = [decode_dictionary_index(item) for item in cast(list[object], value)]
+        elif (
+            scope == "report"
+            or scope == "comparison"
+            or (scope in _EVALUATION_PART_FIELDS and field_code == 1)
+        ):
+            value = decode_dictionary_index(value)
+        if scope == "report":
+            valid_field = field == "all_model_common_target_ids"
+            valid_object = object_index == -1
+            valid_value = isinstance(value, str)
+            rank = 0
+            initial_member_index = 0
+            target: list[object] = all_model_common_target_ids
+        elif scope == "evaluated_model":
+            valid_field = field == "expected_fold_target_keys"
+            valid_object = 0 <= object_index < len(model_members)
+            valid_value = (
+                isinstance(value, list)
+                and len(value) == 2
+                and all(isinstance(item, str) for item in value)
+            )
+            rank = 1
+            initial_member_index = 0
+            target = model_members[object_index] if valid_object else []
+        elif scope == "comparison":
+            valid_field = field in _EVALUATION_COMPARISON_PART_FIELDS
+            valid_object = 0 <= object_index < len(comparison_members)
+            valid_value = isinstance(value, str)
+            rank = 2 + (_EVALUATION_COMPARISON_PART_FIELDS.index(field) if valid_field else 0)
+            initial_member_index = 0
+            target = comparison_members[object_index][field] if valid_object and valid_field else []
+        elif scope in _EVALUATION_PART_FIELDS:
+            nested_field = _EVALUATION_NESTED_PART_FIELDS[scope][0]
+            valid_field = field in {scope, nested_field}
+            is_object = field == scope
+            valid_object = (
+                object_index == len(grouped_objects[scope])
+                if is_object
+                else 0 <= object_index < len(grouped_objects[scope])
+            )
+            valid_value = isinstance(value, Mapping) if is_object else isinstance(value, str)
+            rank = 6 if scope == "metric_slices" else 8
+            if not is_object:
+                rank += 1
+            initial_member_index = -1 if is_object else 0
+            if is_object:
+                target = []
+            elif object_index < len(grouped_members[scope]):
+                target = grouped_members[scope][object_index]
+            else:
+                target = []
+        else:
+            raise ValueError("evaluation report part row scope is invalid")
+        if not valid_field or not valid_object or not valid_value:
+            raise ValueError("evaluation report part row scope, bounds, or value is invalid")
+        comparison_transition = False
+        if (
+            scope == "comparison"
+            and valid_field
+            and 2 <= rank <= 5
+            and 2 <= last_rank <= 5
+            and rank < last_rank
+            and object_index > last_object_index
+            and (
+                object_index == last_object_index + 1
+                or all(
+                    not any(comparison_members[index].values())
+                    for index in range(last_object_index + 1, object_index)
+                )
+            )
+            and member_index == initial_member_index
+        ):
+            comparison_fields = _EVALUATION_COMPARISON_PART_FIELDS
+            current_field_index = rank - 2
+            previous_field_index = last_rank - 2
+            comparison_transition = all(
+                not comparison_members[object_index][comparison_fields[index]]
+                for index in range(current_field_index)
+            ) and all(
+                not comparison_members[last_object_index][comparison_fields[index]]
+                for index in range(previous_field_index + 1, len(comparison_fields))
+            )
+        if (
+            scope == last_scope
+            and object_index < last_object_index
+            and not (scope in _EVALUATION_PART_FIELDS and field != scope and last_rank == rank - 1)
+        ):
+            raise ValueError("evaluation report part object ordering is invalid")
+        if scope == "comparison" and scope == last_scope and valid_field:
+            current_field_index = rank - 2
+            comparison_fields = _EVALUATION_COMPARISON_PART_FIELDS
+            if object_index > last_object_index and rank >= last_rank:
+                if any(
+                    comparison_members[object_index][comparison_fields[index]]
+                    for index in range(current_field_index)
+                ) or any(
+                    comparison_members[last_object_index][comparison_fields[index]]
+                    for index in range(current_field_index + 1, len(comparison_fields))
+                ):
+                    raise ValueError("evaluation report comparison fields are not contiguous")
+            elif rank > last_rank and (
+                member_index != initial_member_index
+                or any(
+                    comparison_members[object_index][comparison_fields[index]]
+                    for index in range(last_rank - 1, current_field_index)
+                )
+            ):
+                raise ValueError("evaluation report comparison fields are not contiguous")
+        if rank < last_rank and not comparison_transition:
+            raise ValueError("evaluation report part row ordering is invalid")
+        if rank == last_rank:
+            if object_index == last_object_index:
+                if member_index != last_member_index + 1:
+                    raise ValueError("evaluation report part ordering is invalid")
+            elif object_index < last_object_index + 1 or member_index != initial_member_index:
+                raise ValueError("evaluation report part row ordering is invalid")
+            else:
+                skipped_have_members = object_index != last_object_index + 1
+                if rank == 1:
+                    skipped_have_members = any(
+                        model_members[index] for index in range(last_object_index + 1, object_index)
+                    )
+                elif 2 <= rank <= 5 and valid_field:
+                    skipped_have_members = any(
+                        comparison_members[index][field]
+                        for index in range(last_object_index + 1, object_index)
+                    )
+                elif rank in {7, 9}:
+                    skipped_have_members = any(
+                        grouped_members[scope][index]
+                        for index in range(last_object_index + 1, object_index)
+                    )
+                if skipped_have_members:
+                    raise ValueError("evaluation report part row ordering is invalid")
+        elif member_index != initial_member_index:
+            raise ValueError("evaluation report part row ordering is invalid")
+        if scope in _EVALUATION_PART_FIELDS and field == scope:
+            if object_index != len(grouped_objects[scope]):
+                raise ValueError("evaluation report object indexes are not contiguous")
+            compact = dict(cast(Mapping[str, object], value))
+            nested_field = _EVALUATION_NESTED_PART_FIELDS[scope][0]
+            if nested_field in compact:
+                raise ValueError("evaluation report object retains nested membership")
+            grouped_objects[scope].append(compact)
+            grouped_members[scope].append([])
+        else:
+            target.append(cast(object, value))
+        last_scope = scope
+        last_rank = rank
+        last_object_index = object_index
+        last_member_index = member_index
+
+    for index, model in enumerate(evaluated_models):
+        model["expected_fold_target_keys"] = model_members[index]
+    for index, comparison in enumerate(comparisons):
+        for field in _EVALUATION_COMPARISON_PART_FIELDS:
+            comparison[field] = comparison_members[index][field]
+    if len(used_dictionary_indices) != len(value_lookup):
+        raise ValueError("evaluation report dictionary has unused entries")
+
     expanded = {
         key: value
         for key, value in payload.items()
-        if key not in {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+        if key
+        not in {
+            "storage",
+            "identity_field",
+            "row_count",
+            "parts",
+            "header_sha256",
+            "partition_row_schema",
+            "partition_row_fields",
+            "partition_scopes",
+            "partition_fields",
+            "partition_value_dictionary",
+        }
     }
+    expanded["all_model_common_target_ids"] = all_model_common_target_ids
+    expanded["evaluated_models"] = evaluated_models
+    expanded["comparisons"] = comparisons
     for field in _EVALUATION_PART_FIELDS:
-        expanded[field] = grouped[field]
+        expanded[field] = grouped_objects[field]
+        for index, compact in enumerate(grouped_objects[field]):
+            nested_field = _EVALUATION_NESTED_PART_FIELDS[field][0]
+            compact[nested_field] = grouped_members[field][index]
     report_id = expanded.get("report_id")
     logical_payload = {
         key: value for key, value in expanded.items() if key not in {"report_id", "source_class"}
