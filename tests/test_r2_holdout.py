@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 from uuid import UUID
 
 import pytest
@@ -2123,3 +2123,201 @@ def test_terminal_outcomes_round_trip_with_forced_part_bound(
         holdout_target_source=_target_source(),
         training_feature_datasets=_training_feature_authority(),
     ).evaluation_id
+
+
+def test_final_fit_partition_externalizes_nested_preprocessing_at_child_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _selection, _opportunities, fits, _forecasts, _coverage, _seal = _prepared(tmp_path)
+    payload = cast(dict[str, object], fits[0].as_json())
+    preprocessing = payload["preprocessing"]
+    assert isinstance(preprocessing, Mapping)
+    inner = preprocessing.get("inner")
+    outer = preprocessing.get("outer")
+    assert isinstance(inner, Mapping)
+    assert isinstance(outer, Mapping)
+    retained_target_ids = [f"{index:064x}" for index in range(5_000)]
+    retained_sample_weights = [1.0] * len(retained_target_ids)
+    payload["preprocessing"] = {
+        **preprocessing,
+        "inner": {
+            **inner,
+            "training_target_ids": retained_target_ids,
+            "sample_weights": retained_sample_weights,
+        },
+        "outer": {
+            **outer,
+            "training_target_ids": retained_target_ids,
+            "sample_weights": retained_sample_weights,
+        },
+    }
+    payload["fit_id"] = holdout_runtime._semantic_id(payload, "fit_id")
+    fit_id = payload["fit_id"]
+    assert isinstance(fit_id, str)
+    assert len(canonical_bytes(payload)) > 100_000
+
+    output = tmp_path / "partitioned"
+    relative = f"fits/{fit_id}.json"
+    parent_path = output / relative
+    original_atomic_create = holdout_runtime.atomic_create
+
+    def bounded_parent_create(path: Path, content: bytes) -> None:
+        if Path(path) == parent_path and len(content) > 100_000:
+            raise ValueError("test compact-header child bound exceeded")
+        original_atomic_create(path, content)
+
+    monkeypatch.setattr(holdout_runtime, "atomic_create", bounded_parent_create)
+    compact, _part_paths = holdout_runtime._write_partitioned_child(
+        output,
+        relative,
+        payload,
+        identity_field="fit_id",
+        row_field="fit_arrays",
+        array_fields=holdout_runtime._final_fit_partition_fields(payload),
+        mapping_fields=("diagnostics",),
+    )
+    holdout_runtime._write_json(parent_path, compact)
+
+    assert len(canonical_bytes(compact)) < 100_000
+    compact_preprocessing = compact["preprocessing"]
+    assert isinstance(compact_preprocessing, Mapping)
+    compact_mapping = cast(Mapping[str, object], compact_preprocessing)
+    compact_inner = compact_mapping["inner"]
+    compact_outer = compact_mapping["outer"]
+    assert isinstance(compact_inner, Mapping)
+    assert isinstance(compact_outer, Mapping)
+    assert "training_target_ids" not in compact_inner
+    assert "sample_weights" not in compact_inner
+    assert "training_target_ids" not in compact_outer
+    assert "sample_weights" not in compact_outer
+    assert (
+        holdout_runtime._verify_child(
+            output,
+            relative,
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=holdout_runtime._FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )
+        == payload
+    )
+
+
+def test_final_fit_partition_rejects_unsupported_nested_field_register(
+    tmp_path: Path,
+) -> None:
+    _selection, _opportunities, fits, _forecasts, _coverage, _seal = _prepared(tmp_path)
+    payload = cast(dict[str, object], fits[0].as_json())
+    fit_id = payload["fit_id"]
+    assert isinstance(fit_id, str)
+    output = tmp_path / "partitioned"
+    relative = f"fits/{fit_id}.json"
+    compact_payload, _part_paths = holdout_runtime._write_partitioned_child(
+        output,
+        relative,
+        payload,
+        identity_field="fit_id",
+        row_field="fit_arrays",
+        array_fields=holdout_runtime._final_fit_partition_fields(payload),
+        mapping_fields=("diagnostics",),
+    )
+    path = output / relative
+    holdout_runtime._write_json(path, compact_payload)
+    compact = json.loads(path.read_text())
+    assert isinstance(compact, dict)
+    fields = compact["partition_fields"]
+    assert isinstance(fields, list)
+    fields[0], fields[1] = fields[1], fields[0]
+    compact["header_sha256"] = holdout_runtime._compact_header_digest(compact)
+    path.write_bytes(canonical_bytes(compact))
+
+    with pytest.raises(ValueError, match="partition field register is unsupported"):
+        holdout_runtime._verify_child(
+            output,
+            relative,
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=holdout_runtime._FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )
+
+    fields[0], fields[1] = fields[1], fields[0]
+    fields.append("preprocessing.inner.untrusted")
+    compact["header_sha256"] = holdout_runtime._compact_header_digest(compact)
+    path.write_bytes(canonical_bytes(compact))
+
+    with pytest.raises(ValueError, match="partition field register is unsupported"):
+        holdout_runtime._verify_child(
+            output,
+            relative,
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=holdout_runtime._FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )
+
+
+def test_final_fit_partition_mapping_rows_are_canonical_and_reject_tampering(
+    tmp_path: Path,
+) -> None:
+    _selection, _opportunities, fits, _forecasts, _coverage, _seal = _prepared(tmp_path)
+    payload = cast(dict[str, object], fits[0].as_json())
+    payload["diagnostics"] = {"z-last": 1.0, "a-first": 2.0}
+    payload["fit_id"] = holdout_runtime._semantic_id(payload, "fit_id")
+    fit_id = payload["fit_id"]
+    assert isinstance(fit_id, str)
+    output = tmp_path / "partitioned"
+    relative = f"fits/{fit_id}.json"
+    compact_payload, part_paths = holdout_runtime._write_partitioned_child(
+        output,
+        relative,
+        payload,
+        identity_field="fit_id",
+        row_field="fit_arrays",
+        array_fields=holdout_runtime._final_fit_partition_fields(payload),
+        mapping_fields=("diagnostics",),
+    )
+    parent_path = output / relative
+    holdout_runtime._write_json(parent_path, compact_payload)
+
+    part_path = output / part_paths[0]
+    part = json.loads(part_path.read_text())
+    assert isinstance(part, dict)
+    rows = part["rows"]
+    assert isinstance(rows, list)
+    diagnostics_rows = [row for row in rows if row.get("field") == "diagnostics"]
+    assert [row["key"] for row in diagnostics_rows] == ["a-first", "z-last"]
+
+    first_index = rows.index(diagnostics_rows[0])
+    second_index = rows.index(diagnostics_rows[1])
+    compact_parts = compact_payload["parts"]
+    assert isinstance(compact_parts, list)
+    compact_reference = cast(dict[str, object], compact_parts[0])
+    rows[first_index], rows[second_index] = rows[second_index], rows[first_index]
+    part_path.write_bytes(canonical_bytes(part))
+    compact_reference["sha256"] = sha256(part_path.read_bytes()).hexdigest()
+    parent_path.write_bytes(canonical_bytes(compact_payload))
+    with pytest.raises(ValueError, match="canonical order"):
+        holdout_runtime._verify_child(
+            output,
+            relative,
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=holdout_runtime._FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )
+
+    rows[first_index], rows[second_index] = rows[second_index], rows[first_index]
+    rows[second_index]["key"] = rows[first_index]["key"]
+    part_path.write_bytes(canonical_bytes(part))
+    compact_reference["sha256"] = sha256(part_path.read_bytes()).hexdigest()
+    parent_path.write_bytes(canonical_bytes(compact_payload))
+    with pytest.raises(ValueError, match="duplicate key"):
+        holdout_runtime._verify_child(
+            output,
+            relative,
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=holdout_runtime._FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )

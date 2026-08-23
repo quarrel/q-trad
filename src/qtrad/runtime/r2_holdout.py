@@ -163,20 +163,37 @@ def _partitioned_payload(
             field: {} for field in mapping_fields
         }
         nullable_fields: set[str] = set()
+        mapping_row_seen: set[str] = set()
+        field_positions = {field: index for index, field in enumerate(fields)}
+        last_field_index = -1
+        last_mapping_keys: dict[str, str] = {}
         for row in rows:
             field = row.get("field")
             if not isinstance(field, str) or field not in fields:
                 raise ValueError("partitioned holdout field row names an unknown field")
+            field_index = field_positions[field]
+            if field_index < last_field_index:
+                raise ValueError("partitioned holdout rows are not in canonical field order")
+            last_field_index = field_index
             if field in grouped_mappings:
                 if set(row) == {"field", "value"} and row["value"] is None:
-                    if grouped_mappings[field] != {}:
+                    if field in mapping_row_seen or grouped_mappings[field] != {}:
                         raise ValueError("partitioned holdout mapping row is invalid")
                     grouped_mappings[field] = None
+                    mapping_row_seen.add(field)
                 elif set(row) == {"field", "key", "value"} and isinstance(row["key"], str):
                     mapping = grouped_mappings[field]
                     if mapping is None:
                         raise ValueError("partitioned R2 mapping row is invalid")
-                    mapping[row["key"]] = row["value"]
+                    key = row["key"]
+                    previous_key = last_mapping_keys.get(field)
+                    if key in mapping:
+                        raise ValueError("partitioned R2 mapping row contains a duplicate key")
+                    if previous_key is not None and key <= previous_key:
+                        raise ValueError("partitioned R2 mapping rows are not in canonical order")
+                    mapping[key] = row["value"]
+                    last_mapping_keys[field] = key
+                    mapping_row_seen.add(field)
                 else:
                     raise ValueError("partitioned holdout mapping row is invalid")
             else:
@@ -190,10 +207,12 @@ def _partitioned_payload(
                     grouped[field].append(row["value"])
                 else:
                     raise ValueError("partitioned holdout field row is invalid")
-        logical.update(grouped)
-        logical.update(grouped_mappings)
+        for field, values in grouped.items():
+            _set_nested_field(logical, field, values)
+        for field, mapping_values in grouped_mappings.items():
+            _set_nested_field(logical, field, mapping_values)
         for field in nullable_fields:
-            logical[field] = None
+            _set_nested_field(logical, field, None)
     else:
         values: list[object] = []
         for row in rows:
@@ -202,6 +221,31 @@ def _partitioned_payload(
             values.append(row["value"])
         logical[row_field] = values
     return logical
+
+
+def _nested_field_value(payload: Mapping[str, object], field: str) -> object:
+    value: object = payload
+    for component in field.split("."):
+        if not isinstance(value, Mapping) or component not in value:
+            raise ValueError(f"partitioned holdout field is missing: {field}")
+        value = cast(Mapping[str, object], value)[component]
+    return value
+
+
+def _set_nested_field(payload: dict[str, object], field: str, value: object) -> None:
+    components = field.split(".")
+    if len(components) == 1:
+        payload[field] = value
+        return
+    current: dict[str, object] = payload
+    for component in components[:-1]:
+        nested = current.get(component)
+        if not isinstance(nested, Mapping):
+            raise ValueError(f"partitioned holdout nested field is not an object: {field}")
+        copied = dict(nested)
+        current[component] = copied
+        current = copied
+    current[components[-1]] = value
 
 
 def _partitioned_paths(
@@ -256,13 +300,26 @@ def _partitioned_header(
     mapping_fields: Sequence[str] = (),
 ) -> dict[str, object]:
     header = dict(payload)
-    header.pop(row_field, None)
+    _remove_nested_field(header, row_field)
     for field in array_fields:
-        header.pop(field, None)
+        _remove_nested_field(header, field)
     header["partition_row_field"] = row_field
     header["partition_fields"] = list(array_fields or (row_field,))
     header["partition_mapping_fields"] = list(mapping_fields)
     return header
+
+
+def _remove_nested_field(payload: dict[str, object], field: str) -> None:
+    components = field.split(".")
+    if len(components) == 1:
+        payload.pop(field, None)
+        return
+    nested = payload.get(components[0])
+    if not isinstance(nested, Mapping):
+        raise ValueError(f"partitioned holdout nested field is not an object: {field}")
+    copied = dict(nested)
+    payload[components[0]] = copied
+    _remove_nested_field(copied, ".".join(components[1:]))
 
 
 def _write_partitioned_child(
@@ -285,18 +342,22 @@ def _write_partitioned_child(
         def encoded_rows() -> Iterator[Mapping[str, object]]:
             for field in fields:
                 if field in mapping_names:
-                    mapping = payload[field]
+                    mapping = _nested_field_value(payload, field)
                     if mapping is None:
                         yield {"field": field, "value": None}
                     elif isinstance(mapping, Mapping):
+                        if any(not isinstance(key, str) for key in mapping):
+                            raise TypeError(
+                                f"partitioned mapping field keys must be strings: {field}"
+                            )
                         yield from (
                             {"field": field, "key": key, "value": value}
-                            for key, value in mapping.items()
+                            for key, value in ((key, mapping[key]) for key in sorted(mapping))
                         )
                     else:
                         raise TypeError(f"partitioned mapping field is not an object: {field}")
                 else:
-                    values = payload[field]
+                    values = _nested_field_value(payload, field)
                     if values is None:
                         yield {"field": field, "value": None, "is_null": True}
                     elif isinstance(values, Sequence) and not isinstance(
@@ -316,11 +377,11 @@ def _write_partitioned_child(
             raise TypeError(f"partitioned mapping field is not an object: {field}")
 
         expected_count = sum(
-            mapping_count(payload[field], field)
+            mapping_count(_nested_field_value(payload, field), field)
             if field in mapping_names
             else 1
-            if payload[field] is None
-            else len(cast(Sequence[object], payload[field]))
+            if _nested_field_value(payload, field) is None
+            else len(cast(Sequence[object], _nested_field_value(payload, field)))
             for field in fields
         )
     else:
@@ -479,16 +540,14 @@ def _verify_child(
         header_sha256 = header_value if isinstance(header_value, str) else None
         if contract == "qtrad-r2-final-fit-v1":
             row_field = "fit_arrays"
-            array_fields = (
-                "training_target_ids",
-                "purged_target_ids",
-                "inner_fit_target_ids",
-                "inner_validation_target_ids",
-                "alpha_candidate_scores",
-                "sample_weights",
-                "coefficients",
-                "diagnostics",
-            )
+            raw_fields = physical.get("partition_fields")
+            if not isinstance(raw_fields, list) or any(
+                not isinstance(field, str) for field in raw_fields
+            ):
+                raise ValueError("final-fit partition field register is invalid")
+            array_fields = tuple(str(field) for field in raw_fields)
+            if not _final_fit_partition_fields_are_valid(array_fields):
+                raise ValueError("final-fit partition field register is unsupported")
             mapping_fields = ("diagnostics",)
         elif contract in {
             R2_HOLDOUT_FEATURES_CONTRACT,
@@ -1337,6 +1396,46 @@ _FINAL_FIT_FIELDS = {
     "holdout_scope",
     "fit_id",
 }
+_FINAL_FIT_PARTITION_ARRAY_FIELDS = (
+    "training_target_ids",
+    "purged_target_ids",
+    "inner_fit_target_ids",
+    "inner_validation_target_ids",
+    "alpha_candidate_scores",
+    "sample_weights",
+    "coefficients",
+    "diagnostics",
+    "preprocessing.inner.training_target_ids",
+    "preprocessing.inner.sample_weights",
+    "preprocessing.outer.training_target_ids",
+    "preprocessing.outer.sample_weights",
+)
+_FINAL_FIT_REQUIRED_PARTITION_ARRAY_FIELDS = _FINAL_FIT_PARTITION_ARRAY_FIELDS[:8]
+
+
+def _final_fit_partition_fields(payload: Mapping[str, object]) -> tuple[str, ...]:
+    fields: list[str] = list(_FINAL_FIT_REQUIRED_PARTITION_ARRAY_FIELDS)
+    preprocessing = payload.get("preprocessing")
+    if not isinstance(preprocessing, Mapping):
+        return tuple(fields)
+    for fit_name in ("inner", "outer"):
+        fit = preprocessing.get(fit_name)
+        if fit is None:
+            continue
+        if not isinstance(fit, Mapping):
+            raise ValueError(f"final-fit preprocessing {fit_name} state is not an object")
+        for field in ("training_target_ids", "sample_weights"):
+            if field in fit:
+                fields.append(f"preprocessing.{fit_name}.{field}")
+    return tuple(fields)
+
+
+def _final_fit_partition_fields_are_valid(fields: Sequence[str]) -> bool:
+    values = tuple(fields)
+    canonical = tuple(field for field in _FINAL_FIT_PARTITION_ARRAY_FIELDS if field in values)
+    return values == canonical and set(_FINAL_FIT_REQUIRED_PARTITION_ARRAY_FIELDS) <= set(values)
+
+
 _FORECAST_FIELDS = {
     "contract",
     "schema_version",
@@ -2413,22 +2512,14 @@ def write_holdout_preparation(
         _write_json(output / relative, compact)
     for fit_id in seal.final_fit_ids:
         payload = _as_json(final_fits[fit_id])
+        partition_fields = _final_fit_partition_fields(payload)
         compact, _part_paths = _write_partitioned_child(
             output,
             f"fits/{fit_id}.json",
             payload,
             identity_field="fit_id",
             row_field="fit_arrays",
-            array_fields=(
-                "training_target_ids",
-                "purged_target_ids",
-                "inner_fit_target_ids",
-                "inner_validation_target_ids",
-                "alpha_candidate_scores",
-                "sample_weights",
-                "coefficients",
-                "diagnostics",
-            ),
+            array_fields=partition_fields,
             mapping_fields=("diagnostics",),
         )
         _write_json(output / f"fits/{fit_id}.json", compact)
