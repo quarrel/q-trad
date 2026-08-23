@@ -118,8 +118,9 @@ experiment must compare native-only and augmented controls and preserve an untou
 The reviewed 23-market `capture-v4` is live. The native quote-size, session, gap, revision and
 aligned-bar audit, bounded historical-data decision and successful independent restore verification
 are retained in `docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain
-quarantined pending eligible exact evidence. R0 and R1 are complete; R2 is active, with the independent
-IBKR data-acquisition track proceeding in parallel under its normative plan.
+quarantined pending eligible exact evidence. R0 and R1 are complete; `R2-IBKR-HISTORICAL` is now
+complete with a source-specific terminal result, while R3 is the next milestone and native-source
+experiments remain provenance-distinct under their own gates.
 
 ### R1 — causal multi-asset research foundation
 
@@ -130,16 +131,15 @@ load the model that created the data.
 
 ### R2 — local and pooled baselines
 
-Produce chronological per-asset Ridge forecasts and pooled local-feature and non-graph cross-asset
-controls. Begin with ablatable price-return, volatility, time/session, spread and validated
-quote-imbalance feature families. Fit all transformations inside each training fold.
+Produce chronological per-asset Ridge forecasts and pooled local-feature and non-graph cross-asset controls. Begin with ablatable price-return, volatility, time/session, spread and validated quote-imbalance feature families. Fit all transformations inside each training fold.
 
-Pass evidence includes predictive loss, linear/rank relationship, direction where meaningful,
-forecast-bucket monotonicity, coverage and stability by asset, horizon and period. Ridge remains a
-retained baseline even when a stronger model is tested. Source-specific experiments retain distinct
-foundations, availability assumptions, report identities and conclusion boundaries.
+Pass evidence includes predictive loss, linear/rank relationship, direction where meaningful, forecast-bucket monotonicity, coverage and stability by asset, horizon and period. Ridge remains a retained baseline even when a stronger model is tested. Source-specific experiments retain distinct foundations, availability assumptions, report identities and conclusion boundaries.
 
-### R3 — cost and portfolio baseline
+The source-specific `R2-IBKR-HISTORICAL` experiment is complete with `VALID_CONSUMED_RESULT`. Its exact scope is `IBKR_HISTORICAL_RESEARCH`, historical MIDPOINT OHLC, declared provider-history delay, primary 15-minute horizon and six fixed targets in three fixed groups. `LOCAL_RIDGE` versus `ZERO_RETURN` was **NEGATIVE**; `POOLED_LOCAL_RIDGE` versus `LOCAL_RIDGE` was **POSITIVE**; pooled beyond zero is **INCONCLUSIVE** because no pooled-versus-zero question was frozen; and pooled cross-asset was rejected at OOF. Both locked questions had coverage `0.9749187203016487` and support `202,709`.
+
+This result does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness. The separate fixture-only micro-run remains implementation evidence and is not this confirmatory result. Native-source experiments retain distinct foundations, availability assumptions, report identities and conclusion boundaries.
+
+### R3 — cost and portfolio baseline (NEXT; NOT STARTED)
 
 Add versioned cost assumptions, shrinkage covariance, explicit group/currency mappings,
 horizon-specific virtual positions, horizon-specific optimisation and global netting/constraint

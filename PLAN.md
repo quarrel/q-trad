@@ -1,8 +1,8 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B5 full-universe qualification and the paper-account Gateway restart lifecycle are complete
+**Current milestone:** R3 — cost and portfolio baseline (NOT STARTED; R2 is complete for the source-specific terminal result below)
+**Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and do not inherit that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
@@ -37,27 +37,14 @@ orders or production broker connectivity.
   gap/source-activity audit evidence, frozen multi-horizon targets, chronological folds,
   model-independent OOF forecasts and a thin bundle over independently manifested children. A real
   23-market native bundle remains evidence work; the zero-return probe and short native history
-  make no effectiveness claim. R1 implementation is complete; producing the first real 23-market
-  bundle remains a fail-closed R2 entry prerequisite once the configured evidence interval and
-  product-role qualification support it.
-- R2.A through R2.E are software-complete implementation evidence. The R2.F1 core and its source/evidence-bound
-  replay machinery are implemented, including create-only forecast, OOF, selection and software-verification
-  contracts plus CLI operations and mutation-tested independent authentication. The source-specific IBKR
-  representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
-  replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
-  and the real locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
-  (selection-v4 compact authority with source/projection/opportunity binding IDs, ordered opportunity digest and count,
-  outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
-  implemented and tested with implementation-only fixtures. The fixture-confirmatory C2a F2/G1 authority
-  path and both C2b phases are implemented: verified G1 exclusively authorises unopened G2 preparation,
-  create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
-  and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
-  A tracked, bounded 20-week sparse confirmatory fixture now exercises the exact production CLI and
-  persistence path through Stage 8, four feature verification receipts, OOF build and independent
-  receipt, F2 promotion, compact G1 selection and independently verified unopened G2 preparation.
-  This is implementation-only evidence: no holdout outcome was opened or consumed, and no real
-  research conclusion or effectiveness evidence exists.
-- Before the first real confirmatory R2 run, the active evidence-handoff simplification programme has converged the Stage 6 through R2 boundaries on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
+  make no effectiveness claim. R1 implementation is complete; the native bundle remains a separate
+  fail-closed prerequisite for native-source experiments once its configured evidence interval and
+  product-role qualification support it. The historical R2 result does not alter that boundary.
+- R2.A through R2.E are software-complete implementation evidence. The R2.F1 core and its source/evidence-bound replay machinery are implemented, including create-only forecast, OOF, selection and software-verification contracts plus CLI operations and mutation-tested independent authentication.
+- A separate bounded 20-week sparse fixture exercises the exact production CLI and persistence path through Stage 8, feature receipts, OOF, F2 promotion, G1 selection and unopened G2 preparation. It remains implementation-only evidence and is not the source-specific result below.
+- The terminal `R2-IBKR-HISTORICAL` run is `VALID_CONSUMED_RESULT`. Scope is `IBKR_HISTORICAL_RESEARCH`, historical MIDPOINT OHLC, declared provider-history delay, primary 15-minute horizon, six fixed targets and three fixed groups. Locked `LOCAL_RIDGE` versus `ZERO_RETURN` was **NEGATIVE**; `POOLED_LOCAL_RIDGE` versus `LOCAL_RIDGE` was **POSITIVE**; pooled beyond zero is **INCONCLUSIVE** because no pooled-versus-zero question was frozen; and pooled cross-asset was rejected at OOF. Both locked questions had coverage `0.9749187203016487` and support `202,709`.
+- This result is source-specific. It does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness.
+- The evidence-handoff simplification programme converged the Stage 6 through R2 boundaries before the terminal run on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
 - PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
@@ -67,8 +54,8 @@ orders or production broker connectivity.
   adapter, callback normalization, immutable canary evidence and file-only canary/profile operations.
   Account-gated capability review, host deployment and the bounded Stage 5 canary are now complete:
   all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases passed with the frozen 300-second profile.
-- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward, and no replacement Stage 8 promotion exists yet.
-- Current Stage 7 and Stage 8 construction, verification, authentication and promotion are v3-only. They bind immediate-parent semantic, closure and verification identities, consume only selected children, and do not reopen superseded ancestry. No real holdout result or effectiveness claim exists, and IBKR evidence cannot substantiate an IG-native conclusion.
+- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced the reviewed scientific invalidation record (`3610c94...`); the replacement Stage 8 promotion is authenticated as `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` and bound to the terminal historical result.
+- Current Stage 7 and Stage 8 construction, verification, authentication and promotion are v3-only. The completed historical result remains provenance-distinct and cannot substantiate native IG execution conclusions.
 
 ## Milestones
 
@@ -76,7 +63,7 @@ orders or production broker connectivity.
 | ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | R0 — alignment, coverage and data readiness | COMPLETE    | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
 | R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
-| R2 — local and pooled baselines             | IN PROGRESS | R2.A–R2.E software, the R2.F1 core and source-specific IBKR representative/R2.H verification paths are implemented; qualifying representative execution, confirmatory OOF and locked-holdout evidence remain pending |
+| R2 — local and pooled baselines             | COMPLETE    | `R2-IBKR-HISTORICAL` reached `VALID_CONSUMED_RESULT`; locked local-vs-zero was NEGATIVE, pooled-vs-local POSITIVE, pooled-vs-zero INCONCLUSIVE (not frozen), and pooled cross-asset was rejected at OOF; coverage `0.9749187203016487`, support `202,709` |
 | R3 — cost and portfolio baseline            | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically                                                                                                                            |
 | R4 — residual structural graph experiment   | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value                                                                                                                                               |
 | R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
@@ -128,16 +115,8 @@ chronology ambiguity before those contracts are fixed.
 ## R2 — local and pooled baselines
 
 - R2 implementation plan `docs/R2_IMPLEMENTATION_PLAN.md`.
-- R2.A through R2.E are software-complete; R2.F1 now has source-bound, independently replayable
-  OOF/selection/software bundle contracts and CLI operations, but still requires a fresh representative
-  capture-v4 integration to exercise them. R2.C supplies authenticated,
-  final fold fits, chronological forecasts, explicit expected-opportunity coverage, independent
-  coefficient replay and coefficient stability summaries. R2.E adds pooled local-feature and fixed
-  cross-asset controls with explicit instrument identity, manifested equal-instrument weights and exact
-  own/common-support ablations. R2.F1 adds independently authenticated evaluated-model children,
-  pairwise own/common-support metrics, fold-local training-derived forecast buckets and ordering,
-  stability/concentration evidence, deterministic selection gates, complete configuration dispositions
-  and immutable evaluation/selection evidence with a separately authenticated local-comparator child.
+- R2.A through R2.E are software-complete; R2.F1 provides source-bound, independently replayable OOF, selection and software-bundle contracts and CLI operations. The terminal historical execution completed the confirmatory OOF, selection and locked-holdout lifecycle with independent R2.H verification.
+- R2.C supplies authenticated final fold fits, chronological forecasts, explicit expected-opportunity coverage, independent coefficient replay and coefficient stability summaries. R2.E supplies pooled local-feature and fixed non-graph cross-asset controls with exact own/common-support ablations. R2.F1 retains evaluated-model children, pairwise metrics, stability/concentration evidence, deterministic gates and complete dispositions.
 - Keep `R2-IG-NATIVE`, `R2-IBKR-HISTORICAL` and any later `R2-IBKR-NATIVE` experiment source-specific.
   Each consumes one independently verified foundation and makes conclusions only for its evidence
   class. No source-specific experiment silently replaces another.
@@ -147,24 +126,19 @@ chronology ambiguity before those contracts are fixed.
   features. Do not call top-of-book size changes cumulative volume delta.
 - Compare loss, correlation/rank correlation, direction, forecast buckets, coverage and stability by
   asset, horizon and period.
-- Keep confirmatory OOF, selection freeze and holdout execution fail-closed until the exact source's
-  history, contract/product roles, availability policy and fold durations pass the unchanged gates.
+- `R2-IBKR-HISTORICAL` passed the unchanged confirmatory OOF, selection and locked-holdout gates. Any future `R2-IG-NATIVE` or `R2-IBKR-NATIVE` run remains source-specific and fail-closed until its own foundation, availability policy and fold durations pass the same gates.
 
 ## Parallel IBKR market-data track
 
 - Normative historical-acquisition plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`; durable boundaries:
   `docs/adr/0028-independent-ibkr-market-data-source.md` and
   `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`.
-- The software path through Stage 8 is implemented on `main`: immutable planning, execution and
-  result closure; provider-history observations with declared availability; and the source-specific
-  foundation/readiness verifier. The R2-IBKR-HISTORICAL file-only experiment, profile-bound OOF and
-  implementation-only R2.H envelope paths are implemented separately and remain dependent on
-  independently verified lower-stage evidence.
+- The software path through Stage 8 is implemented on `main`: immutable planning, execution and result closure; provider-history observations with declared availability; and the source-specific foundation/readiness verifier. The `R2-IBKR-HISTORICAL` profile-bound OOF and terminal R2.H paths now have independently verified lower-stage evidence and a completed consumed result.
 - The account-gated exact-contract capability review, matched read-only host deployment and Stage 5
   canary are complete. The canary passed all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases,
   and the 300-second request profile is frozen.
-- The full Stage 6 closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 invalidation record `3610c94...` documents the scientific divergence and superseded promotion; no qualifying authority is carried forward.
-- Current Stage 7/8 runtime is v3-only: construction and deep verification use explicit immediate-parent receipts, ordinary authentication is cheap and selected-child bounded, and promotion is authority-only without semantic replay. The R2-IBKR-HISTORICAL experiment remains source-specific and depends on independently verified lower-stage evidence; no real holdout result or effectiveness claim exists.
+- The full Stage 6 closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 invalidation record `3610c94...` documents the scientific divergence and superseded promotion; replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the terminal result.
+- Current Stage 7/8 runtime is v3-only: construction and deep verification use explicit immediate-parent receipts, ordinary authentication is cheap and selected-child bounded, and promotion is authority-only without semantic replay. The historical result is complete but cannot be generalised to native IG or native IBKR predictability.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Exact-main controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
 - The qualifying backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`. Continuous capture initially resumed 20/20 on application commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but stopped receiving at the 2026-08-10 22:30 UTC Gateway auto-restart and later failed closed. Preserve that gap. PR #116 restored socket-death detection and canonical Gateway ownership; its 2026-08-12 rollout exposed a second explicit gap when concurrent restore work saturated persistence. PR #117 then completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily Gateway restarts on 2026-08-12 and 2026-08-13 each replaced the collector process and reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops. This is the applicable lifecycle gate for the current paper account, which has no distinct weekly 2FA expiry.
 - Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,
