@@ -600,8 +600,6 @@ def test_final_fit_membership_rejects_duplicate_required_feature() -> None:
         _final_training_rows(_feature_dataset_with_rows((*base.rows, duplicate)))
 
 
-
-
 def _training_feature_authority(
     *, include_noneligible: bool = False
 ) -> dict[str, R2FeatureDataset]:
