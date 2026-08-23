@@ -228,7 +228,7 @@ def _nested_field_value(payload: Mapping[str, object], field: str) -> object:
     for component in field.split("."):
         if not isinstance(value, Mapping) or component not in value:
             raise ValueError(f"partitioned holdout field is missing: {field}")
-        value = value[component]
+        value = cast(Mapping[str, object], value)[component]
     return value
 
 

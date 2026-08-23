@@ -2181,8 +2181,9 @@ def test_final_fit_partition_externalizes_nested_preprocessing_at_child_bound(
     assert len(canonical_bytes(compact)) < 100_000
     compact_preprocessing = compact["preprocessing"]
     assert isinstance(compact_preprocessing, Mapping)
-    compact_inner = compact_preprocessing["inner"]
-    compact_outer = compact_preprocessing["outer"]
+    compact_mapping = cast(Mapping[str, object], compact_preprocessing)
+    compact_inner = compact_mapping["inner"]
+    compact_outer = compact_mapping["outer"]
     assert isinstance(compact_inner, Mapping)
     assert isinstance(compact_outer, Mapping)
     assert "training_target_ids" not in compact_inner
