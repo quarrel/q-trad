@@ -163,20 +163,37 @@ def _partitioned_payload(
             field: {} for field in mapping_fields
         }
         nullable_fields: set[str] = set()
+        mapping_row_seen: set[str] = set()
+        field_positions = {field: index for index, field in enumerate(fields)}
+        last_field_index = -1
+        last_mapping_keys: dict[str, str] = {}
         for row in rows:
             field = row.get("field")
             if not isinstance(field, str) or field not in fields:
                 raise ValueError("partitioned holdout field row names an unknown field")
+            field_index = field_positions[field]
+            if field_index < last_field_index:
+                raise ValueError("partitioned holdout rows are not in canonical field order")
+            last_field_index = field_index
             if field in grouped_mappings:
                 if set(row) == {"field", "value"} and row["value"] is None:
-                    if grouped_mappings[field] != {}:
+                    if field in mapping_row_seen or grouped_mappings[field] != {}:
                         raise ValueError("partitioned holdout mapping row is invalid")
                     grouped_mappings[field] = None
+                    mapping_row_seen.add(field)
                 elif set(row) == {"field", "key", "value"} and isinstance(row["key"], str):
                     mapping = grouped_mappings[field]
                     if mapping is None:
                         raise ValueError("partitioned R2 mapping row is invalid")
-                    mapping[row["key"]] = row["value"]
+                    key = row["key"]
+                    previous_key = last_mapping_keys.get(field)
+                    if key in mapping:
+                        raise ValueError("partitioned R2 mapping row contains a duplicate key")
+                    if previous_key is not None and key <= previous_key:
+                        raise ValueError("partitioned R2 mapping rows are not in canonical order")
+                    mapping[key] = row["value"]
+                    last_mapping_keys[field] = key
+                    mapping_row_seen.add(field)
                 else:
                     raise ValueError("partitioned holdout mapping row is invalid")
             else:
@@ -329,9 +346,13 @@ def _write_partitioned_child(
                     if mapping is None:
                         yield {"field": field, "value": None}
                     elif isinstance(mapping, Mapping):
+                        if any(not isinstance(key, str) for key in mapping):
+                            raise TypeError(
+                                f"partitioned mapping field keys must be strings: {field}"
+                            )
                         yield from (
                             {"field": field, "key": key, "value": value}
-                            for key, value in mapping.items()
+                            for key, value in ((key, mapping[key]) for key in sorted(mapping))
                         )
                     else:
                         raise TypeError(f"partitioned mapping field is not an object: {field}")
@@ -1411,11 +1432,8 @@ def _final_fit_partition_fields(payload: Mapping[str, object]) -> tuple[str, ...
 
 def _final_fit_partition_fields_are_valid(fields: Sequence[str]) -> bool:
     values = tuple(fields)
-    return (
-        len(values) == len(set(values))
-        and set(_FINAL_FIT_REQUIRED_PARTITION_ARRAY_FIELDS) <= set(values)
-        and set(values) <= set(_FINAL_FIT_PARTITION_ARRAY_FIELDS)
-    )
+    canonical = tuple(field for field in _FINAL_FIT_PARTITION_ARRAY_FIELDS if field in values)
+    return values == canonical and set(_FINAL_FIT_REQUIRED_PARTITION_ARRAY_FIELDS) <= set(values)
 
 
 _FORECAST_FIELDS = {
