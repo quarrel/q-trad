@@ -18,6 +18,8 @@ import qtrad.domain.r2_holdout as holdout_domain
 import qtrad.runtime.r2_holdout as holdout_runtime
 import qtrad.runtime.r2_partitioned_rows as partitioned_rows_runtime
 from qtrad.application.r2_holdout import (
+    FinalTrainingRow,
+    _authenticated_final_training_rows,
     build_holdout_coverage,
     build_holdout_forecasts,
     evaluate_holdout,
@@ -527,6 +529,75 @@ def _training_feature_dataset(*, include_noneligible: bool = False) -> R2Feature
         evidence_class=EvidenceClass.IMPLEMENTATION,
         market_data_source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
     )
+
+
+def _feature_dataset_with_rows(rows: tuple[RawFeatureRow, ...]) -> R2FeatureDataset:
+    base = _training_feature_dataset()
+    return R2FeatureDataset.create(
+        rows,
+        feature_schema=base.feature_schema,
+        feature_set_name=base.feature_set_name,
+        feature_set_id=base.feature_set_id,
+        observation_dataset_id=base.observation_dataset_id,
+        panel_dataset_id=base.panel_dataset_id,
+        target_dataset_id=base.target_dataset_id,
+        fold_dataset_id=base.fold_dataset_id,
+        experiment_configuration_id=base.experiment_configuration_id,
+        evidence_class=base.evidence_class,
+        market_data_source_class=base.market_data_source_class,
+    )
+
+
+def _final_training_rows(features: R2FeatureDataset) -> tuple[FinalTrainingRow, ...]:
+    selection, _question, _configurations = _selection()
+    target_source = _target_source()
+    return _authenticated_final_training_rows(
+        selection,
+        feature_dataset=features,
+        target_dataset=target_source.pre_holdout_target_dataset,
+    )
+
+
+def _feature_row_at(base: RawFeatureRow, decision_time: datetime) -> RawFeatureRow:
+    return RawFeatureRow(
+        target_instrument_id=base.target_instrument_id,
+        decision_time=decision_time,
+        feature_data_asof=decision_time - timedelta(minutes=1),
+        latest_feature_bar_end=decision_time - timedelta(minutes=1),
+        feature_set_id=base.feature_set_id,
+        values=base.values,
+    )
+
+
+def test_final_fit_membership_accepts_full_feature_superset() -> None:
+    base = _training_feature_dataset()
+    extras = (
+        _feature_row_at(base.rows[0], NOW + timedelta(hours=12)),
+        _feature_row_at(base.rows[0], NOW + timedelta(days=1)),
+    )
+    rows = _final_training_rows(_feature_dataset_with_rows((*base.rows, *extras)))
+    assert len(rows) == len(_target_source().pre_holdout_target_dataset.rows)
+    assert {row.target_id for row in rows} == {
+        row.target_id for row in _target_source().pre_holdout_target_dataset.rows
+    }
+
+
+def test_final_fit_membership_requires_each_valid_target_feature() -> None:
+    base = _training_feature_dataset()
+    with pytest.raises(ValueError, match="missing a required target"):
+        _final_training_rows(_feature_dataset_with_rows(base.rows[1:]))
+
+
+def test_final_fit_membership_rejects_duplicate_required_feature() -> None:
+    base = _training_feature_dataset()
+    first = base.rows[0]
+    duplicate = replace(
+        first,
+        feature_data_asof=first.feature_data_asof + timedelta(microseconds=1),
+        latest_feature_bar_end=first.latest_feature_bar_end + timedelta(microseconds=1),
+    )
+    with pytest.raises(ValueError, match="repeats a required target"):
+        _final_training_rows(_feature_dataset_with_rows((*base.rows, duplicate)))
 
 
 def _training_feature_authority(

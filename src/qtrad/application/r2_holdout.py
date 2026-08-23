@@ -431,23 +431,46 @@ def _authenticated_final_training_rows(
     ):
         raise ValueError("final-fit target evidence differs from the frozen foundation")
 
-    targets: dict[tuple[str, datetime, int], TargetRow] = {}
+    # The frozen pre-holdout target projection defines required membership; authenticated
+    # feature evidence may legitimately include rows outside that projection.
+    targets: dict[tuple[str, datetime], TargetRow] = {}
+    holdout_start = selection.holdout_range[0]
     for row in target_dataset.rows:
-        key = (row.instrument_id, row.decision_time, int(row.horizon.total_seconds()))
+        horizon_seconds = int(row.horizon.total_seconds())
+        if horizon_seconds != primary_horizon:
+            raise ValueError("final-fit target evidence includes a non-primary horizon")
+        if row.decision_time >= holdout_start:
+            raise ValueError("final-fit target evidence includes a holdout decision")
+        if row.target_end_time > holdout_start:
+            raise ValueError("final-fit target evidence includes an immature target interval")
+        if row.target_available_at > holdout_start:
+            raise ValueError("final-fit target evidence includes an immature target")
+        key = (row.instrument_id, row.decision_time)
         if key in targets:
             raise ValueError("final-fit target evidence repeats an instrument/time/horizon")
         targets[key] = row
-    rows: list[FinalTrainingRow] = []
-    seen_target_ids: set[str] = set()
+
+    feature_rows: dict[tuple[str, datetime], RawFeatureRow] = {}
     for raw_row in feature_dataset.rows:
-        target = targets.get((raw_row.target_instrument_id, raw_row.decision_time, primary_horizon))
-        if target is None:
-            raise ValueError("final-fit feature evidence has no authenticated target row")
+        key = (raw_row.target_instrument_id, raw_row.decision_time)
+        target = targets.get(key)
+        if (
+            target is None
+            or target.return_disposition.value != "VALID"
+            or target.log_return is None
+        ):
+            continue
+        if key in feature_rows:
+            raise ValueError("final-fit feature evidence repeats a required target")
+        feature_rows[key] = raw_row
+
+    rows: list[FinalTrainingRow] = []
+    for key, target in targets.items():
         if target.return_disposition.value != "VALID" or target.log_return is None:
             continue
-        if target.target_id in seen_target_ids:
-            raise ValueError("final-fit feature evidence repeats a target")
-        seen_target_ids.add(target.target_id)
+        raw_row = feature_rows.get(key)
+        if raw_row is None:
+            raise ValueError("final-fit feature evidence is missing a required target row")
         rows.append(
             FinalTrainingRow(
                 target_id=target.target_id,
