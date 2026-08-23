@@ -145,7 +145,7 @@ This source-specific result does not establish native IG predictability, live IB
 - The fixed `ibkr-historical-v1` confirmatory profile records the authorised 90% (`0.9`) minimum pairwise common-support acceptance threshold; this is separate from per-target valid coverage and is satisfied by the terminal historical questions above. The fixture path remains implementation-only and carries no effectiveness claim.
 - The disposable R2.G2 holdout machinery is implemented with versioned selection, outcome-blind feature
   preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
-  irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
+  irreversible consumption. Its focused evidence is implementation-only fixture evidence. For this fixture, no real
   holdout, confirmatory OOF selection, or effectiveness conclusion exists.
 - The fixture-confirmatory C2a path independently replays qualifying F2 and persisted G1 authority. C2b
   derives the complete unopened feature/fit/forecast closure exclusively from verified G1, persists it as
