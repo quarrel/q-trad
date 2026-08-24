@@ -906,6 +906,8 @@ def select_synchronised_rows(
         group_rows = groups[decision_time]
         row_targets = [row.target_id for row in group_rows]
         if len(group_rows) != len(target_ids) or set(row_targets) != set(target_ids):
+            if bool(policy["reject_incomplete"]):
+                raise FreezeError(f"incomplete canonical decision group: {decision_time}")
             continue
         selected_times.append(decision_time)
         if len(selected_times) == int(policy["n_complete_decision_groups"]):
@@ -1029,7 +1031,7 @@ def _json_depth(value: Any) -> int:
 
 def _open_json_document(
     path: Path, limits: Mapping[str, Any]
-) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int]:
+) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
     """Validate a wrapper immediately, then decode one declared part per iteration."""
     if not path.is_file():
         raise FreezeError(f"retained child path does not exist: {path}")
@@ -1163,7 +1165,7 @@ def _open_json_document(
             }
             yield part_info, [cast(Mapping[str, Any], row) for row in part_rows], part_size
 
-    return metadata, iter_parts(), size
+    return metadata, iter_parts(), size, wrapper_hash
 
 
 def _validate_part_rows(rows: Sequence[Any], limits: Mapping[str, Any]) -> None:
@@ -1186,7 +1188,7 @@ def _read_json_document(
     path: Path, limits: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]], int]:
     """Compatibility collector; retained loading uses the streaming iterator directly."""
-    metadata, parts, size = _open_json_document(path, limits)
+    metadata, parts, size, _wrapper_hash = _open_json_document(path, limits)
     records: list[Mapping[str, Any]] = []
     consumed_parts: list[dict[str, Any]] = []
     rows = 0
@@ -1292,7 +1294,12 @@ def load_retained_rows(
     )
     opened: dict[
         str,
-        tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int],
+        tuple[
+            dict[str, Any],
+            Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]],
+            int,
+            str,
+        ],
     ] = {}
     for name in child_names:
         declaration = cast(Mapping[str, Any], wrappers[name])
@@ -1318,8 +1325,8 @@ def load_retained_rows(
         )
         opened[name] = _open_json_document(Path(actual_locators[name]), child_limits)
         _validate_child_metadata(name, opened[name][0], loader, fixture=_fixture)
-    _selection_metadata, selection_parts, _selection_size = opened["selection"]
-    _consumed_metadata, consumed_parts, _consumed_size = opened["consumed"]
+    _selection_metadata, selection_parts, _selection_size, _selection_hash = opened["selection"]
+    _consumed_metadata, consumed_parts, _consumed_size, _consumed_hash = opened["consumed"]
     consumed_part_receipts: dict[str, list[dict[str, Any]]] = {name: [] for name in child_names}
     selection_records: list[Mapping[str, Any]] = []
     consumed_records: list[Mapping[str, Any]] = []
@@ -1330,12 +1337,10 @@ def load_retained_rows(
         consumed_part_receipts["selection"].append(descriptor)
         selection_records.extend(part_rows)
         source_rows += len(part_rows)
-        source_parts += 1
     for descriptor, part_rows, _ in consumed_parts:
         consumed_part_receipts["consumed"].append(descriptor)
         consumed_records.extend(part_rows)
         source_rows += len(part_rows)
-        source_parts += 1
     if source_rows > int(streaming["max_source_rows"]) or source_bytes > int(
         streaming["max_source_bytes"]
     ):
@@ -1359,10 +1364,9 @@ def load_retained_rows(
         raise FreezeError("consumed marker identity mismatch")
     if consumed.get("selection_manifest_id") != selection.get("manifest_id"):
         raise FreezeError("consumed selection identity mismatch")
+    policy = cast(Mapping[str, Any], loader["selection_policy"])
     max_rows = int(decoder_limits["max_selected_rows"])
-    target_ids = cast(
-        Sequence[str], cast(Mapping[str, Any], loader["selection_policy"])["required_target_ids"]
-    )
+    target_ids = cast(Sequence[str], policy["required_target_ids"])
     max_groups = max(1, max_rows // max(1, len(target_ids)))
     groups: dict[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]] = {}
     seen_by_child: dict[str, set[tuple[Any, ...]]] = {name: set() for name in child_names[2:]}
@@ -1383,8 +1387,6 @@ def load_retained_rows(
                 config.document["compute_limits"]["max_memory_mb"]
             ):
                 raise FreezeError("retained aggregate memory bound exceeded")
-            if name in {"selection", "consumed"}:
-                continue
             for record in part_rows:
                 key = _canonical_join_key(record, mappings)
                 if key in seen_by_child[name]:
@@ -1405,21 +1407,28 @@ def load_retained_rows(
                 children[name] = record
     complete: list[tuple[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]]] = []
     for decision_time, group in sorted(groups.items()):
-        if len(group) != len(target_ids):
-            continue
-        if any(set(children) != set(child_names[2:]) for children in group.values()):
+        if len(group) != len(target_ids) or any(
+            set(children) != set(child_names[2:]) for children in group.values()
+        ):
+            if bool(policy["reject_incomplete"]):
+                raise FreezeError(f"incomplete canonical retained decision group: {decision_time}")
             continue
         complete.append((decision_time, group))
-    policy = cast(Mapping[str, Any], loader["selection_policy"])
     required_groups = int(policy["n_complete_decision_groups"])
     if len(complete) < required_groups:
         raise FreezeError("bounded join selector could not prove required complete groups")
     rows: list[FixtureRow] = []
+    role_names = ("local_forecast", "pooled_forecast", "zero_forecast")
+    role_predictions: dict[str, list[float]] = {name: [] for name in role_names}
     for _, group in complete[:required_groups]:
         for key in sorted(group):
             children = group[key]
             local = children["local_forecast"]
             outcome = children["outcome_evidence"]
+            for role_name in role_names:
+                role_predictions[role_name].append(
+                    float(children[role_name][mappings["prediction"]])
+                )
             rows.append(
                 FixtureRow(
                     **{field: local[mappings[field]] for field in required}
@@ -1431,12 +1440,40 @@ def load_retained_rows(
             )
     selected, selection_meta = select_synchronised_rows(rows, config)
     selection_meta["stop_state"] = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
-    all_parts = [part for parts in consumed_part_receipts.values() for part in parts]
+    data_names = tuple(child_names[2:])
+    all_parts = [part for name in data_names for part in consumed_part_receipts[name]]
     scanned_hashes = [str(part["sha256"]) for part in all_parts]
     wrapper_bytes = {name: opened[name][2] for name in child_names}
+    wrapper_hashes = {name: opened[name][3] for name in child_names}
     part_bytes = {
         name: sum(int(part.get("bytes", 0)) for part in consumed_part_receipts[name])
-        for name in child_names
+        for name in data_names
+    }
+    part_hashes = {
+        name: [str(part["sha256"]) for part in consumed_part_receipts[name]] for name in data_names
+    }
+    selected_row_bytes = sum(
+        len(
+            json.dumps(
+                {name: getattr(row, name) for name in FixtureRow.__dataclass_fields__},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        for row in selected
+    )
+    role_wrapper_sha = {
+        "LOCAL_RIDGE": cast(Mapping[str, Any], wrappers["local_forecast"])["sha256"],
+        "POOLED_LOCAL_RIDGE": cast(Mapping[str, Any], wrappers["pooled_forecast"])["sha256"],
+        "ZERO_RETURN": cast(Mapping[str, Any], wrappers["zero_forecast"])["sha256"],
+    }
+    role_bindings = {
+        role: {
+            "dataset_id": cast(Mapping[str, Any], loader["identity_bindings"])["dataset_ids"][role],
+            "config_id": cast(Mapping[str, Any], loader["identity_bindings"])["config_ids"][role],
+            "wrapper_sha256": role_wrapper_sha[role],
+        }
+        for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
     }
     return selected, {
         "authority": authority,
@@ -1445,16 +1482,20 @@ def load_retained_rows(
         "source_scan_bytes": source_bytes,
         "source_scan_parts": source_parts,
         "source_scan_wrapper_bytes": wrapper_bytes,
+        "source_scan_wrapper_hashes": wrapper_hashes,
         "source_scan_part_bytes": part_bytes,
+        "source_scan_part_hashes": part_hashes,
         "consumed_parts": consumed_part_receipts,
-        "selected_rows": len(selected),
-        "selected_parts": len(all_parts),
-        "selected_bytes": source_bytes,
-        "selected_part_hashes": scanned_hashes,
-        "scanned_part_hashes": scanned_hashes,
         "consumed_rows": source_rows,
         "consumed_bytes": source_bytes,
         "consumed_parts_count": source_parts,
+        "selected_rows": len(selected),
+        "selected_bytes": selected_row_bytes,
+        "selected_groups": required_groups,
+        "selected_raw_part_provenance": "not individually attributable after bounded join",
+        "role_bindings": role_bindings,
+        "_role_predictions": role_predictions,
+        "scanned_part_hashes": scanned_hashes,
         "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
         "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
         "outcome_decode_performed": not _fixture,
@@ -2246,6 +2287,42 @@ def analyse_fixture(
     )
     huber_predictions = _apply_causal_linear(ordered, training_indices, huber_coefficients)
     huber_fit_executions = 1 if training_indices else 0
+    if retained_metadata is not None and "_role_predictions" in retained_metadata:
+        role_predictions = cast(Mapping[str, Any], retained_metadata["_role_predictions"])
+        loader = cast(Mapping[str, Any], config.document["retained_loader"])
+        wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
+        identity_bindings = cast(Mapping[str, Any], loader["identity_bindings"])
+        expected_role_bindings = {
+            "LOCAL_RIDGE": {
+                "dataset_id": identity_bindings["dataset_ids"]["LOCAL_RIDGE"],
+                "config_id": identity_bindings["config_ids"]["LOCAL_RIDGE"],
+                "wrapper_sha256": wrappers["local_forecast"]["sha256"],
+            },
+            "POOLED_LOCAL_RIDGE": {
+                "dataset_id": identity_bindings["dataset_ids"]["POOLED_LOCAL_RIDGE"],
+                "config_id": identity_bindings["config_ids"]["POOLED_LOCAL_RIDGE"],
+                "wrapper_sha256": wrappers["pooled_forecast"]["sha256"],
+            },
+            "ZERO_RETURN": {
+                "dataset_id": identity_bindings["dataset_ids"]["ZERO_RETURN"],
+                "config_id": identity_bindings["config_ids"]["ZERO_RETURN"],
+                "wrapper_sha256": wrappers["zero_forecast"]["sha256"],
+            },
+        }
+        actual_role_bindings = cast(Mapping[str, Any], retained_metadata.get("role_bindings", {}))
+        if dict(actual_role_bindings) != expected_role_bindings:
+            raise FreezeError("retained forecast role bindings are swapped or incomplete")
+        try:
+            local_role = [float(value) for value in role_predictions["local_forecast"]]
+            pooled_role = [float(value) for value in role_predictions["pooled_forecast"]]
+            zero_role = [float(value) for value in role_predictions["zero_forecast"]]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FreezeError("retained role prediction records are incomplete") from exc
+        if not all(len(values) == row_count for values in (local_role, pooled_role, zero_role)):
+            raise FreezeError("retained role prediction records do not match selected rows")
+        local_predictions = local_role
+        pooled_predictions = pooled_role
+        zero_predictions = zero_role
 
     candidate_predictions: dict[str, list[float]] = {}
     candidate_masks: dict[str, list[bool]] = {}
@@ -2362,6 +2439,16 @@ def analyse_fixture(
             ) = pooled_predictions, evaluation_mask, pooled_fit_executions
         else:
             raise FreezeError(f"unsupported control declaration: {kind}")
+    role_bindings: Mapping[str, Any] = (
+        retained_metadata["role_bindings"]
+        if retained_metadata is not None and "role_bindings" in retained_metadata
+        else {}
+    )
+    control_role_by_kind = {
+        "constant_zero": "ZERO_RETURN",
+        "local_ridge": "LOCAL_RIDGE",
+        "pooled_ridge": "POOLED_LOCAL_RIDGE",
+    }
     control_metrics: dict[str, dict[str, Any]] = {
         control_id: {
             **_metrics(
@@ -2377,7 +2464,12 @@ def analyse_fixture(
             "fit_evaluation_time": (
                 first_evaluation_time if control_fit_executions[control_id] else None
             ),
-            "execution_receipt": dict(descriptor_by_id[control_id]),
+            "execution_receipt": {
+                **dict(descriptor_by_id[control_id]),
+                "role_binding": role_bindings.get(
+                    control_role_by_kind[str(descriptor_by_id[control_id]["kind"])]
+                ),
+            },
         }
         for control_id in control_ids
     }
@@ -2526,6 +2618,9 @@ def analyse_fixture(
         "retained_parents": {
             "paths": dict(retained_input_paths()),
             "identities": parent_identities,
+            "role_bindings": (
+                retained_metadata.get("role_bindings", {}) if retained_metadata else {}
+            ),
             "terminal_authentication": config.document["terminal_authentication"],
             "authentication_performed": bool(
                 retained_metadata

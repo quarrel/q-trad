@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -500,6 +501,24 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
     assert metadata["selection"]["stop_state"] == "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    assert metadata["selected_rows"] == 18
+    assert metadata["consumed_rows"] > metadata["selected_rows"]
+    assert metadata["selected_bytes"] < metadata["consumed_bytes"]
+    assert len(metadata["source_scan_wrapper_bytes"]) == 6
+
+
+def test_swapped_retained_role_records_fail_closed() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    swapped = deepcopy(metadata)
+    pooled = swapped["role_bindings"]["POOLED_LOCAL_RIDGE"]
+    zero = swapped["role_bindings"]["ZERO_RETURN"]
+    swapped["role_bindings"]["POOLED_LOCAL_RIDGE"] = zero
+    swapped["role_bindings"]["ZERO_RETURN"] = pooled
+    with pytest.raises(FreezeError, match="swapped"):
+        analyse_fixture(rows, config, retained_metadata=swapped)
 
 
 def test_create_only_writer_is_atomic_on_collision_and_failure(
@@ -587,12 +606,10 @@ def test_selector_skips_early_incomplete_group_but_requires_complete_count() -> 
         dependency_start="2025-12-31T22:55:00Z",
         dependency_end="2025-12-31T22:59:00Z",
     )
-    selected, metadata = select_synchronised_rows((*rows, early), config)
-    assert len(selected) == 18
-    assert metadata["complete_groups"] == 3
-    assert "2025-12-31T23:00:00Z" not in metadata["selected_decision_times"]
+    with pytest.raises(FreezeError, match="incomplete"):
+        select_synchronised_rows((*rows, early), config)
 
-    with pytest.raises(FreezeError, match="fewer than"):
+    with pytest.raises(FreezeError, match=r"incomplete|fewer than"):
         select_synchronised_rows(rows[:-1], config)
 
 
