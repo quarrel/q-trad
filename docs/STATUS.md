@@ -3,7 +3,7 @@
 **Updated:** 2026-08-24
 **Current milestone:** R3 — cost and portfolio baseline (NOT STARTED; R2-IBKR-HISTORICAL terminal result complete)
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
-**Completed decision-grade execution record:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`; no separate R3 execution authority exists yet
+**Completed decision-grade execution record:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`; active R3 execution authority: `docs/R3_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `R2-IBKR-HISTORICAL` is complete with `VALID_CONSUMED_RESULT`; R3 is next and not started. `capture-v4` is live with 23/23 channels ready, and paper research remains offline/replay.
 

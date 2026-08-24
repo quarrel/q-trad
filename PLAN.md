@@ -9,9 +9,9 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 orders or production broker connectivity.
 
 `docs/TRADING_RESEARCH.md` defines the stable research programme. The completed R2 decision-grade
-execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. No separate R3
-execution authority exists yet. This file selects the current work and records only the milestone
-sequence needed to reach the next trustworthy decision.
+execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. The active R3
+execution authority is `docs/R3_EXECUTION_PLAN.md`; this file selects the current work and records
+only the milestone sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
