@@ -987,14 +987,12 @@ def _canonical_position_predecessors(
 def _reconcile_economic_view(
     view: Mapping[str, Any],
     label: str,
-    cost_grid: Sequence[Any] | None = None,
-    canonical_predecessors: Mapping[tuple[str, str], Decimal] | None = None,
+    cost_grid: Sequence[Any] | None,
+    canonical_predecessors: Mapping[tuple[str, str], Decimal],
 ) -> None:
     trace = _strict_sequence(view["position_trace"], f"{label}.position_trace")
     if not trace:
         raise FreezeError(f"{label}.position_trace must not be empty")
-    if canonical_predecessors is None:
-        canonical_predecessors = _canonical_position_predecessors(trace, label)
     gross_total = Decimal("0")
     turnover = Decimal("0")
     entries = [
@@ -1406,15 +1404,25 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
                     canonical_predecessors,
                 )
         for name, child in view["configurations"].items():
+            configuration_label = f"{view_label}.configurations.{name}"
             configuration_predecessors = _canonical_position_predecessors(
-                child["position_trace"], f"{view_label}.configurations.{name}"
+                child["position_trace"], configuration_label
             )
             _reconcile_economic_view(
                 child,
-                f"{view_label}.configurations.{name}",
+                configuration_label,
                 config.document["cost_grid"],
                 configuration_predecessors,
             )
+            for dimension in ("asset", "horizon", "period"):
+                groups = _strict_mapping(child[dimension], f"{configuration_label}.{dimension}")
+                for group_name, subgroup in groups.items():
+                    _reconcile_economic_view(
+                        subgroup,
+                        f"{configuration_label}.{dimension}.{group_name}",
+                        config.document["cost_grid"],
+                        configuration_predecessors,
+                    )
     statistical = _strict_mapping(
         report["statistical"],
         "statistical",
@@ -3533,7 +3541,6 @@ def _economic_views(
 ) -> dict[str, Any]:
     trace = _position_trace(rows, predictions)
     positions = cast(list[float], trace["positions"])
-    changes = cast(list[float], trace["changes"])
     gross_values = cast(list[float], trace["gross_values"])
     indices_by_group: dict[str, dict[str, list[int]]] = {
         "period": defaultdict(list),
@@ -3544,36 +3551,31 @@ def _economic_views(
         indices_by_group["period"][row.period].append(index)
         indices_by_group["asset"][row.asset].append(index)
         indices_by_group["horizon"][str(row.horizon_minutes)].append(index)
+    canonical_positions = {
+        index: _qdecimal(Decimal(str(round(positions[index], 12)))) for index in range(len(rows))
+    }
+    canonical_changes: dict[int, Decimal] = {}
+    prior_positions: dict[tuple[str, str, int], Decimal] = {}
+    ordered_indices = sorted(
+        range(len(rows)),
+        key=lambda index: (
+            rows[index].decision_time,
+            rows[index].period,
+            rows[index].target_id,
+            rows[index].asset,
+            rows[index].horizon_minutes,
+        ),
+    )
+    for index in ordered_indices:
+        row = rows[index]
+        key = (row.target_id, row.asset, row.horizon_minutes)
+        previous = prior_positions.get(key, Decimal("0"))
+        canonical_changes[index] = _qdecimal(canonical_positions[index] - previous)
+        prior_positions[key] = canonical_positions[index]
 
     def view(indices: Sequence[int]) -> dict[str, Any]:
-        rendered_positions = {
-            index: _qdecimal(Decimal(str(round(positions[index], 12)))) for index in indices
-        }
-        rendered_changes = {
-            index: _qdecimal(Decimal(str(round(changes[index], 12)))) for index in indices
-        }
-        trace_keys = [
-            (rows[index].target_id, rows[index].asset, rows[index].horizon_minutes)
-            for index in indices
-        ]
-        if len(set(trace_keys)) < len(trace_keys):
-            ordered_indices = sorted(
-                indices,
-                key=lambda index: (
-                    rows[index].decision_time,
-                    rows[index].period,
-                    rows[index].target_id,
-                    rows[index].asset,
-                    rows[index].horizon_minutes,
-                ),
-            )
-            prior_positions: dict[tuple[str, str, int], Decimal] = {}
-            rendered_changes = {}
-            for index in ordered_indices:
-                key = (rows[index].target_id, rows[index].asset, rows[index].horizon_minutes)
-                previous = prior_positions.get(key, Decimal("0"))
-                rendered_changes[index] = _qdecimal(rendered_positions[index] - previous)
-                prior_positions[key] = rendered_positions[index]
+        rendered_positions = {index: canonical_positions[index] for index in indices}
+        rendered_changes = {index: canonical_changes[index] for index in indices}
         rendered_gross = {
             index: _qdecimal(Decimal(str(round(gross_values[index], 12)))) for index in indices
         }
