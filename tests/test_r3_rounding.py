@@ -17,8 +17,8 @@ from qtrad.domain.r3_rounding import RoundingDisposition, RoundingPolicy, Roundi
 from qtrad.domain.risk import RiskCaps
 
 
-def _target(inputs, values: tuple[float, float]):
-    return solve_continuous_target(inputs, runner=lambda _: ("optimal", values))
+def _target(inputs, values: tuple[float, ...]):
+    return solve_continuous_target(inputs, runner=lambda inputs: ("optimal", values))
 
 
 def test_positive_negative_and_decimal_rounding_are_sign_symmetric() -> None:
@@ -73,7 +73,7 @@ def test_asset_cap_repair_reaches_valid_increment() -> None:
 
 def test_solver_failure_projects_current_without_partial_target() -> None:
     inputs = _target_inputs()
-    target = solve_continuous_target(inputs, runner=lambda _: ("infeasible", (99.0, 99.0)))
+    target = solve_continuous_target(inputs, runner=lambda inputs: ("infeasible", (99.0, 99.0)))
     result = round_and_repair_target(target, inputs)
     assert result.disposition is RoundingDisposition.PROJECTED
     assert result.target_position == inputs.current_position
@@ -184,7 +184,7 @@ def test_rounded_target_is_frozen_and_decimal_reconciled() -> None:
     result = round_and_repair_target(_target(inputs, (1.9, 0.0)), inputs)
     assert all(type(value) is Decimal for value in result.target_position)
     with pytest.raises(FrozenInstanceError):
-        result.target_position = (Decimal("9"), Decimal("0"))
+        type(result).__setattr__(result, "target_position", (Decimal("9"), Decimal("0")))
 
 
 def test_missing_economics_fails_closed_with_explicit_reason() -> None:
