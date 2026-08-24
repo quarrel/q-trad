@@ -501,10 +501,24 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
     assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
-    assert all(state == "EXHAUSTED_AT_BOUND" for state in metadata["unopened_parts"].values())
+    assert all(state == "NOT_SCANNED_AFTER_BOUND" for state in metadata["unopened_parts"].values())
     assert metadata["stop_reason"] == "EARLIEST_COMPLETE_GROUP_BOUND"
-    assert metadata["consumed_parts_count"] == 4
-    assert all(len(hashes) == 1 for hashes in metadata["source_scan_part_hashes"].values())
+    assert metadata["consumed_parts_count"] == 8
+    assert all(len(hashes) == 2 for hashes in metadata["source_scan_part_hashes"].values())
+    report = analyse_fixture(rows, config, retained_metadata=metadata).report
+    graph_receipts = {
+        control["id"]: control["execution_receipt"] for control in report["graph"]["controls"]
+    }
+    assert (
+        graph_receipts["local_non_graph"]["role_binding"]
+        == metadata["role_bindings"]["LOCAL_RIDGE"]
+    )
+    assert (
+        graph_receipts["pooled_non_graph"]["role_binding"]
+        == metadata["role_bindings"]["POOLED_LOCAL_RIDGE"]
+    )
+    assert "role_binding" not in graph_receipts["fixed_graph"]
+    assert "role_binding" not in graph_receipts["shuffled_graph"]
     assert metadata["selected_rows"] == 18
     assert metadata["consumed_rows"] > metadata["selected_rows"]
     assert metadata["selected_bytes"] < metadata["consumed_bytes"]

@@ -1452,14 +1452,10 @@ def load_retained_rows(
                 descriptor, part_rows, part_size = part_set[name]
                 consume_part(name, descriptor, part_rows, part_size)
         complete, incomplete = complete_groups()
-        if incomplete and bool(policy["reject_incomplete"]):
-            raise FreezeError(
-                "incomplete canonical retained decision group in scanned part prefix: "
-                + incomplete[0]
-            )
         if (
             len(part_set) == len(data_names)
             and len(complete) >= required_groups
+            and not incomplete
             and bool(streaming.get("stop_after_selected_groups", False))
         ):
             stop_state = "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
@@ -1637,20 +1633,41 @@ def load_fixture_rows(
                 encoding="utf-8",
             )
             locators[name] = str(path)
+        decision_field = mappings["decision_time"]
+        decision_times = sorted({str(record[decision_field]) for record in records})
+        if len(decision_times) != 3:
+            raise FreezeError("fixture requires exactly three decision-time groups")
+        part_records = [
+            [record for record in records if str(record[decision_field]) == decision_time]
+            for decision_time in decision_times
+        ]
+        part_records = [part_records[0] + part_records[1], part_records[2]]
+        late_records = [dict(record) for record in part_records[-1]]
+        for record in late_records:
+            record[decision_field] = "2099-01-01T00:00:00Z"
+            period_field = mappings["period"]
+            record[period_field] = f"{record[period_field]}-late"
+        part_records.append(late_records)
         for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence"):
-            part_path = root / f"{name}-part.json"
-            part_bytes = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
-            part_path.write_bytes(part_bytes)
-            descriptor = {
-                "locator": part_path.name,
-                "contract": cast(Mapping[str, Any], declarations[name])["contract"],
-                "identity": f"fixture-{name}-part-0",
-                "sha256": hashlib.sha256(part_bytes).hexdigest(),
-                "byte_size": len(part_bytes),
-                "row_count": len(records),
-            }
+            descriptors: list[dict[str, Any]] = []
+            for part_index, part_records_value in enumerate(part_records):
+                part_path = root / f"{name}-part-{part_index}.json"
+                part_bytes = json.dumps(
+                    part_records_value, sort_keys=True, separators=(",", ":")
+                ).encode()
+                part_path.write_bytes(part_bytes)
+                descriptors.append(
+                    {
+                        "locator": part_path.name,
+                        "contract": cast(Mapping[str, Any], declarations[name])["contract"],
+                        "identity": f"fixture-{name}-part-{part_index}",
+                        "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                        "byte_size": len(part_bytes),
+                        "row_count": len(part_records_value),
+                    }
+                )
             wrapper = metadata_for(name)
-            wrapper["parts"] = [descriptor]
+            wrapper["parts"] = descriptors
             wrapper_path = root / f"{name}.json"
             wrapper_path.write_text(
                 json.dumps(wrapper, sort_keys=True, separators=(",", ":")), encoding="utf-8"
@@ -2617,10 +2634,36 @@ def analyse_fixture(
     }
     graph_metrics[tiny_graph_id]["fit_executions"] = graph_fit_executions
     graph_metrics[tiny_graph_id]["execution_receipt"] = dict(tiny_graph)
+    graph_role_by_kind = {
+        "non_graph_local": "LOCAL_RIDGE",
+        "non_graph_pooled": "POOLED_LOCAL_RIDGE",
+    }
+    frozen_loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    frozen_identity_bindings = cast(Mapping[str, Any], frozen_loader["identity_bindings"])
+    frozen_wrappers = cast(Mapping[str, Any], frozen_loader["child_wrappers"])
+    frozen_role_wrapper_names = {
+        "LOCAL_RIDGE": "local_forecast",
+        "POOLED_LOCAL_RIDGE": "pooled_forecast",
+    }
     for control in graph_controls:
         control_id = str(control["id"])
         graph_metrics[control_id]["fit_executions"] = 0
-        graph_metrics[control_id]["execution_receipt"] = dict(control)
+        receipt = dict(control)
+        role_name = graph_role_by_kind.get(str(control["kind"]))
+        if role_name is not None and retained_metadata is not None:
+            expected_binding = {
+                "dataset_id": frozen_identity_bindings["dataset_ids"][role_name],
+                "config_id": frozen_identity_bindings["config_ids"][role_name],
+                "wrapper_sha256": frozen_wrappers[frozen_role_wrapper_names[role_name]]["sha256"],
+            }
+            actual_binding = role_bindings.get(role_name)
+            if not isinstance(actual_binding, Mapping):
+                raise FreezeError(f"graph role binding mismatch: {role_name}")
+            actual_binding_map = cast(Mapping[str, Any], actual_binding)
+            if dict(actual_binding_map) != expected_binding:
+                raise FreezeError(f"graph role binding mismatch: {role_name}")
+            receipt["role_binding"] = dict(actual_binding_map)
+        graph_metrics[control_id]["execution_receipt"] = receipt
     graph = {
         tiny_graph_id: {
             "id": tiny_graph_id,
