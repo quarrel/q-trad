@@ -585,6 +585,25 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         _reject_unknown(section_object, _SECTION_KEYS[name], name)
         if set(section_object) != set(_SECTION_KEYS[name]):
             raise FreezeError(f"{name} is incomplete")
+    retained_forecasts_root = Path(
+        "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/forecasts"
+    )
+    expected_forecast_paths = {
+        "local_forecast": str(
+            retained_forecasts_root
+            / "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9.json"
+        ),
+        "pooled_forecast": str(
+            retained_forecasts_root
+            / "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json"
+        ),
+        "zero_forecast": str(
+            retained_forecasts_root
+            / "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json"
+        ),
+    }
+    if any(retained_object[name] != path for name, path in expected_forecast_paths.items()):
+        raise FreezeError("retained forecast role locators are reversed or not frozen")
 
     loader = cast(dict[str, Any], raw["retained_loader"])
     if loader["required_columns"] != [
@@ -848,10 +867,10 @@ def retained_input_paths() -> Mapping[str, str]:
             forecasts / "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9.json"
         ),
         "pooled_forecast": str(
-            forecasts / "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json"
+            forecasts / "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json"
         ),
         "zero_forecast": str(
-            forecasts / "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json"
+            forecasts / "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json"
         ),
         "outcome_evidence": str(root / "g2-preparation" / "outcome-evidence.json"),
     }
@@ -887,12 +906,14 @@ def select_synchronised_rows(
         group_rows = groups[decision_time]
         row_targets = [row.target_id for row in group_rows]
         if len(group_rows) != len(target_ids) or set(row_targets) != set(target_ids):
-            raise FreezeError("incomplete synchronised decision group")
+            continue
         selected_times.append(decision_time)
         if len(selected_times) == int(policy["n_complete_decision_groups"]):
             break
     if len(selected_times) != int(policy["n_complete_decision_groups"]):
-        raise FreezeError("fewer than the frozen number of complete decision groups")
+        raise FreezeError(
+            "fewer than the frozen number of complete decision groups; incomplete groups remain"
+        )
     selected = tuple(
         row
         for row in sorted(rows, key=lambda item: _decision_identity(item))
@@ -929,7 +950,7 @@ def select_synchronised_rows(
         "source_parts": 1 if rows else 0,
         "complete_groups": len(selected_times),
         "target_count": len(target_ids),
-        "stop_state": "STOPPED_AFTER_SELECTED_GROUPS",
+        "stop_state": "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF",
     }
 
 
@@ -1297,13 +1318,13 @@ def load_retained_rows(
         )
         opened[name] = _open_json_document(Path(actual_locators[name]), child_limits)
         _validate_child_metadata(name, opened[name][0], loader, fixture=_fixture)
-    _selection_metadata, selection_parts, selection_size = opened["selection"]
-    _consumed_metadata, consumed_parts, consumed_size = opened["consumed"]
+    _selection_metadata, selection_parts, _selection_size = opened["selection"]
+    _consumed_metadata, consumed_parts, _consumed_size = opened["consumed"]
     consumed_part_receipts: dict[str, list[dict[str, Any]]] = {name: [] for name in child_names}
     selection_records: list[Mapping[str, Any]] = []
     consumed_records: list[Mapping[str, Any]] = []
     source_rows = 0
-    source_bytes = selection_size + consumed_size
+    source_bytes = sum(opened[name][2] for name in child_names)
     source_parts = 0
     for descriptor, part_rows, _ in selection_parts:
         consumed_part_receipts["selection"].append(descriptor)
@@ -1373,10 +1394,9 @@ def load_retained_rows(
                 group = groups.get(decision_time)
                 if group is None:
                     if len(groups) >= max_groups:
-                        worst = max(groups)
-                        if decision_time >= worst:
-                            continue
-                        del groups[worst]
+                        raise FreezeError(
+                            "bounded join selector exhausted before proving complete groups"
+                        )
                     group = {}
                     groups[decision_time] = group
                 children = group.setdefault(key, {})
@@ -1413,12 +1433,19 @@ def load_retained_rows(
     selection_meta["stop_state"] = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
     all_parts = [part for parts in consumed_part_receipts.values() for part in parts]
     scanned_hashes = [str(part["sha256"]) for part in all_parts]
+    wrapper_bytes = {name: opened[name][2] for name in child_names}
+    part_bytes = {
+        name: sum(int(part.get("bytes", 0)) for part in consumed_part_receipts[name])
+        for name in child_names
+    }
     return selected, {
         "authority": authority,
         "selection": selection_meta,
         "source_scan_rows": source_rows,
         "source_scan_bytes": source_bytes,
         "source_scan_parts": source_parts,
+        "source_scan_wrapper_bytes": wrapper_bytes,
+        "source_scan_part_bytes": part_bytes,
         "consumed_parts": consumed_part_receipts,
         "selected_rows": len(selected),
         "selected_parts": len(all_parts),

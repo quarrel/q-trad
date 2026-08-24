@@ -549,3 +549,59 @@ def test_retained_forecast_role_bindings_reject_swapped_datasets() -> None:
     )
     with pytest.raises(FreezeError, match="role bindings"):
         FreezeConfig.from_mapping(_rehashed(swapped))
+
+
+def test_retained_forecast_roles_are_explicit_and_not_reversed() -> None:
+    from qtrad.application.r3_historical_exploratory import retained_input_paths
+
+    config = FreezeConfig.from_path(CONFIG)
+    loader = config.document["retained_loader"]
+    bindings = loader["identity_bindings"]
+    assert bindings["dataset_ids"]["POOLED_LOCAL_RIDGE"] == (
+        "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b"
+    )
+    assert bindings["dataset_ids"]["ZERO_RETURN"] == (
+        "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223"
+    )
+    paths = retained_input_paths()
+    assert paths["pooled_forecast"].endswith(
+        "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json"
+    )
+    assert paths["zero_forecast"].endswith(
+        "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json"
+    )
+
+
+def test_selector_skips_early_incomplete_group_but_requires_complete_count() -> None:
+    from qtrad.application.r3_historical_exploratory import select_synchronised_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows = list(synthetic_fixture())
+    early = replace(
+        rows[0],
+        timestamp="2025-12-31T23:00:00Z",
+        decision_time="2025-12-31T23:00:00Z",
+        period="early-incomplete",
+        available_at="2025-12-31T22:59:00Z",
+        target_available_at="2025-12-31T23:05:00Z",
+        dependency_start="2025-12-31T22:55:00Z",
+        dependency_end="2025-12-31T22:59:00Z",
+    )
+    selected, metadata = select_synchronised_rows((*rows, early), config)
+    assert len(selected) == 18
+    assert metadata["complete_groups"] == 3
+    assert "2025-12-31T23:00:00Z" not in metadata["selected_decision_times"]
+
+    with pytest.raises(FreezeError, match="fewer than"):
+        select_synchronised_rows(rows[:-1], config)
+
+
+def test_role_swapped_retained_locator_fails_closed() -> None:
+    candidate = json.loads(CONFIG.read_text(encoding="utf-8"))
+    locators = candidate["retained_loader"]["locators"]
+    locators["pooled_forecast"], locators["zero_forecast"] = (
+        locators["zero_forecast"],
+        locators["pooled_forecast"],
+    )
+    with pytest.raises(FreezeError):
+        FreezeConfig.from_mapping(_rehashed(candidate))
