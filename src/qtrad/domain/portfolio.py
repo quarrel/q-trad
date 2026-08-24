@@ -20,6 +20,7 @@ from typing import Final, cast
 
 from qtrad.domain.economics import (
     ContinuousCostModel,
+    CostBasis,
     CostComponentKind,
     ExpectedCostState,
     GrossForecast,
@@ -791,6 +792,15 @@ class ContinuousTargetInputs:
                 raise ValueError(f"asset {asset} continuous cost horizon must be 15m")
             if model.economics_identity != economics.semantic_identity:
                 raise ValueError(f"asset {asset} economics authority mismatch")
+            commission = model.component(CostComponentKind.COMMISSION)
+            financing = model.component(CostComponentKind.FINANCING)
+            if (
+                economics.commission.basis is not CostBasis.PHYSICAL_DELTA
+                or commission.basis is not economics.commission.basis
+                or economics.financing.basis is not CostBasis.PHYSICAL_HOLDING
+                or financing.basis is not economics.financing.basis
+            ):
+                raise ValueError(f"asset {asset} cost basis authority mismatch")
             if (
                 model.commission_version != economics.commission.version
                 or model.commission_provenance != economics.commission.provenance

@@ -1,7 +1,7 @@
 """Focused R3.C one-horizon virtual/physical target checks."""
 
 from collections.abc import MutableMapping
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -637,3 +637,44 @@ def test_blocked_target_rejects_partial_output_and_missing_reason() -> None:
         replace(blocked, reason_codes=())
     with pytest.raises(ValueError, match="partial output"):
         replace(blocked, target_position=(Decimal("1"),))
+
+
+@pytest.mark.parametrize("field", ["variable_order", "accepted_statuses"])
+def test_solver_policy_rejects_mutable_identity_sequences(field: str) -> None:
+    values = list(getattr(DEFAULT_SOLVER_POLICY, field))
+    with pytest.raises(ValueError, match="tuples"):
+        replace(
+            DEFAULT_SOLVER_POLICY,
+            **{field: cast(tuple[str, ...], values)},
+        )
+
+
+def test_solver_policy_is_immutable_and_decision_identity_is_stable() -> None:
+    inputs = _target_inputs()
+    identity = inputs.decision_input_identity
+    with pytest.raises(FrozenInstanceError):
+        setattr(inputs.solver_policy, "variable_order", ("mutated",))  # noqa: B010
+    assert inputs.solver_policy.variable_order == ("physical_target",)
+    assert inputs.decision_input_identity == identity
+
+
+@pytest.mark.parametrize(
+    ("component_kind", "invalid_basis"),
+    [
+        (CostComponentKind.COMMISSION, CostBasis.PHYSICAL_HOLDING),
+        (CostComponentKind.FINANCING, CostBasis.PHYSICAL_DELTA),
+    ],
+)
+def test_continuous_model_rejects_schedule_basis_mismatch(
+    component_kind: CostComponentKind,
+    invalid_basis: CostBasis,
+) -> None:
+    model = _continuous_model("asset:a")
+    components = tuple(
+        replace(component, basis=invalid_basis)
+        if component.component is component_kind
+        else component
+        for component in model.components
+    )
+    with pytest.raises(ValueError, match="basis"):
+        replace(model, components=components)

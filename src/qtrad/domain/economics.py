@@ -982,6 +982,8 @@ class SolverPolicy:
     warm_start: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.variable_order) is not tuple or type(self.accepted_statuses) is not tuple:
+            raise ValueError("solver policy variable order and statuses must be tuples")
         values = (
             self.policy_version,
             self.python_version,
@@ -1250,6 +1252,13 @@ class ContinuousCostModel:
         for component in self.components:
             if component.reporting_currency != self.reporting_currency:
                 raise ValueError("continuous component reporting currency mismatch")
+            expected_basis = (
+                CostBasis.PHYSICAL_HOLDING
+                if component.component is CostComponentKind.FINANCING
+                else CostBasis.PHYSICAL_DELTA
+            )
+            if component.basis is not expected_basis:
+                raise ValueError("continuous component basis does not match canonical semantics")
         impact = self.component(CostComponentKind.IMPACT)
         if impact.status is not self.impact_status or impact.version != self.impact_version:
             raise ValueError("continuous impact component authority mismatch")
