@@ -711,6 +711,25 @@ class ContinuousTargetInputs:
     netting: NettingResult | None = None
 
     def __post_init__(self) -> None:
+        if any(
+            type(values) is not tuple
+            for values in (
+                self.asset_order,
+                self.current_position,
+                self.requested_target,
+                self.alpha_return,
+            )
+        ):
+            raise ValueError("target asset order and vectors must be tuples")
+        if not isinstance(cast(object, self.economics), Mapping) or not isinstance(
+            cast(object, self.continuous_costs), Mapping
+        ):
+            raise ValueError("target economics and continuous costs must be mappings")
+        if not isinstance(cast(object, self.expected_costs), Mapping):
+            raise ValueError("target expected costs must be a mapping")
+        object.__setattr__(self, "economics", MappingProxyType(dict(self.economics)))
+        object.__setattr__(self, "continuous_costs", MappingProxyType(dict(self.continuous_costs)))
+        object.__setattr__(self, "expected_costs", MappingProxyType(dict(self.expected_costs)))
         ordered = tuple(sorted(self.asset_order))
         if not ordered or len(set(ordered)) != len(ordered) or ordered != self.asset_order:
             raise ValueError("target asset order must be non-empty, unique and canonical")
@@ -748,6 +767,8 @@ class ContinuousTargetInputs:
             )
             if self.netting.external_deltas != expected_external:
                 raise ValueError("target netting external deltas do not match request")
+        _require_identity(self.solver_policy.semantic_identity, "solver policy identity")
+        _require_identity(self.risk.semantic_id, "risk state identity")
         for _index, asset in enumerate(self.asset_order):
             economics = self.economics[asset]
             model = self.continuous_costs[asset]
@@ -768,6 +789,49 @@ class ContinuousTargetInputs:
                 raise ValueError(f"asset {asset} continuous cost horizon mismatch")
             if model.horizon != ONE_HORIZON:
                 raise ValueError(f"asset {asset} continuous cost horizon must be 15m")
+            if model.economics_identity != economics.semantic_identity:
+                raise ValueError(f"asset {asset} economics authority mismatch")
+            if (
+                model.commission_version != economics.commission.version
+                or model.commission_provenance != economics.commission.provenance
+                or model.financing_version != economics.financing.version
+                or model.financing_provenance != economics.financing.provenance
+            ):
+                raise ValueError(f"asset {asset} schedule authority mismatch")
+            if economics.impact_disposition.value != "SUPPORTED_MODEL":
+                raise ValueError(f"asset {asset} impact authority is unsupported for R3.C")
+            if (
+                model.impact_disposition != economics.impact_disposition
+                or model.impact_version != economics.impact_version
+            ):
+                raise ValueError(f"asset {asset} impact authority mismatch")
+            if model.component(CostComponentKind.IMPACT).status is not model.impact_status:
+                raise ValueError(f"asset {asset} impact status mismatch")
+
+    @property
+    def decision_input_identity(self) -> str:
+        """Identity of every authority consumed by the continuous target decision."""
+        return _identity(
+            {
+                "contract": TARGET_CONTRACT,
+                "asset_order": self.asset_order,
+                "economics": tuple(
+                    (asset, self.economics[asset].semantic_identity) for asset in self.asset_order
+                ),
+                "continuous_costs": tuple(
+                    (asset, self.continuous_costs[asset].semantic_identity)
+                    for asset in self.asset_order
+                ),
+                "risk_identity": self.risk.semantic_id,
+                "solver_policy_identity": self.solver_policy.semantic_identity,
+                "current_position": self.current_position,
+                "requested_target": self.requested_target,
+                "alpha_return": self.alpha_return,
+                "gross_sleeve_value": self.gross_sleeve_value,
+                "decision_time": self.decision_time,
+                "netting": self.netting.semantic_identity if self.netting is not None else None,
+            }
+        )
 
 
 def _cost_state_payload(state: ExpectedCostState) -> dict[str, object]:
@@ -816,16 +880,37 @@ class ContinuousTarget:
     solver_status: str
     feasibility_residual: Decimal
     solver_policy_identity: str
+    decision_input_identity: str
     expected_costs: Mapping[str, ExpectedCostState]
+    requested_position: tuple[Decimal, ...]
+    decision_time: datetime
+    cost_model_identities: Mapping[str, str]
+    reporting_currencies: Mapping[str, str]
     disposition: DecisionDisposition = DecisionDisposition.ACCEPTED
     reason_codes: tuple[str, ...] = ()
-    requested_position: tuple[Decimal, ...] = ()
-    decision_time: datetime | None = None
-    cost_model_identities: Mapping[str, str] = field(default_factory=lambda: dict[str, str]())
-    reporting_currencies: Mapping[str, str] = field(default_factory=lambda: dict[str, str]())
     netting: NettingResult | None = None
 
     def __post_init__(self) -> None:
+        if any(
+            type(values) is not tuple
+            for values in (
+                self.asset_order,
+                self.current_position,
+                self.requested_position,
+                self.target_position,
+                self.physical_delta,
+            )
+        ):
+            raise ValueError("target asset order and vectors must be tuples")
+        if not all(
+            isinstance(cast(object, mapping), Mapping)
+            for mapping in (
+                self.expected_costs,
+                self.cost_model_identities,
+                self.reporting_currencies,
+            )
+        ):
+            raise ValueError("target cost and identity fields must be mappings")
         object.__setattr__(self, "expected_costs", MappingProxyType(dict(self.expected_costs)))
         object.__setattr__(
             self, "cost_model_identities", MappingProxyType(dict(self.cost_model_identities))
@@ -833,16 +918,45 @@ class ContinuousTarget:
         object.__setattr__(
             self, "reporting_currencies", MappingProxyType(dict(self.reporting_currencies))
         )
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+        if type(self.disposition) is not DecisionDisposition:
+            raise ValueError("target disposition is invalid")
         ordered = tuple(sorted(self.asset_order))
         if not ordered or len(set(ordered)) != len(self.asset_order) or ordered != self.asset_order:
             raise ValueError("target asset order must be non-empty and canonical")
+        n = len(self.asset_order)
+        if len(self.current_position) != n or len(self.requested_position) != n:
+            raise ValueError("target current and requested vectors must match asset order")
+        for values, label in (
+            (self.current_position, "target current position"),
+            (self.requested_position, "target requested position"),
+        ):
+            for value in values:
+                _decimal(value, label)
+        require_utc(self.decision_time, "target decision time")
+        if not self.solver_status:
+            raise ValueError("target solver status is required")
+        _require_identity(self.solver_policy_identity, "solver policy identity")
+        _require_identity(self.decision_input_identity, "decision input identity")
+        if set(self.cost_model_identities) != set(self.asset_order):
+            raise ValueError("target model identities must cover every asset")
+        if set(self.reporting_currencies) != set(self.asset_order):
+            raise ValueError("target currencies must cover every asset")
+        for asset, identity in self.cost_model_identities.items():
+            _require_identity(identity, f"{asset} cost model identity")
+        if any(
+            type(currency) is not str or not currency
+            for currency in self.reporting_currencies.values()
+        ):
+            raise ValueError("target reporting currencies must be non-empty strings")
+        if any(type(reason) is not str or not reason for reason in self.reason_codes):
+            raise ValueError("target reason codes must be non-empty strings")
         if self.disposition is DecisionDisposition.ACCEPTED:
             if self.solver_status != SolverResultStatus.OPTIMAL.value:
                 raise ValueError("accepted target requires exact optimal status")
             _decimal(self.expected_cost_reporting, "target expected cost reporting")
             _decimal(self.expected_financing_reporting, "target expected financing reporting")
             _decimal(self.feasibility_residual, "target feasibility residual")
-            n = len(self.asset_order)
             if (
                 len(self.current_position) != n
                 or len(self.requested_position) != n
@@ -865,17 +979,12 @@ class ContinuousTarget:
                 )
             ):
                 raise ValueError("physical target delta does not reconcile")
-            if self.decision_time is None:
-                raise ValueError("accepted target decision time is required")
-            require_utc(self.decision_time, "accepted target decision time")
             if set(self.expected_costs) != set(self.asset_order):
                 raise ValueError("accepted target cost states must cover every asset")
             if set(self.cost_model_identities) != set(self.asset_order):
                 raise ValueError("accepted target model identities must cover every asset")
             if set(self.reporting_currencies) != set(self.asset_order):
                 raise ValueError("accepted target currencies must cover every asset")
-            for asset, identity in self.cost_model_identities.items():
-                _require_identity(identity, f"{asset} cost model identity")
             non_financing = Decimal("0")
             financing = Decimal("0")
             netting_by_asset = (
@@ -931,7 +1040,19 @@ class ContinuousTarget:
                 raise ValueError("accepted target financing total does not reconcile")
             if self.feasibility_residual < 0 or not self.feasibility_residual.is_finite():
                 raise ValueError("target feasibility residual must be finite and non-negative")
-        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+            if self.reason_codes:
+                raise ValueError("accepted target cannot carry reason codes")
+        else:
+            if self.target_position or self.physical_delta or self.expected_costs:
+                raise ValueError("blocked target cannot carry partial output")
+            if (
+                self.expected_cost_reporting != Decimal("0")
+                or self.expected_financing_reporting != Decimal("0")
+                or self.feasibility_residual != Decimal("0")
+            ):
+                raise ValueError("blocked target totals and residual must be zero")
+            if not self.reason_codes:
+                raise ValueError("blocked target requires reason codes")
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -948,6 +1069,7 @@ class ContinuousTarget:
                 "solver_status": self.solver_status,
                 "feasibility_residual": self.feasibility_residual,
                 "solver_policy_identity": self.solver_policy_identity,
+                "decision_input_identity": self.decision_input_identity,
                 "decision_time": self.decision_time,
                 "cost_model_identities": tuple(
                     (asset, self.cost_model_identities[asset])

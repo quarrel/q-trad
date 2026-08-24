@@ -481,6 +481,42 @@ class ProductEconomics:
             elif {fx.base_currency, fx.quote_currency} != {source, target}:
                 raise ValueError(f"{label} does not cover the required currency pair")
 
+    @property
+    def semantic_identity(self) -> str:
+        """Identity of the exact reviewed product-economics authority."""
+        return _continuous_identity(
+            {
+                "contract": ECONOMICS_CONTRACT,
+                "asset_id": self.asset_id,
+                "source_class": self.source_class,
+                "source_product_id": self.source_product_id,
+                "price_currency": self.price_currency,
+                "settlement_currency": self.settlement_currency,
+                "reporting_currency": self.reporting_currency,
+                "contract_size": self.contract_size,
+                "value_per_price_unit": self.value_per_price_unit,
+                "minimum_quantity": self.minimum_quantity,
+                "quantity_increment": self.quantity_increment,
+                "tick_size": self.tick_size,
+                "tick_value": self.tick_value,
+                "commission": _schedule_identity_payload(self.commission),
+                "financing": _schedule_identity_payload(self.financing),
+                "impact_disposition": self.impact_disposition,
+                "impact_version": self.impact_version,
+                "impact_max_quantity": self.impact_max_quantity,
+                "impact_reason": self.impact_reason,
+                "session_state": self.session_state,
+                "session_version": self.session_version,
+                "effective_from": self.effective_from,
+                "observed_at": self.observed_at,
+                "economics_max_age": self.economics_max_age,
+                "version": self.version,
+                "provenance": self.provenance,
+                "fx_price_to_settlement": _fx_identity_payload(self.fx_price_to_settlement),
+                "fx_settlement_to_reporting": _fx_identity_payload(self.fx_settlement_to_reporting),
+            }
+        )
+
     def eligibility(
         self,
         *,
@@ -1071,11 +1107,11 @@ class ContinuousCostComponent:
     conversion_source: str
     conversion_version: str
     slopes: tuple[Decimal, ...]
-    breakpoints: tuple[Decimal, ...] = ()
-    form: str = "LINEAR"
-    version: str = "r3c-continuous-cost-v1"
-    provenance: str = "declared"
-    status: InputStatus = InputStatus.AVAILABLE
+    breakpoints: tuple[Decimal, ...]
+    form: str
+    version: str
+    provenance: str
+    status: InputStatus
     reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -1085,8 +1121,14 @@ class ContinuousCostComponent:
             raise ValueError("continuous cost status is invalid")
         if self.basis not in (CostBasis.PHYSICAL_DELTA, CostBasis.PHYSICAL_HOLDING):
             raise ValueError("continuous costs support only physical delta or holding basis")
-        if not self.native_currency or not self.reporting_currency:
-            raise ValueError("continuous cost currencies are required")
+        _require_currency(self.native_currency, "continuous native currency")
+        _require_currency(self.reporting_currency, "continuous reporting currency")
+        if not self.conversion_source or not self.conversion_version:
+            raise ValueError("continuous conversion source and version are required")
+        if not self.version or not self.provenance:
+            raise ValueError("continuous cost version and provenance are required")
+        if type(self.slopes) is not tuple or type(self.breakpoints) is not tuple:
+            raise ValueError("continuous slopes and breakpoints must be tuples")
         _finite_decimal(self.conversion_rate, "continuous conversion rate")
         if self.conversion_rate <= 0:
             raise ValueError("continuous conversion rate must be positive")
@@ -1160,14 +1202,45 @@ class ContinuousCostModel:
     horizon: timedelta
     reporting_currency: str
     components: tuple[ContinuousCostComponent, ...]
-    version: str = "r3c-continuous-cost-v1"
-    provenance: str = "declared"
+    economics_identity: str
+    commission_version: str
+    commission_provenance: str
+    financing_version: str
+    financing_provenance: str
+    impact_version: str
+    impact_disposition: ImpactDisposition
+    impact_status: InputStatus
+    version: str
+    provenance: str
 
     def __post_init__(self) -> None:
         if not self.asset_id or self.horizon <= timedelta(0):
             raise ValueError("continuous cost asset and horizon are required")
-        if not self.reporting_currency:
-            raise ValueError("continuous cost reporting currency is required")
+        _require_currency(self.reporting_currency, "continuous cost reporting currency")
+        if not self.version or not self.provenance:
+            raise ValueError("continuous cost model version and provenance are required")
+        _require_identity(self.economics_identity, "continuous cost economics identity")
+        if not all(
+            (
+                self.commission_version,
+                self.commission_provenance,
+                self.financing_version,
+                self.financing_provenance,
+                self.impact_version,
+            )
+        ):
+            raise ValueError("continuous cost schedule and impact authority fields are required")
+        if (
+            type(self.impact_disposition) is not ImpactDisposition
+            or type(self.impact_status) is not InputStatus
+        ):
+            raise ValueError("continuous cost impact authority fields are invalid")
+        if self.impact_disposition is not ImpactDisposition.SUPPORTED_MODEL:
+            raise ValueError("continuous costs require a supported impact model")
+        if self.impact_status not in {InputStatus.AVAILABLE, InputStatus.DOCUMENTED_ZERO}:
+            raise ValueError("continuous costs require supported impact status")
+        if type(self.components) is not tuple:
+            raise ValueError("continuous cost components must be a tuple")
         if self.horizon != timedelta(minutes=15):
             raise ValueError("R3.C continuous costs require a frozen 15m horizon")
         if tuple(c.component for c in self.components) != _COMPONENT_ORDER:
@@ -1177,6 +1250,21 @@ class ContinuousCostModel:
         for component in self.components:
             if component.reporting_currency != self.reporting_currency:
                 raise ValueError("continuous component reporting currency mismatch")
+        impact = self.component(CostComponentKind.IMPACT)
+        if impact.status is not self.impact_status or impact.version != self.impact_version:
+            raise ValueError("continuous impact component authority mismatch")
+        commission = self.component(CostComponentKind.COMMISSION)
+        if (
+            commission.version != self.commission_version
+            or commission.provenance != self.commission_provenance
+        ):
+            raise ValueError("continuous commission component authority mismatch")
+        financing = self.component(CostComponentKind.FINANCING)
+        if (
+            financing.version != self.financing_version
+            or financing.provenance != self.financing_provenance
+        ):
+            raise ValueError("continuous financing component authority mismatch")
 
     @property
     def semantic_identity(self) -> str:
@@ -1186,6 +1274,14 @@ class ContinuousCostModel:
                 "horizon": self.horizon,
                 "reporting_currency": self.reporting_currency,
                 "components": tuple(component.semantic_identity for component in self.components),
+                "economics_identity": self.economics_identity,
+                "commission_version": self.commission_version,
+                "commission_provenance": self.commission_provenance,
+                "financing_version": self.financing_version,
+                "financing_provenance": self.financing_provenance,
+                "impact_version": self.impact_version,
+                "impact_disposition": self.impact_disposition,
+                "impact_status": self.impact_status,
                 "version": self.version,
                 "provenance": self.provenance,
             }
@@ -1286,6 +1382,9 @@ def _continuous_json(value: object) -> object:
         return str(value)
     if isinstance(value, timedelta):
         return value.total_seconds()
+    if isinstance(value, datetime):
+        require_utc(value, "continuous identity datetime")
+        return value.isoformat().replace("+00:00", "Z")
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, (tuple, list)):
@@ -1308,3 +1407,42 @@ def _continuous_identity(value: object) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _schedule_identity_payload(schedule: CostSchedule) -> dict[str, object]:
+    return {
+        "status": schedule.status,
+        "currency": schedule.currency,
+        "per_quantity": schedule.per_quantity,
+        "minimum": schedule.minimum,
+        "basis": schedule.basis,
+        "version": schedule.version,
+        "provenance": schedule.provenance,
+        "reason": schedule.reason,
+    }
+
+
+def _fx_identity_payload(fx: FXRate | None) -> dict[str, object] | None:
+    if fx is None:
+        return None
+    return {
+        "base_currency": fx.base_currency,
+        "quote_currency": fx.quote_currency,
+        "rate": fx.rate,
+        "observed_at": fx.observed_at,
+        "max_age": fx.max_age,
+        "status": fx.status,
+        "source": fx.source,
+        "version": fx.version,
+        "healthy": fx.healthy,
+        "reason": fx.reason,
+    }
+
+
+def _require_identity(value: str, name: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a SHA-256 hex digest")

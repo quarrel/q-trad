@@ -1,8 +1,10 @@
 """Focused R3.C one-horizon virtual/physical target checks."""
 
+from collections.abc import MutableMapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 import pytest
 
@@ -18,6 +20,7 @@ from qtrad.domain.economics import (
     ExpectedCostState,
     GrossForecast,
     ImpactDisposition,
+    InputStatus,
     ProductEconomics,
     SessionState,
 )
@@ -143,6 +146,7 @@ def _cost_state(
 
 
 def _continuous_model(asset: str, unit_amount: str = "1") -> ContinuousCostModel:
+    economics = _economics(asset)
     components = tuple(
         ContinuousCostComponent(
             component=component,
@@ -163,8 +167,19 @@ def _continuous_model(asset: str, unit_amount: str = "1") -> ContinuousCostModel
                     else Decimal(unit_amount),
                 )
             ),
-            version="continuous-v1",
+            breakpoints=(),
+            form="LINEAR",
+            version=(
+                economics.commission.version
+                if component is CostComponentKind.COMMISSION
+                else economics.financing.version
+                if component is CostComponentKind.FINANCING
+                else economics.impact_version or ""
+                if component is CostComponentKind.IMPACT
+                else "continuous-v1"
+            ),
             provenance="fixture",
+            status=InputStatus.AVAILABLE,
         )
         for component in CostComponentKind
     )
@@ -173,6 +188,14 @@ def _continuous_model(asset: str, unit_amount: str = "1") -> ContinuousCostModel
         horizon=ONE_HORIZON,
         reporting_currency="AUD",
         components=components,
+        economics_identity=economics.semantic_identity,
+        commission_version=economics.commission.version,
+        commission_provenance=economics.commission.provenance,
+        financing_version=economics.financing.version,
+        financing_provenance=economics.financing.provenance,
+        impact_version=economics.impact_version or "",
+        impact_disposition=economics.impact_disposition,
+        impact_status=InputStatus.AVAILABLE,
         version="continuous-model-v1",
         provenance="fixture",
     )
@@ -464,7 +487,7 @@ def test_netting_cross_is_bound_to_final_cost_states() -> None:
             requested_target=(Decimal("2"), Decimal("0")),
             alpha=(Decimal("1"), Decimal("0")),
         ),
-        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+        runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     assert target.disposition is DecisionDisposition.ACCEPTED
     assert target.netting == netting
@@ -475,7 +498,7 @@ def test_netting_cross_is_bound_to_final_cost_states() -> None:
 def test_target_identity_binds_model_and_component_semantics() -> None:
     target = solve_continuous_target(
         _target_inputs(),
-        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+        runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     assert target.disposition is DecisionDisposition.ACCEPTED
     changed_model = replace(
@@ -496,7 +519,7 @@ def test_target_rejects_mismatched_final_cost_state() -> None:
     inputs = _target_inputs()
     target = solve_continuous_target(
         inputs,
-        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+        runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     alternate = inputs.continuous_costs["asset:a"].evaluate(
         current_quantity=Decimal("0"),
@@ -540,7 +563,7 @@ def test_positive_minimum_cost_is_rejected_before_solver() -> None:
 def test_accepted_target_snapshots_required_mappings() -> None:
     target = solve_continuous_target(
         _target_inputs(),
-        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+        runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     identity = target.semantic_identity
     for mapping in (
@@ -557,7 +580,7 @@ def test_accepted_target_snapshots_required_mappings() -> None:
 def test_accepted_target_rejects_netting_external_delta_mismatch() -> None:
     target = solve_continuous_target(
         _target_inputs(),
-        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+        runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     mismatch_attribution = SleeveAttribution(
         _key("asset:a", source="MISMATCH"), Decimal("2"), Decimal("0"), Decimal("2")
@@ -573,3 +596,44 @@ def test_accepted_target_rejects_netting_external_delta_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="external deltas"):
         replace(target, netting=mismatched)
+
+
+def test_continuous_inputs_snapshot_authorities_and_reject_mutation() -> None:
+    inputs = _target_inputs()
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, ProductEconomics], inputs.economics)["asset:a"] = _economics(
+            "replacement"
+        )
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, ContinuousCostModel], inputs.continuous_costs)["asset:a"] = (
+            _continuous_model("replacement")
+        )
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, ExpectedCostState], inputs.expected_costs)["asset:a"] = (
+            _cost_state()
+        )
+    component = inputs.continuous_costs["asset:a"].components[0]
+    with pytest.raises(ValueError, match="tuples"):
+        replace(component, slopes=[Decimal("1")])
+
+
+def test_continuous_target_snapshots_maps_and_binds_input_identity() -> None:
+    target = solve_continuous_target(
+        _target_inputs(), runner=lambda inputs: ("optimal", (1.0, 0.0))
+    )
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, str], target.cost_model_identities)["asset:a"] = "0" * 64
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, str], target.reporting_currencies)["asset:a"] = "USD"
+    with pytest.raises(ValueError, match="SHA-256"):
+        replace(target, decision_input_identity="A" * 64)
+
+
+def test_blocked_target_rejects_partial_output_and_missing_reason() -> None:
+    blocked = solve_continuous_target(
+        _target_inputs(), runner=lambda inputs: ("infeasible", (1.0, 0.0))
+    )
+    with pytest.raises(ValueError, match="reason codes"):
+        replace(blocked, reason_codes=())
+    with pytest.raises(ValueError, match="partial output"):
+        replace(blocked, target_position=(Decimal("1"),))
