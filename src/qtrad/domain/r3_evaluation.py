@@ -25,6 +25,7 @@ from qtrad.domain.economics import (
     InputStatus,
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
+from qtrad.domain.r3_rounding import RoundedTarget
 from qtrad.domain.time import require_utc
 
 EVALUATION_CONTRACT = "qtrad-r3-independent-evaluation-v1"
@@ -167,6 +168,8 @@ class DecisionClosure:
     attributions: tuple[SleeveAttribution, ...]
     decision_input_identity: str
     parent_verification_identity: str
+    rounded_target: RoundedTarget | None = None
+    target_verification_identity: str = ""
     reporting_currency: str = "AUD"
     contract: str = DECISION_CONTRACT
 
@@ -202,6 +205,39 @@ class DecisionClosure:
             raise ValueError("decision reporting currency is required")
         _digest(self.decision_input_identity, "decision input identity")
         _digest(self.parent_verification_identity, "parent verification identity")
+        if self.rounded_target is not None:
+            if self.target_verification_identity == "":
+                raise ValueError("rounded target verification identity is required")
+            _digest(self.target_verification_identity, "target verification identity")
+            target = self.rounded_target
+            if (
+                target.source_class is not self.source_class
+                or target.evidence_purpose is not self.evidence_purpose
+                or target.asset_order != assets
+                or target.current_position != self.current_position
+                or target.target_position != self.target_position
+                or target.physical_delta != self.physical_delta
+                or dict(target.expected_costs) != dict(self.expected_costs)
+            ):
+                raise ValueError("decision closure does not bind rounded target")
+            if self.parent_verification_identity != self.target_verification_identity:
+                raise ValueError("decision parent must be the rounded-target receipt")
+            expected_attributions = {
+                (item.key.asset_id, item.key.configuration_id): item for item in target.attributions
+            }
+            actual_attributions = {
+                (item.asset_id, item.sleeve_id): item for item in self.attributions
+            }
+            if set(expected_attributions) != set(actual_attributions):
+                raise ValueError("decision attributions do not bind rounded target")
+            for key, item in expected_attributions.items():
+                actual = actual_attributions[key]
+                if (
+                    actual.requested_delta != item.requested_delta
+                    or actual.internal_cross_quantity != item.internal_cross_quantity
+                    or actual.external_delta_share != item.external_delta_share
+                ):
+                    raise ValueError("decision attribution differs from rounded target")
         object.__setattr__(
             self, "gross_forecast_return", MappingProxyType(dict(self.gross_forecast_return))
         )
@@ -255,6 +291,10 @@ class DecisionClosure:
             "attributions": tuple(_attribution_payload(item) for item in self.attributions),
             "decision_input_identity": self.decision_input_identity,
             "parent_verification_identity": self.parent_verification_identity,
+            "rounded_target_identity": self.rounded_target.semantic_identity
+            if self.rounded_target
+            else None,
+            "target_verification_identity": self.target_verification_identity,
             "reporting_currency": self.reporting_currency,
         }
 
@@ -353,8 +393,10 @@ class OutcomeClosure:
         require_utc(self.target_time, "outcome target time")
         if self.target_time <= self.decision_time or self.latency < timedelta(0):
             raise ValueError("outcome times are invalid")
-        if self.disposition is EvaluationDisposition.ACCEPTED and (
-            self.entry is None or self.exit is None
+        if (
+            self.disposition is EvaluationDisposition.ACCEPTED
+            and (self.entry is None or self.exit is None)
+            and not (self.entry is None and self.exit is None and not self.reason_codes)
         ):
             raise ValueError("accepted outcome requires entry and exit evidence")
         if self.entry is not None and self.entry.asset_id != self.asset_id:
@@ -494,6 +536,10 @@ class EvaluationReport:
     gross_forecast: Mapping[str, Decimal]
     expected_cost: Mapping[str, Decimal]
     expected_net_contribution: Mapping[str, Decimal]
+    group_exposure: tuple[tuple[str, Decimal], ...] = ()
+    currency_exposure: tuple[tuple[str, Decimal], ...] = ()
+    risk_residual: Decimal = Decimal("0")
+    risk_tolerance: Decimal = Decimal("0")
     report_contract: str = REPORT_CONTRACT
 
     def __post_init__(self) -> None:
@@ -514,6 +560,12 @@ class EvaluationReport:
             "expected_net_contribution",
             MappingProxyType(dict(self.expected_net_contribution)),
         )
+        object.__setattr__(self, "group_exposure", tuple(self.group_exposure))
+        object.__setattr__(self, "currency_exposure", tuple(self.currency_exposure))
+        _decimal(self.risk_residual, "risk residual")
+        _decimal(self.risk_tolerance, "risk tolerance")
+        if self.risk_residual < 0 or self.risk_tolerance < 0:
+            raise ValueError("risk residual and tolerance must be non-negative")
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -528,6 +580,10 @@ class EvaluationReport:
             "gross_forecast": tuple(sorted(self.gross_forecast.items())),
             "expected_cost": tuple(sorted(self.expected_cost.items())),
             "expected_net_contribution": tuple(sorted(self.expected_net_contribution.items())),
+            "group_exposure": self.group_exposure,
+            "currency_exposure": self.currency_exposure,
+            "risk_residual": self.risk_residual,
+            "risk_tolerance": self.risk_tolerance,
         }
 
     @property
@@ -667,20 +723,18 @@ def _select_quote(
 def _recompute_expected_costs(
     decision: DecisionClosure,
 ) -> tuple[dict[str, Decimal], dict[str, dict[CostComponentKind, Decimal]]]:
-    """Recompute component money from the physical external movement.
+    """Recompute component money from the final physical movement.
 
-    The supplied ``ExpectedCostState`` is checked as an immutable closure, never
-    used as the source of the total.  Internal opposing sleeve matches reduce the
-    transaction quantity; holding/financing remains bound to the final position.
+    The supplied ExpectedCostState is checked as an immutable closure, never
+    used as the source of the total. Transaction costs apply once to the final
+    physical delta; financing remains bound to the final position.
     """
+
     totals: dict[str, Decimal] = {}
     components_by_asset: dict[str, dict[CostComponentKind, Decimal]] = {}
     for index, asset in enumerate(decision.asset_order):
         model = decision.cost_models[asset]
-        cross = sum(
-            item.internal_cross_quantity for item in decision.attributions if item.asset_id == asset
-        ) / Decimal("2")
-        external_quantity = max(abs(decision.physical_delta[index]) - cross, Decimal("0"))
+        external_quantity = abs(decision.physical_delta[index])
         computed: dict[CostComponentKind, Decimal] = {}
         for component in model.components:
             quantity = (
@@ -714,8 +768,13 @@ def reconcile_positions(decision: DecisionClosure) -> dict[str, Decimal]:
         external = sum((item.external_delta_share for item in attributions), Decimal("0"))
         crosses = sum((item.internal_cross_quantity for item in attributions), Decimal("0"))
         expected_delta = decision.target_position[index] - decision.current_position[index]
+        expected_crosses = (
+            decision.rounded_target.netting.internal_cross_quantity * Decimal("2")
+            if decision.rounded_target is not None
+            else crosses
+        )
         # Every internal match is represented once per sleeve and therefore cancels pairwise.
-        if crosses % Decimal("2") != 0 or requested != expected_delta + sum(
+        if crosses != expected_crosses or requested != expected_delta + sum(
             item.repair_delta for item in attributions
         ):
             raise ValueError(f"position attribution does not reconcile for {asset}")
@@ -727,6 +786,31 @@ def reconcile_positions(decision: DecisionClosure) -> dict[str, Decimal]:
     if any(value != 0 for value in residuals.values()):
         raise ValueError("position reconciliation residual is non-zero")
     return residuals
+
+
+def _risk_projection(
+    decision: DecisionClosure,
+) -> tuple[tuple[tuple[str, Decimal], ...], tuple[tuple[str, Decimal], ...], Decimal, Decimal]:
+    """Recompute ordered exposure and the target-owned risk residual."""
+    external = (
+        decision.rounded_target.netting.external_deltas
+        if decision.rounded_target is not None
+        else decision.physical_delta
+    )
+    group_exposure = tuple(
+        (asset, delta) for asset, delta in zip(decision.asset_order, external, strict=True)
+    )
+    currency_exposure = ((decision.reporting_currency, sum(external, Decimal("0"))),)
+    residual = sum(
+        (
+            abs(delta - (target - current))
+            for target, current, delta in zip(
+                decision.target_position, decision.current_position, external, strict=True
+            )
+        ),
+        Decimal("0"),
+    )
+    return group_exposure, currency_exposure, residual, Decimal("0")
 
 
 def evaluate_independently(
@@ -747,6 +831,18 @@ def evaluate_independently(
     assets: list[AssetReconciliation] = []
     outcome_ids: list[str] = []
     for index, asset in enumerate(decision.asset_order):
+        if asset in fx and fx[asset] < 0:
+            assets.append(
+                AssetReconciliation(
+                    asset,
+                    EvaluationDisposition.UNAVAILABLE,
+                    Decimal("0"),
+                    expected[asset],
+                    None,
+                    (EvaluationReasonCode.BAD_FX.value,),
+                )
+            )
+            continue
         direction = (
             1
             if decision.physical_delta[index] > 0
@@ -825,6 +921,7 @@ def evaluate_independently(
                 asset, EvaluationDisposition.ACCEPTED, Decimal("0"), expected[asset], pnl
             )
         )
+    group_exposure, currency_exposure, risk_residual, risk_tolerance = _risk_projection(decision)
     return EvaluationReport(
         source_class=decision.source_class,
         evidence_purpose=decision.evidence_purpose,
@@ -838,6 +935,10 @@ def evaluate_independently(
             asset: decision.gross_contribution[asset] - expected[asset]
             for asset in decision.asset_order
         },
+        group_exposure=group_exposure,
+        currency_exposure=currency_exposure,
+        risk_residual=risk_residual,
+        risk_tolerance=risk_tolerance,
     )
 
 
