@@ -443,3 +443,48 @@ def test_retained_child_identity_binding_is_strict() -> None:
     metadata["dataset_id"] = "wrong-dataset"
     with pytest.raises(FreezeError, match="dataset identity"):
         _validate_child_metadata("local_forecast", metadata, loader)
+
+
+def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path) -> None:
+    from qtrad.application.r3_historical_exploratory import _read_json_document
+
+    limits = {
+        "max_source_bytes": 100_000,
+        "max_source_rows": 10,
+        "max_row_bytes": 10_000,
+        "max_nested_depth": 8,
+        "max_part_rows": 3,
+    }
+    part_rows = [{"decision_time": "t", "target_id": "x"}]
+    part_bytes = json.dumps(part_rows, separators=(",", ":")).encode()
+    wrapper = {
+        "contract": "test-wrapper",
+        "parts": [
+            {
+                "locator": "part.json",
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "contract": "test-part",
+                "identity": "part-1",
+            }
+        ],
+    }
+    (tmp_path / "part.json").write_bytes(part_bytes)
+    path = tmp_path / "wrapper.json"
+    path.write_text(json.dumps(wrapper), encoding="utf-8")
+    metadata, rows, _ = _read_json_document(path, limits)
+    assert len(rows) == 1
+    assert metadata["consumed_parts"][0]["sha256"] == hashlib.sha256(part_bytes).hexdigest()
+    (tmp_path / "part.json").write_bytes(b"[]")
+    with pytest.raises(FreezeError, match="byte hash"):
+        _read_json_document(path, limits)
+
+
+def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    assert len(rows) == 18
+    assert metadata["authority"]["authentication_performed"] is False
+    assert metadata["outcome_decode_performed"] is False
+    assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_SELECTED_GROUPS"

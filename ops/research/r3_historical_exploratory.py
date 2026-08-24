@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Allow direct execution from a checkout without adding a runtime dependency or changing imports.
@@ -14,9 +17,36 @@ from qtrad.application.r3_historical_exploratory import (
     FreezeConfig,
     analyse_fixture,
     fixture_from_json,
+    load_fixture_rows,
     load_retained_rows,
     synthetic_fixture,
 )
+
+
+def _write_create_only(destination: Path, rendered: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = rendered.encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise FileExistsError(f"create-only report already exists: {destination}") from exc
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def main() -> int:
@@ -56,16 +86,12 @@ def main() -> int:
             config, locators={key: str(value) for key, value in locator_values.items()}
         )
     else:
-        rows = fixture_from_json(args.fixture) if args.fixture else synthetic_fixture()
+        fixture_rows = fixture_from_json(args.fixture) if args.fixture else synthetic_fixture()
+        rows, retained_metadata = load_fixture_rows(fixture_rows, config)
     result = analyse_fixture(rows, config, retained_metadata=retained_metadata)
     rendered = result.canonical_json()
     if args.output:
-        destination = Path(args.output)
-        try:
-            with destination.open("x", encoding="utf-8") as handle:
-                handle.write(rendered)
-        except FileExistsError as exc:
-            raise FileExistsError(f"create-only report already exists: {destination}") from exc
+        _write_create_only(Path(args.output), rendered)
     else:
         sys.stdout.write(rendered)
     return 0
