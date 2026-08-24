@@ -423,11 +423,32 @@ delegable observation contract before launch: exact command and code identity, s
 process/session identity, sanitised durable output or another reliable way to recover the final exit
 result, resource/stop limits and the authority for
 any follow-up action. Do not launch without it. When agent delegation is available, assign passive
-monitoring to `gpt-5.6-luna` at medium reasoning, or the cheapest capable equivalent; otherwise use a
+monitoring to `gpt-5.6-luna` at `medium` reasoning, or the cheapest capable equivalent; otherwise use a
 supported wait mechanism. The primary reasoning agent may inspect only on monitor notification,
 expected completion or a defined resource/stop threshold, not by periodic polling of a silent healthy
 process. A monitor may report liveness, resources and exit; it must not mutate the process or artefacts,
 infer completion from activity, or exercise downstream authority.
+
+### Agent delegation and programme state
+
+When delegation is available and authorised:
+
+- The orchestrator exclusively owns the progress record, task sequencing, branch/worktree lifecycle,
+  publication, merges and irreversible or special-state actions.
+- Give implementers bounded ownership, exact paths, known context, constraints and expected
+  validation. Tell them other agents may be working concurrently and not to revert unrelated changes.
+- Independent reviewers inspect an exact candidate head without modifying it. Any commit, amend,
+  rebase or force-push invalidates exact-head review and any identity-sensitive validation.
+- Use `gpt-5.6-luna` at `medium` reasoning, or the cheapest capable equivalent, for passive long-running monitoring.
+- Batch independent reads and tool calls. Give delegated agents the facts already known rather than
+  paying for rediscovery. Summarise closed phases in a concise durable record.
+- Base heavy-task concurrency on measured peak memory, disk and CPU use, not merely the number of
+  available agent slots.
+- For a multi-stage programme, keep a durable progress record containing the exact base/head, agent
+  ownership and status, completed validation and review, long-running process identities, artefact
+  identities, failures, remaining authority gates and an exact resume sequence.
+- If agents repeatedly fail to respond or hit the same infrastructure timeout, stop retrying,
+  preserve the checkpoint and report the infrastructure blocker.
 
 When performance is part of the change, prefer deterministic work-count evidence over fragile wall
 clock assertions. Useful counts include:
