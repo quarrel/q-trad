@@ -84,7 +84,9 @@ def _economics(asset: str) -> ProductEconomics:
     )
 
 
-def _cost_state(*, current: str = "0", target: str = "2") -> ExpectedCostState:
+def _cost_state(
+    *, current: str = "0", target: str = "2", unit_amount: str = "1"
+) -> ExpectedCostState:
     delta = abs(Decimal(target) - Decimal(current))
     components: list[ComponentCost] = []
     for component in CostComponentKind:
@@ -110,9 +112,9 @@ def _cost_state(*, current: str = "0", target: str = "2") -> ExpectedCostState:
                 ComponentCost.supported(
                     component=component,
                     basis=CostBasis.PHYSICAL_DELTA,
-                    native_amount=Decimal("1"),
+                    native_amount=Decimal(unit_amount) * delta,
                     native_currency="AUD",
-                    reporting_amount=Decimal("1"),
+                    reporting_amount=Decimal(unit_amount) * delta,
                     reporting_currency="AUD",
                     conversion_rate=Decimal("1"),
                     conversion_source="fixture-fx",
@@ -165,17 +167,23 @@ def _risk_state():
 
 
 def _target_inputs(
-    *, alpha: tuple[Decimal, Decimal] = (Decimal("1"), Decimal("0"))
+    *,
+    alpha: tuple[Decimal, Decimal] = (Decimal("1"), Decimal("0")),
+    requested_target: tuple[Decimal, Decimal] = (Decimal("1"), Decimal("0")),
+    unit_amount: str = "1",
 ) -> ContinuousTargetInputs:
     return ContinuousTargetInputs(
         asset_order=ASSETS,
         current_position=(Decimal("0"), Decimal("0")),
-        requested_target=(Decimal("1"), Decimal("0")),
+        requested_target=requested_target,
         alpha_return=alpha,
         gross_sleeve_value=Decimal("100"),
         decision_time=NOW,
         economics={asset: _economics(asset) for asset in ASSETS},
-        expected_costs={asset: _cost_state(target="1") for asset in ASSETS},
+        expected_costs={
+            asset: _cost_state(target=str(requested_target[index]), unit_amount=unit_amount)
+            for index, asset in enumerate(ASSETS)
+        },
         risk=_risk_state(),
         solver_policy=DEFAULT_SOLVER_POLICY,
     )
@@ -219,26 +227,32 @@ def test_intents_net_opposing_changes_and_replay_are_ordered() -> None:
             key=intent_b.key,
             prior_quantity=Decimal("2"),
             next_quantity=Decimal("0"),
-            gross_forecast=Decimal("-1"),
+            gross_forecast=_forecast("-1"),
             decision_time=NOW,
             expiry_time=NOW + ONE_HORIZON,
             model_identity="model",
             risk_policy_identity="risk",
             cost_policy_identity="cost",
+            prior_state_identity=second.state_identity,
+            successor_state_identity=VirtualPosition(intent_b.key, Decimal("0")).state_identity,
+            internal_cross_quantity=Decimal("2"),
         ),
         VirtualPositionTransition(
             key=intent_a.key,
             prior_quantity=Decimal("0"),
             next_quantity=Decimal("2"),
-            gross_forecast=Decimal("1"),
+            gross_forecast=_forecast("1"),
             decision_time=NOW,
             expiry_time=NOW + ONE_HORIZON,
             model_identity="model",
             risk_policy_identity="risk",
             cost_policy_identity="cost",
+            prior_state_identity=first.state_identity,
+            successor_state_identity=VirtualPosition(intent_a.key, Decimal("2")).state_identity,
+            internal_cross_quantity=Decimal("2"),
         ),
     )
-    initial = {intent_b.key: VirtualPosition(intent_b.key, Decimal("2"))}
+    initial = {intent_a.key: first, intent_b.key: second}
     replay = replay_virtual_transitions(initial, transitions)
     reversed_replay = replay_virtual_transitions(initial, tuple(reversed(transitions)))
     assert replay.transition_count == 2
@@ -280,7 +294,10 @@ def test_solver_failure_has_no_partial_target(status: str) -> None:
 
 
 def test_zero_forecast_target_is_flat_and_missing_inputs_fail_closed() -> None:
-    inputs = _target_inputs(alpha=(Decimal("0"), Decimal("0")))
+    inputs = _target_inputs(
+        alpha=(Decimal("0"), Decimal("0")),
+        requested_target=(Decimal("0"), Decimal("0")),
+    )
     target = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (0.0, 0.0)))
     assert target.disposition is DecisionDisposition.ACCEPTED
     assert target.target_position == (Decimal("0"), Decimal("0"))
@@ -297,3 +314,73 @@ def test_zero_forecast_target_is_flat_and_missing_inputs_fail_closed() -> None:
             risk=_risk_state(),
             solver_policy=DEFAULT_SOLVER_POLICY,
         )
+
+
+def test_transition_binds_state_identity_and_zero_forecast() -> None:
+    key = _key("asset:a")
+    prior = VirtualPosition(key, Decimal("1"))
+    successor = VirtualPosition(key, Decimal("1"))
+    identity_mismatch = VirtualPositionTransition(
+        key=key,
+        prior_quantity=Decimal("1"),
+        next_quantity=Decimal("1"),
+        gross_forecast=_forecast("1"),
+        decision_time=NOW,
+        expiry_time=NOW + ONE_HORIZON,
+        model_identity="model",
+        risk_policy_identity="risk",
+        cost_policy_identity="cost",
+        prior_state_identity="0" * 64,
+        successor_state_identity=successor.state_identity,
+    )
+    with pytest.raises(ValueError, match="prior state identity"):
+        replay_virtual_transitions({key: prior}, (identity_mismatch,))
+    with pytest.raises(ValueError, match="zero forecast"):
+        VirtualPositionTransition(
+            key=key,
+            prior_quantity=Decimal("1"),
+            next_quantity=Decimal("1.0000000000000000001"),
+            gross_forecast=_forecast("0"),
+            decision_time=NOW,
+            expiry_time=NOW + ONE_HORIZON,
+            model_identity="model",
+            risk_policy_identity="risk",
+            cost_policy_identity="cost",
+            prior_state_identity=prior.state_identity,
+            successor_state_identity=VirtualPosition(
+                key, Decimal("1.0000000000000000001")
+            ).state_identity,
+        )
+
+
+def test_expected_cost_binding_and_final_target_mismatch_fail_closed() -> None:
+    inputs = _target_inputs()
+    mismatched_cost = inputs.expected_costs["asset:a"]
+    with pytest.raises(ValueError, match="requested target"):
+        ContinuousTargetInputs(
+            asset_order=inputs.asset_order,
+            current_position=inputs.current_position,
+            requested_target=(Decimal("2"), Decimal("0")),
+            alpha_return=inputs.alpha_return,
+            gross_sleeve_value=inputs.gross_sleeve_value,
+            decision_time=inputs.decision_time,
+            economics=inputs.economics,
+            expected_costs={**inputs.expected_costs, "asset:a": mismatched_cost},
+            risk=inputs.risk,
+            solver_policy=inputs.solver_policy,
+        )
+    blocked = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (2.0, 0.0)))
+    assert blocked.disposition is DecisionDisposition.BLOCKED
+    assert blocked.target_position == ()
+    assert "SOLVER_TARGET_COST_BINDING_MISMATCH" in blocked.reason_codes
+
+
+def test_decimal_component_money_is_reconciled_without_float_artifact() -> None:
+    inputs = _target_inputs(
+        requested_target=(Decimal("3"), Decimal("0")),
+        unit_amount="0.10",
+    )
+    target = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (3.0, 0.0)))
+    assert target.disposition is DecisionDisposition.ACCEPTED
+    assert target.expected_cost_reporting == Decimal("1.50")
+    assert target.expected_financing_reporting == Decimal("3")

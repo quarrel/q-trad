@@ -26,7 +26,7 @@ from qtrad.domain.economics import (
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
 
-PORTFOLIO_CONTRACT: Final = "qtrad-r3-one-horizon-portfolio-v1"
+PORTFOLIO_CONTRACT: Final = "qtrad-r3-one-horizon-portfolio-v2"
 TARGET_CONTRACT: Final = "qtrad-r3-continuous-target-v1"
 ONE_HORIZON: Final = timedelta(minutes=15)
 
@@ -97,9 +97,36 @@ def canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _require_identity(value: str, name: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a SHA-256 hex digest")
+
+
 def _identity(value: object) -> str:
     payload = value if isinstance(value, bytes) else canonical_json_bytes(value)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _position_identity(key: SleeveKey, quantity: Decimal) -> str:
+    return _identity(
+        {
+            "contract": PORTFOLIO_CONTRACT,
+            "key": key.as_json(),
+            "quantity": quantity,
+        }
+    )
+
+
+def _zero_forecast_blocks(prior: Decimal, proposed: Decimal) -> bool:
+    """Return whether a zero forecast would introduce new directional exposure."""
+    increases = abs(proposed) > abs(prior)
+    reverses = prior != 0 and proposed != 0 and (prior > 0) != (proposed > 0)
+    opens = prior == 0 and proposed != 0
+    return increases or reverses or opens
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -154,8 +181,9 @@ class VirtualPosition:
 
     def __post_init__(self) -> None:
         _decimal(self.quantity, "virtual quantity")
-        if self.state_identity and len(self.state_identity) != 64:
-            raise ValueError("virtual state identity must be a SHA-256 hex digest")
+        if not self.state_identity:
+            object.__setattr__(self, "state_identity", _position_identity(self.key, self.quantity))
+        _require_identity(self.state_identity, "virtual state identity")
 
     @property
     def semantic_identity(self) -> str:
@@ -253,16 +281,10 @@ def construct_horizon_intent(
     _decimal(requested_quantity, "intent requested quantity")
     forecast = gross_forecast.expected_return
     reasons = list(reason_codes)
-    if forecast == 0:
-        prior = position.quantity
-        proposed = requested_quantity
-        increases = abs(proposed) > abs(prior)
-        reverses = prior != 0 and proposed != 0 and (prior > 0) != (proposed > 0)
-        opens = prior == 0 and proposed != 0
-        if increases or reverses or opens:
-            requested_quantity = prior
-            if "ZERO_FORECAST_NEW_EXPOSURE_BLOCKED" not in reasons:
-                reasons.append("ZERO_FORECAST_NEW_EXPOSURE_BLOCKED")
+    if forecast == 0 and _zero_forecast_blocks(position.quantity, requested_quantity):
+        requested_quantity = position.quantity
+        if "ZERO_FORECAST_NEW_EXPOSURE_BLOCKED" not in reasons:
+            reasons.append("ZERO_FORECAST_NEW_EXPOSURE_BLOCKED")
     return HorizonIntent(
         key=position.key,
         prior_quantity=position.quantity,
@@ -433,22 +455,28 @@ class VirtualPositionTransition:
     key: SleeveKey
     prior_quantity: Decimal
     next_quantity: Decimal
-    gross_forecast: Decimal
+    gross_forecast: GrossForecast
     decision_time: datetime
     expiry_time: datetime
     model_identity: str
     risk_policy_identity: str
     cost_policy_identity: str
+    prior_state_identity: str
+    successor_state_identity: str
+    disposition: DecisionDisposition = DecisionDisposition.ACCEPTED
     accepted_physical_quantity: Decimal = Decimal("0")
     external_delta_share: Decimal = Decimal("0")
     internal_cross_quantity: Decimal = Decimal("0")
     reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.gross_forecast) is not GrossForecast:
+            raise ValueError("transition gross forecast must be a GrossForecast")
+        if type(self.disposition) is not DecisionDisposition:
+            raise ValueError("transition disposition must be explicit")
         for value, name in (
             (self.prior_quantity, "transition prior quantity"),
             (self.next_quantity, "transition next quantity"),
-            (self.gross_forecast, "transition gross forecast"),
             (self.accepted_physical_quantity, "transition accepted physical quantity"),
             (self.external_delta_share, "transition external delta share"),
         ):
@@ -458,6 +486,25 @@ class VirtualPositionTransition:
         require_utc(self.expiry_time, "transition expiry time")
         if self.expiry_time <= self.decision_time:
             raise ValueError("transition expiry must follow decision time")
+        if self.expiry_time - self.decision_time != self.gross_forecast.horizon:
+            raise ValueError("transition expiry must match gross forecast horizon")
+        if self.gross_forecast.horizon != self.key.horizon:
+            raise ValueError("transition forecast horizon must match sleeve horizon")
+        if self.gross_forecast.model_identity != self.model_identity:
+            raise ValueError("transition model identity must match gross forecast")
+        if self.gross_forecast.expected_return == 0 and _zero_forecast_blocks(
+            self.prior_quantity, self.next_quantity
+        ):
+            raise ValueError("zero forecast cannot create new exposure")
+        if abs(self.external_delta_share) + self.internal_cross_quantity != abs(
+            self.requested_delta
+        ):
+            raise ValueError("transition attribution does not reconcile requested delta")
+        _require_identity(self.prior_state_identity, "transition prior state identity")
+        _require_identity(self.successor_state_identity, "transition successor state identity")
+        expected_successor = _position_identity(self.key, self.next_quantity)
+        if self.successor_state_identity != expected_successor:
+            raise ValueError("transition successor state identity does not match next quantity")
         if (
             not self.model_identity
             or not self.risk_policy_identity
@@ -479,12 +526,20 @@ class VirtualPositionTransition:
             "key": self.key.as_json(),
             "prior_quantity": self.prior_quantity,
             "next_quantity": self.next_quantity,
-            "gross_forecast": self.gross_forecast,
+            "gross_forecast": {
+                "expected_return": self.gross_forecast.expected_return,
+                "horizon": self.gross_forecast.horizon,
+                "return_unit": self.gross_forecast.return_unit,
+                "model_identity": self.gross_forecast.model_identity,
+            },
             "decision_time": self.decision_time,
             "expiry_time": self.expiry_time,
             "model_identity": self.model_identity,
             "risk_policy_identity": self.risk_policy_identity,
             "cost_policy_identity": self.cost_policy_identity,
+            "prior_state_identity": self.prior_state_identity,
+            "successor_state_identity": self.successor_state_identity,
+            "disposition": self.disposition,
             "accepted_physical_quantity": self.accepted_physical_quantity,
             "external_delta_share": self.external_delta_share,
             "internal_cross_quantity": self.internal_cross_quantity,
@@ -504,6 +559,18 @@ class VirtualPositionTransition:
 class VirtualReplay:
     positions: tuple[VirtualPosition, ...]
     transition_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.transition_count) is not int or self.transition_count < 0:
+            raise ValueError("replay transition count must be non-negative")
+        if tuple(self.positions) != tuple(
+            sorted(self.positions, key=lambda item: item.key.canonical_tuple)
+        ):
+            raise ValueError("replay positions must be canonical")
+        if len({position.key for position in self.positions}) != len(self.positions):
+            raise ValueError("replay positions must have unique sleeves")
+        for position in self.positions:
+            _require_identity(position.state_identity, "replay position state identity")
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -547,12 +614,23 @@ def replay_virtual_transitions(
     for transition in ordered:
         previous = current.get(transition.key)
         previous_quantity = previous.quantity if previous is not None else Decimal("0")
+        previous_identity = (
+            previous.state_identity
+            if previous is not None
+            else _position_identity(transition.key, Decimal("0"))
+        )
         if previous_quantity != transition.prior_quantity:
             raise ValueError("virtual transition prior quantity does not match replay state")
+        if previous_identity != transition.prior_state_identity:
+            raise ValueError("virtual transition prior state identity does not match replay state")
+        if transition.gross_forecast.expected_return == 0 and _zero_forecast_blocks(
+            previous_quantity, transition.next_quantity
+        ):
+            raise ValueError("zero forecast cannot create new exposure during replay")
         current[transition.key] = VirtualPosition(
             transition.key,
             transition.next_quantity,
-            transition.semantic_identity,
+            transition.successor_state_identity,
         )
     return VirtualReplay(
         positions=tuple(
@@ -602,17 +680,24 @@ class ContinuousTargetInputs:
             raise ValueError("target economics keys do not match asset order")
         if set(self.expected_costs) != set(self.asset_order):
             raise ValueError("target expected-cost keys do not match asset order")
-        for asset in self.asset_order:
-            eligibility = self.economics[asset].eligibility(decision_time=self.decision_time)
+        for index, asset in enumerate(self.asset_order):
+            economics = self.economics[asset]
+            cost_state = self.expected_costs[asset]
+            eligibility = economics.eligibility(decision_time=self.decision_time)
             if not eligibility.eligible:
                 raise ValueError(f"asset {asset} economics are not eligible: {eligibility.reasons}")
-            if not self.expected_costs[asset].complete:
+            if not cost_state.complete:
                 raise ValueError(f"asset {asset} expected cost is incomplete")
-            if (
-                self.expected_costs[asset].reporting_currency
-                != self.economics[asset].reporting_currency
-            ):
+            if cost_state.reporting_currency != economics.reporting_currency:
                 raise ValueError(f"asset {asset} cost reporting currency mismatch")
+            if cost_state.decision_time != self.decision_time:
+                raise ValueError(f"asset {asset} expected cost decision time mismatch")
+            if cost_state.current_quantity != self.current_position[index]:
+                raise ValueError(f"asset {asset} expected cost current quantity mismatch")
+            if cost_state.target_quantity != self.requested_target[index]:
+                raise ValueError(f"asset {asset} expected cost requested target mismatch")
+            if cost_state.holding_interval != self.risk.horizon:
+                raise ValueError(f"asset {asset} expected cost holding interval mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,13 +818,9 @@ def independent_continuous_feasibility(
     for value, current, alpha in zip(
         values, inputs.current_position, inputs.alpha_return, strict=True
     ):
-        if alpha == 0:
-            if abs(value) > abs(current) + Decimal(str(tolerance)):
-                violations.append(abs(value) - abs(current))
-                reasons.append("ZERO_FORECAST_NEW_EXPOSURE")
-            if current != 0 and value != 0 and (current > 0) != (value > 0):
-                violations.append(abs(value))
-                reasons.append("ZERO_FORECAST_DIRECTION")
+        if alpha == 0 and _zero_forecast_blocks(current, value):
+            violations.append(abs(value - current))
+            reasons.append("ZERO_FORECAST_NEW_EXPOSURE")
     residual = max(violations, default=Decimal("0"))
     return not reasons, residual, tuple(dict.fromkeys(reasons))
 

@@ -209,6 +209,12 @@ def solve_continuous_target(
         return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID",))
     try:
         target = tuple(Decimal(str(float(value))) for value in values)
+        if target != inputs.requested_target:
+            return _blocked(
+                inputs,
+                status=status,
+                reasons=("SOLVER_TARGET_COST_BINDING_MISMATCH",),
+            )
         feasible, residual, reasons = independent_continuous_feasibility(target, inputs)
     except (ArithmeticError, RuntimeError, TypeError, ValueError, OverflowError):
         return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID",))
@@ -220,12 +226,20 @@ def solve_continuous_target(
     )
     expected_total = Decimal("0")
     expected_financing = Decimal("0")
-    transaction_rates, financing_rates = _cost_rates(inputs)
-    for index, (current, target_value) in enumerate(
-        zip(inputs.current_position, target, strict=True)
-    ):
-        expected_total += Decimal(str(transaction_rates[index])) * abs(target_value - current)
-        expected_financing += Decimal(str(financing_rates[index])) * abs(target_value)
+    for asset in inputs.asset_order:
+        state = inputs.expected_costs[asset]
+        financing_amount = Decimal("0")
+        for component in state.components:
+            if component.component is CostComponentKind.FINANCING:
+                if component.reporting_amount is None:
+                    return _blocked(
+                        inputs,
+                        status=status,
+                        reasons=("MISSING_FINANCING_REPORTING_AMOUNT",),
+                    )
+                financing_amount += component.reporting_amount
+        expected_financing += financing_amount
+        expected_total += state.require_total_reporting() - financing_amount
     return ContinuousTarget(
         asset_order=inputs.asset_order,
         current_position=inputs.current_position,
