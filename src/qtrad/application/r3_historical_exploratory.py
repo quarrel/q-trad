@@ -17,6 +17,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, cast
@@ -84,6 +85,47 @@ _CANDIDATE_IDS: Final = ("linear_ridge", "linear_zero_return", "nonlinear_huber"
 _GRAPH_CONTROL_IDS: Final = ("local_non_graph", "pooled_non_graph", "fixed_graph", "shuffled_graph")
 _CANDIDATE_KEYS: Final = frozenset({"id", "family", "degree", "enabled"})
 _GRAPH_KEYS: Final = frozenset({"id", "kind", "enabled"})
+_REPORT_TOP_LEVEL_KEYS: Final = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "config_semantic_identity",
+        "source_class",
+        "price_basis",
+        "evidence_class",
+        "claims",
+        "code_provenance",
+        "target_group_resolution",
+        "retained_parents",
+        "selection",
+        "loader_contract",
+        "scale_projection",
+        "observation_contract",
+        "economic",
+        "statistical",
+        "graph",
+        "work",
+        "result_classification",
+        "create_only_destination",
+        "no_post_result_expansion",
+    }
+)
+_SEMANTIC_EXCLUDED_KEYS: Final = frozenset(
+    {
+        "execution_receipt",
+        "role_binding",
+        "code_provenance",
+        "execution_provenance",
+        "measurement",
+        "path",
+        "paths",
+        "wrapper_sha256",
+        "module_sha256",
+        "python_version",
+        "closure_identity",
+        "physical_identity",
+    }
+)
 _CHILD_WRAPPER_NAMES: Final = (
     "selection",
     "consumed",
@@ -494,6 +536,1608 @@ class MicroRun:
 
     def canonical_json(self) -> str:
         return json.dumps(_thaw_value(self.report), sort_keys=True, indent=2) + "\n"
+
+
+def _semantic_projection(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, Any], value)
+        return {
+            str(key): _semantic_projection(item)
+            for key, item in mapping.items()
+            if str(key) not in _SEMANTIC_EXCLUDED_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        sequence = cast(Sequence[Any], value)
+        return [_semantic_projection(item) for item in sequence]
+    return value
+
+
+def _report_semantic_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the report's semantic identity projection, excluding physical provenance."""
+
+    semantic_fields = (
+        "contract",
+        "schema_version",
+        "config_semantic_identity",
+        "source_class",
+        "price_basis",
+        "evidence_class",
+        "claims",
+        "target_group_resolution",
+        "economic",
+        "statistical",
+        "graph",
+        "work",
+        "result_classification",
+        "no_post_result_expansion",
+    )
+    payload = {field: _semantic_projection(report[field]) for field in semantic_fields}
+    work = cast(dict[str, Any], payload["work"])
+    work.pop("measurement", None)
+    return payload
+
+
+def canonical_report_semantic_identity(report: Mapping[str, Any]) -> str:
+    """Hash the stable, machine-verifiable semantic report projection."""
+
+    payload = _report_semantic_payload(report)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _require_report_mapping(
+    report: Mapping[str, Any], section: str, required_keys: frozenset[str]
+) -> Mapping[str, Any]:
+    value = report[section]
+    if not isinstance(value, Mapping):
+        raise FreezeError(f"renderer report section {section} must be an object")
+    mapping = cast(Mapping[str, Any], value)
+    missing = required_keys - set(mapping)
+    if missing:
+        raise FreezeError(
+            f"renderer report section {section} is missing keys: {', '.join(sorted(missing))}"
+        )
+    return mapping
+
+
+def _require_report_sequence(report: Mapping[str, Any], section: str) -> Sequence[Any]:
+    value = report[section]
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise FreezeError(f"renderer report section {section} must be an array")
+    return cast(Sequence[Any], value)
+
+
+def _require_nested_mapping(
+    value: Any, label: str, required_keys: frozenset[str] = frozenset()
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise FreezeError(f"renderer {label} must be an object")
+    mapping = cast(Mapping[str, Any], value)
+    missing = required_keys - set(mapping)
+    if missing:
+        raise FreezeError(f"renderer {label} is missing keys: {', '.join(sorted(missing))}")
+    return mapping
+
+
+def _require_nested_sequence(value: Any, label: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise FreezeError(f"renderer {label} must be an array")
+    return cast(Sequence[Any], value)
+
+
+_ECONOMIC_VIEW_KEYS: Final = frozenset(
+    {
+        "gross_total",
+        "gross_mean",
+        "turnover",
+        "break_even_cost",
+        "all_in_cost_sensitivity",
+        "position_trace",
+    }
+)
+_ECONOMIC_SENSITIVITY_KEYS: Final = frozenset(
+    {"cost", "unit", "net_mean", "break_even_cost", "label"}
+)
+_ECONOMIC_POSITION_KEYS: Final = frozenset(
+    {"target_id", "decision_time", "target_position", "target_position_change", "realised_gross"}
+)
+
+
+def _validate_economic_view(value: Any, label: str) -> Mapping[str, Any]:
+    view = _require_nested_mapping(value, label, _ECONOMIC_VIEW_KEYS)
+    sensitivity = _require_nested_sequence(
+        view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
+    )
+    for index, item in enumerate(sensitivity):
+        _require_nested_mapping(
+            item,
+            f"{label}.all_in_cost_sensitivity[{index}]",
+            _ECONOMIC_SENSITIVITY_KEYS,
+        )
+    positions = _require_nested_sequence(view["position_trace"], f"{label}.position_trace")
+    for index, item in enumerate(positions):
+        _require_nested_mapping(item, f"{label}.position_trace[{index}]", _ECONOMIC_POSITION_KEYS)
+    return view
+
+
+_REPORT_STATUS_VALUES: Final = frozenset({"FAILED", "INCONCLUSIVE", "NEGATIVE"})
+_REPORT_METRIC_KEYS: Final = frozenset(
+    {
+        "id",
+        "status",
+        "mse",
+        "rank_correlation",
+        "coverage",
+        "support",
+        "prediction_trace",
+        "prediction_mask",
+        "fit_executions",
+        "training_rows",
+        "fit_evaluation_time",
+        "execution_receipt",
+    }
+)
+_REPORT_OOF_KEYS: Final = frozenset(
+    {
+        "formulation",
+        "ordering",
+        "decision_identity",
+        "rows",
+        "first_timestamp",
+        "last_timestamp",
+        "first_fit_evaluation_time",
+        "first_fit_prediction_mask",
+        "mse",
+        "causal",
+        "folds",
+        "purge_embargo",
+        "rank_correlation",
+        "coverage",
+        "support",
+        "prediction_mask",
+    }
+)
+
+
+def _strict_mapping(
+    value: Any, label: str, expected: frozenset[str] | None = None
+) -> Mapping[str, Any]:
+    mapping = _require_nested_mapping(value, label)
+    if expected is not None:
+        keys = frozenset(mapping)
+        if keys != expected:
+            missing = sorted(expected - keys)
+            unknown = sorted(keys - expected)
+            details = [
+                *(f"missing {key}" for key in missing),
+                *(f"unknown {key}" for key in unknown),
+            ]
+            raise FreezeError(f"renderer {label} schema mismatch: {', '.join(details)}")
+    if any(not key for key in mapping):
+        raise FreezeError(f"renderer {label} has an invalid key")
+    return mapping
+
+
+def _strict_sequence(value: Any, label: str, *, length: int | None = None) -> Sequence[Any]:
+    sequence = _require_nested_sequence(value, label)
+    if length is not None and len(sequence) != length:
+        raise FreezeError(f"renderer {label} must contain exactly {length} items")
+    return sequence
+
+
+def _strict_text(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise FreezeError(f"renderer {label} must be a non-empty string")
+    return value
+
+
+def _strict_hash(value: Any, label: str) -> str:
+    text = _strict_text(value, label)
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise FreezeError(f"renderer {label} must be a lowercase SHA-256 hex digest")
+    return text
+
+
+def _strict_bool(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise FreezeError(f"renderer {label} must be a boolean")
+    return value
+
+
+def _strict_integer(value: Any, label: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FreezeError(f"renderer {label} must be an integer")
+    if minimum is not None and value < minimum:
+        raise FreezeError(f"renderer {label} is below its minimum")
+    return value
+
+
+def _strict_number(value: Any, label: str, *, nullable: bool = False) -> float | int | None:
+    if value is None and nullable:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise FreezeError(f"renderer {label} must be a finite number")
+    return value
+
+
+def _strict_role_binding(value: Any, label: str) -> Mapping[str, Any]:
+    binding = _strict_mapping(
+        value,
+        label,
+        frozenset({"dataset_id", "config_id", "wrapper_sha256"}),
+    )
+    _strict_hash(binding["dataset_id"], f"{label}.dataset_id")
+    _strict_hash(binding["config_id"], f"{label}.config_id")
+    _strict_hash(binding["wrapper_sha256"], f"{label}.wrapper_sha256")
+    return binding
+
+
+def _strict_receipt(value: Any, label: str, expected: frozenset[str]) -> Mapping[str, Any]:
+    receipt = _strict_mapping(value, label)
+    keys = frozenset(receipt)
+    optional = frozenset({"path", "wrapper_sha256", "module_sha256", "role_binding"})
+    if not expected <= keys or not keys <= expected | optional:
+        missing = sorted(expected - keys)
+        unknown = sorted(keys - expected - optional)
+        details = [*(f"missing {key}" for key in missing), *(f"unknown {key}" for key in unknown)]
+        raise FreezeError(f"renderer {label} schema mismatch: {', '.join(details)}")
+    for key, item in receipt.items():
+        if key == "role_binding":
+            if item is not None:
+                _strict_role_binding(item, f"{label}.role_binding")
+        elif key.endswith("_sha256"):
+            _strict_hash(item, f"{label}.{key}")
+        elif isinstance(item, bool):
+            _strict_bool(item, f"{label}.{key}")
+        elif isinstance(item, int):
+            _strict_integer(item, f"{label}.{key}", minimum=0)
+        else:
+            _strict_text(item, f"{label}.{key}")
+    return receipt
+
+
+def _strict_metric(
+    value: Any,
+    label: str,
+    receipt_keys: frozenset[str],
+    metric_keys: frozenset[str] = _REPORT_METRIC_KEYS,
+) -> Mapping[str, Any]:
+    metric = _strict_mapping(value, label, metric_keys)
+    _strict_text(metric["id"], f"{label}.id")
+    if metric["status"] not in _REPORT_STATUS_VALUES:
+        raise FreezeError(f"renderer {label}.status is not a frozen status")
+    _strict_number(metric["mse"], f"{label}.mse", nullable=True)
+    _strict_number(metric["rank_correlation"], f"{label}.rank_correlation", nullable=True)
+    coverage = _strict_number(metric["coverage"], f"{label}.coverage")
+    if coverage is None or not 0.0 <= float(coverage) <= 1.0:
+        raise FreezeError(f"renderer {label}.coverage is outside [0, 1]")
+    _strict_integer(metric["support"], f"{label}.support", minimum=0)
+    trace = _strict_sequence(metric["prediction_trace"], f"{label}.prediction_trace")
+    mask = _strict_sequence(metric["prediction_mask"], f"{label}.prediction_mask")
+    if len(mask) != len(trace) or any(not isinstance(item, bool) for item in mask):
+        raise FreezeError(f"renderer {label}.prediction_mask is not aligned booleans")
+    for index, (item, selected) in enumerate(zip(trace, mask, strict=True)):
+        if selected:
+            _strict_number(item, f"{label}.prediction_trace[{index}]")
+        elif item is not None:
+            raise FreezeError(
+                f"renderer {label}.prediction_trace[{index}] must be null when mask is false"
+            )
+    _strict_integer(metric["fit_executions"], f"{label}.fit_executions", minimum=0)
+    if "training_rows" in metric:
+        _strict_integer(metric["training_rows"], f"{label}.training_rows", minimum=0)
+    if "fit_evaluation_time" in metric and metric["fit_evaluation_time"] is not None:
+        _strict_text(metric["fit_evaluation_time"], f"{label}.fit_evaluation_time")
+    _strict_receipt(metric["execution_receipt"], f"{label}.execution_receipt", receipt_keys)
+    return metric
+
+
+def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapping[str, Any]:
+    configuration = not root and isinstance(value, Mapping) and "trace_id" in value
+    root_keys = frozenset(
+        {
+            "trace_id",
+            "physical_turnover_definition",
+            "asset",
+            "horizon",
+            "period",
+            "gross_total",
+            "gross_mean",
+            "turnover",
+            "break_even_cost",
+            "all_in_cost_sensitivity",
+            "position_trace",
+            "configurations",
+        }
+    )
+    keys = (
+        root_keys
+        if root
+        else root_keys - {"configurations"}
+        if configuration
+        else _ECONOMIC_VIEW_KEYS
+    )
+    view = _strict_mapping(value, label, keys)
+    for key in ("gross_total", "gross_mean", "turnover"):
+        _strict_number(view[key], f"{label}.{key}")
+    if view["turnover"] < 0:
+        raise FreezeError(f"renderer {label}.turnover must be non-negative")
+    _strict_number(view["break_even_cost"], f"{label}.break_even_cost", nullable=True)
+    if view["break_even_cost"] is not None and view["break_even_cost"] < 0:
+        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
+    sensitivity = _strict_sequence(
+        view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
+    )
+    for index, item in enumerate(sensitivity):
+        entry = _strict_mapping(
+            item, f"{label}.all_in_cost_sensitivity[{index}]", _ECONOMIC_SENSITIVITY_KEYS
+        )
+        _strict_number(entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost")
+        if entry["cost"] < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].cost must be non-negative"
+            )
+        _strict_text(entry["unit"], f"{label}.all_in_cost_sensitivity[{index}].unit")
+        _strict_number(
+            entry["net_mean"], f"{label}.all_in_cost_sensitivity[{index}].net_mean", nullable=True
+        )
+        _strict_number(
+            entry["break_even_cost"],
+            f"{label}.all_in_cost_sensitivity[{index}].break_even_cost",
+            nullable=True,
+        )
+        if entry["break_even_cost"] is not None and entry["break_even_cost"] < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "must be non-negative"
+            )
+        _strict_text(entry["label"], f"{label}.all_in_cost_sensitivity[{index}].label")
+    positions = _strict_sequence(view["position_trace"], f"{label}.position_trace")
+    for index, item in enumerate(positions):
+        entry = _strict_mapping(item, f"{label}.position_trace[{index}]", _ECONOMIC_POSITION_KEYS)
+        _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id")
+        _strict_text(entry["decision_time"], f"{label}.position_trace[{index}].decision_time")
+        for key in ("target_position", "target_position_change", "realised_gross"):
+            _strict_number(entry[key], f"{label}.position_trace[{index}].{key}")
+    if root or configuration:
+        _strict_text(view["trace_id"], f"{label}.trace_id")
+        _strict_text(view["physical_turnover_definition"], f"{label}.physical_turnover_definition")
+        for dimension in ("asset", "horizon", "period"):
+            groups = _strict_mapping(view[dimension], f"{label}.{dimension}")
+            if not groups:
+                raise FreezeError(f"renderer {label}.{dimension} must not be empty")
+            for name, child in groups.items():
+                _strict_economic_view(child, f"{label}.{dimension}.{name}")
+    if root:
+        configurations = _strict_mapping(view["configurations"], f"{label}.configurations")
+        if not configurations:
+            raise FreezeError(f"renderer {label}.configurations must not be empty")
+        for name, child in configurations.items():
+            _strict_economic_view(child, f"{label}.configurations.{name}")
+    return view
+
+
+_DECIMAL_QUANTUM = Decimal("0.000000000001")
+
+
+def _report_decimal(value: Any, label: str, *, nullable: bool = False) -> Decimal | None:
+    if value is None:
+        if nullable:
+            return None
+        raise FreezeError(f"{label} must be a finite number")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise FreezeError(f"{label} must be a numeric scalar")
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError) as exc:
+        raise FreezeError(f"{label} must be a finite number") from exc
+    if not parsed.is_finite():
+        raise FreezeError(f"{label} must be a finite number")
+    return parsed
+
+
+def _decimal_matches(actual: Decimal | None, expected: Decimal | None) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return actual == expected
+
+
+def _qdecimal(value: Decimal) -> Decimal:
+    return value.quantize(_DECIMAL_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+
+def _canonical_position_predecessors(
+    trace: Sequence[Any], label: str
+) -> dict[tuple[str, str, str], Decimal]:
+    entries = [
+        _strict_mapping(item, f"{label}.position_trace[{index}]")
+        for index, item in enumerate(trace)
+    ]
+    identities = [
+        (
+            _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id"),
+            _strict_text(entry["decision_time"], f"{label}.position_trace[{index}].decision_time"),
+        )
+        for index, entry in enumerate(entries)
+    ]
+    ordered_indices = sorted(
+        range(len(entries)), key=lambda index: (identities[index][1], identities[index][0])
+    )
+    prior_positions: dict[str, Decimal] = {}
+    predecessors: dict[tuple[str, str, str], Decimal] = {}
+    for index in ordered_indices:
+        entry = entries[index]
+        target_id, decision_time = identities[index]
+        position = _report_decimal(
+            entry["target_position"], f"{label}.position_trace[{index}].target_position"
+        )
+        assert position is not None
+        identity = (label, target_id, decision_time)
+        if identity in predecessors:
+            raise FreezeError(f"renderer {label}.position_trace has duplicate identity")
+        predecessors[identity] = prior_positions.get(target_id, Decimal("0"))
+        prior_positions[target_id] = position
+    return predecessors
+
+
+def _reconcile_economic_view(
+    view: Mapping[str, Any],
+    label: str,
+    cost_grid: Sequence[Any] | None,
+    canonical_predecessors: Mapping[tuple[str, str, str], Decimal],
+    canonical_scope: str,
+) -> None:
+    trace = _strict_sequence(view["position_trace"], f"{label}.position_trace")
+    if not trace:
+        raise FreezeError(f"{label}.position_trace must not be empty")
+    gross_total = Decimal("0")
+    turnover = Decimal("0")
+    entries = [
+        _strict_mapping(item, f"{label}.position_trace[{index}]")
+        for index, item in enumerate(trace)
+    ]
+    for index, entry in enumerate(entries):
+        target_id = _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id")
+        decision_time = _strict_text(
+            entry["decision_time"], f"{label}.position_trace[{index}].decision_time"
+        )
+        position = _report_decimal(
+            entry["target_position"], f"{label}.position_trace[{index}].target_position"
+        )
+        realised = _report_decimal(
+            entry["realised_gross"], f"{label}.position_trace[{index}].realised_gross"
+        )
+        change = _report_decimal(
+            entry["target_position_change"],
+            f"{label}.position_trace[{index}].target_position_change",
+        )
+        assert position is not None and realised is not None and change is not None
+        identity = (canonical_scope, target_id, decision_time)
+        if identity not in canonical_predecessors:
+            raise FreezeError(
+                f"renderer {label}.position_trace identity is absent from canonical root trace"
+            )
+        expected_change = _qdecimal(position - canonical_predecessors[identity])
+        if change != expected_change:
+            raise FreezeError(f"renderer {label}.position_trace[{index}] change does not reconcile")
+        gross_total += realised
+        turnover += abs(change)
+    count = Decimal(len(trace))
+    expected_total = _qdecimal(gross_total)
+    expected_mean = _qdecimal(gross_total / count)
+    expected_turnover = _qdecimal(turnover)
+    expected_break_even = _qdecimal(gross_total / turnover) if turnover else None
+    actual_total = _report_decimal(view["gross_total"], f"{label}.gross_total")
+    actual_mean = _report_decimal(view["gross_mean"], f"{label}.gross_mean")
+    actual_turnover = _report_decimal(view["turnover"], f"{label}.turnover")
+    actual_break_even = _report_decimal(
+        view["break_even_cost"], f"{label}.break_even_cost", nullable=True
+    )
+    if not (
+        _decimal_matches(actual_total, expected_total)
+        and _decimal_matches(actual_mean, expected_mean)
+        and _decimal_matches(actual_turnover, expected_turnover)
+    ):
+        raise FreezeError(f"renderer {label} economic totals do not reconcile with position trace")
+    if actual_turnover is not None and actual_turnover < 0:
+        raise FreezeError(f"renderer {label}.turnover must be non-negative")
+    if actual_break_even is not None and actual_break_even < 0:
+        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
+    if not _decimal_matches(actual_break_even, expected_break_even):
+        raise FreezeError(
+            f"renderer {label}.break_even_cost does not reconcile with position trace"
+        )
+    sensitivity = _strict_sequence(
+        view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
+    )
+    if cost_grid is not None and len(sensitivity) != len(cost_grid):
+        raise FreezeError(f"renderer {label} cost-grid cardinality mismatch")
+    for index, item in enumerate(sensitivity):
+        entry = _strict_mapping(item, f"{label}.all_in_cost_sensitivity[{index}]")
+        if cost_grid is not None:
+            expected_point = _strict_mapping(cost_grid[index], f"config.cost_grid[{index}]")
+            expected_cost = _qdecimal(Decimal(str(expected_point["value"])))
+            actual_cost = _report_decimal(
+                entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost"
+            )
+            if actual_cost != expected_cost or entry["unit"] != expected_point["unit"]:
+                raise FreezeError(f"renderer {label} cost-grid point differs from frozen grid")
+            if entry["label"] != "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE":
+                raise FreezeError(f"renderer {label} cost-grid label is not frozen")
+        cost = _report_decimal(entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost")
+        net_mean = _report_decimal(
+            entry["net_mean"], f"{label}.all_in_cost_sensitivity[{index}].net_mean", nullable=True
+        )
+        entry_break_even = _report_decimal(
+            entry["break_even_cost"],
+            f"{label}.all_in_cost_sensitivity[{index}].break_even_cost",
+            nullable=True,
+        )
+        assert cost is not None
+        expected_net_mean = _qdecimal(gross_total / count - cost * turnover / count)
+        if cost < 0 or net_mean is None or not _decimal_matches(net_mean, expected_net_mean):
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}] does not reconcile"
+            )
+        if entry_break_even is not None and entry_break_even < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "must be non-negative"
+            )
+        if not _decimal_matches(entry_break_even, expected_break_even):
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "does not reconcile"
+            )
+
+
+def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
+    config_sections = {
+        "target_group_resolution": "target_group_resolution",
+        "loader_contract": "retained_loader",
+        "scale_projection": "scale_projection",
+        "observation_contract": "observation_contract",
+    }
+    for section, config_section in config_sections.items():
+        report_json = json.dumps(
+            _thaw_value(report[section]), sort_keys=True, separators=(",", ":")
+        )
+        config_json = json.dumps(
+            _thaw_value(config.document[config_section]), sort_keys=True, separators=(",", ":")
+        )
+        if report_json != config_json:
+            raise FreezeError(f"renderer {section} differs from the frozen canonical schema")
+    claims = _strict_sequence(report["claims"], "claims", length=len(_NON_EXECUTABLE_CLAIMS))
+    if tuple(claims) != _NON_EXECUTABLE_CLAIMS:
+        raise FreezeError("renderer claims differ from the frozen canonical claim set")
+    provenance = _strict_mapping(
+        report["code_provenance"],
+        "code_provenance",
+        frozenset({"application_contract", "module_sha256", "python_version"}),
+    )
+    for key, item in provenance.items():
+        if key == "module_sha256":
+            _strict_hash(item, "code_provenance.module_sha256")
+        else:
+            _strict_text(item, f"code_provenance.{key}")
+    retained = _strict_mapping(
+        report["retained_parents"],
+        "retained_parents",
+        frozenset(
+            {
+                "paths",
+                "identities",
+                "role_bindings",
+                "terminal_authentication",
+                "authentication_performed",
+                "outcome_decode_performed",
+            }
+        ),
+    )
+    path_keys = frozenset(
+        {
+            "terminal_report",
+            "terminal_approval",
+            "selection",
+            "consumed",
+            "local_forecast",
+            "pooled_forecast",
+            "zero_forecast",
+            "outcome_evidence",
+        }
+    )
+    identity_keys = frozenset(_RETAINED_IDENTITY_KEYS)
+    _strict_mapping(retained["paths"], "retained_parents.paths", path_keys)
+    _strict_mapping(retained["identities"], "retained_parents.identities", identity_keys)
+    _strict_mapping(retained["role_bindings"], "retained_parents.role_bindings")
+    _strict_mapping(
+        retained["terminal_authentication"],
+        "retained_parents.terminal_authentication",
+        frozenset(
+            {
+                "approval_path",
+                "approval_sha256",
+                "contract",
+                "report_byte_size",
+                "report_path",
+                "report_sha256",
+                "state",
+                "verdict",
+            }
+        ),
+    )
+    for key in ("authentication_performed", "outcome_decode_performed"):
+        _strict_bool(retained[key], f"retained_parents.{key}")
+    for key, value in retained["paths"].items():
+        _strict_text(value, f"retained_parents.paths.{key}")
+    for key, value in retained["identities"].items():
+        if key.endswith("_sha256") or key.endswith("_manifest_id") or key.endswith("_marker_id"):
+            _strict_hash(value, f"retained_parents.identities.{key}")
+        else:
+            _strict_text(value, f"retained_parents.identities.{key}")
+    terminal_authentication = retained["terminal_authentication"]
+    for key in ("approval_sha256", "report_sha256"):
+        _strict_hash(
+            terminal_authentication[key], f"retained_parents.terminal_authentication.{key}"
+        )
+    _strict_integer(
+        terminal_authentication["report_byte_size"],
+        "retained_parents.terminal_authentication.report_byte_size",
+        minimum=0,
+    )
+    expected_parent = _strict_mapping(
+        config.document["retained_parents"], "config.retained_parents"
+    )
+    for key in identity_keys:
+        if retained["identities"][key] != expected_parent[key]:
+            raise FreezeError(f"renderer retained identity {key} differs from frozen parent")
+    expected_terminal = _strict_mapping(
+        config.document["terminal_authentication"], "config.terminal_authentication"
+    )
+    if json.dumps(
+        _thaw_value(terminal_authentication), sort_keys=True, separators=(",", ":")
+    ) != json.dumps(_thaw_value(expected_terminal), sort_keys=True, separators=(",", ":")):
+        raise FreezeError("renderer terminal authentication differs from frozen authority")
+    role_bindings = retained["role_bindings"]
+    identity_bindings = config.document["retained_loader"]["identity_bindings"]
+    if role_bindings:
+        expected_roles = frozenset({"LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN"})
+        if frozenset(role_bindings) != expected_roles:
+            raise FreezeError("renderer retained role bindings differ from frozen role set")
+        expected_datasets = identity_bindings["dataset_ids"]
+        expected_configs = identity_bindings["config_ids"]
+        for role in sorted(expected_roles):
+            binding = _strict_role_binding(
+                role_bindings[role], f"retained_parents.role_bindings.{role}"
+            )
+            expected_wrappers = identity_bindings.get("wrapper_sha256s", {})
+            if (
+                binding["dataset_id"] != expected_datasets[role]
+                or binding["config_id"] != expected_configs[role]
+                or (
+                    role in expected_wrappers
+                    and binding["wrapper_sha256"] != expected_wrappers[role]
+                )
+            ):
+                raise FreezeError(
+                    f"renderer retained role binding {role} differs from frozen identity"
+                )
+    selection_keys = frozenset(
+        {
+            "outcome_blind",
+            "selected_decision_times",
+            "selected_rows",
+            "selected_bytes",
+            "selected_parts",
+            "source_rows",
+            "source_bytes",
+            "source_parts",
+            "complete_groups",
+            "target_count",
+            "stop_state",
+        }
+    )
+    if "stop_reason" in report["selection"]:
+        selection_keys |= frozenset({"stop_reason"})
+    selection = _strict_mapping(report["selection"], "selection", selection_keys)
+    policy = _strict_mapping(
+        config.document["retained_loader"]["selection_policy"], "config.selection_policy"
+    )
+    if selection["outcome_blind"] is not policy["outcome_blind"]:
+        raise FreezeError("renderer selection outcome_blind differs from frozen policy")
+    required_target_ids = _strict_sequence(
+        policy["required_target_ids"], "config.selection_policy.required_target_ids"
+    )
+    expected_target_count = len(required_target_ids)
+    expected_groups = _strict_integer(
+        policy["n_complete_decision_groups"],
+        "config.selection_policy.n_complete_decision_groups",
+        minimum=1,
+    )
+    analysis_bound = _strict_integer(
+        policy["analysis_row_bound"], "config.selection_policy.analysis_row_bound", minimum=1
+    )
+    for key in (
+        "selected_rows",
+        "selected_bytes",
+        "selected_parts",
+        "source_rows",
+        "source_bytes",
+        "source_parts",
+        "complete_groups",
+        "target_count",
+    ):
+        _strict_integer(selection[key], f"selection.{key}", minimum=0)
+    if (
+        selection["target_count"] != expected_target_count
+        or selection["complete_groups"] != expected_groups
+    ):
+        raise FreezeError("renderer selection counts differ from frozen policy")
+    if (
+        selection["selected_rows"] != expected_groups * expected_target_count
+        or selection["selected_rows"] != analysis_bound
+    ):
+        raise FreezeError("renderer selected rows do not reconcile with frozen policy")
+    times = _strict_sequence(
+        selection["selected_decision_times"], "selection.selected_decision_times"
+    )
+    for index, value in enumerate(times):
+        _strict_text(value, f"selection.selected_decision_times[{index}]")
+    if (
+        len(times) != expected_groups
+        or len(set(times)) != len(times)
+        or list(times) != sorted(times)
+    ):
+        raise FreezeError("renderer selected decision times do not reconcile with frozen groups")
+    _strict_text(selection["stop_state"], "selection.stop_state")
+    allowed_stop_states = frozenset(
+        {
+            "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF",
+            "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+            "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND",
+        }
+    )
+    if selection["stop_state"] not in allowed_stop_states:
+        raise FreezeError("renderer selection.stop_state is not a truthful frozen state")
+    if "stop_reason" in selection:
+        _strict_text(selection["stop_reason"], "selection.stop_reason")
+        stop_reason_by_state = {
+            "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND": "EARLIEST_COMPLETE_GROUP_BOUND",
+        }
+        if selection["stop_reason"] != stop_reason_by_state[selection["stop_state"]]:
+            raise FreezeError("renderer selection.stop_reason does not match stop_state")
+    economic = _strict_economic_view(report["economic"], "economic", root=True)
+    if economic["physical_turnover_definition"] != config.document["turnover_definition"]:
+        raise FreezeError("renderer economic turnover definition differs from frozen contract")
+    expected_assets = frozenset(config.document["target_group_resolution"]["target_ids"])
+    expected_periods = frozenset({"period-0", "period-1", "period-2"})
+    root_trace = _strict_sequence(economic["position_trace"], "economic.position_trace")
+    if len(root_trace) != selection["selected_rows"]:
+        raise FreezeError("renderer economic root trace does not reconcile with selection rows")
+    canonical_predecessors = _canonical_position_predecessors(root_trace, "economic")
+    root_decisions = frozenset(item["decision_time"] for item in root_trace)
+    configurations = _strict_mapping(economic["configurations"], "economic.configurations")
+    for dimension, expected_keys in (
+        ("asset", expected_assets),
+        ("horizon", frozenset({str(config.document["primary_horizon_minutes"])})),
+        ("period", expected_periods),
+    ):
+        groups = _strict_mapping(economic[dimension], f"economic.{dimension}")
+        if frozenset(groups) != expected_keys:
+            raise FreezeError(f"renderer economic.{dimension} keys differ from frozen dimensions")
+        expected_count = {
+            "asset": len(root_trace) // len(expected_assets),
+            "horizon": len(root_trace),
+            "period": len(root_trace) // len(expected_periods),
+        }[dimension]
+        for name, child in groups.items():
+            child_trace = _strict_sequence(
+                child["position_trace"], f"economic.{dimension}.{name}.position_trace"
+            )
+            if len(child_trace) != expected_count:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} trace cardinality differs from domain"
+                )
+            child_decisions = frozenset(item["decision_time"] for item in child_trace)
+            if dimension == "period":
+                period_index = int(name.rsplit("-", 1)[1])
+                expected_decisions = frozenset({sorted(root_decisions)[period_index]})
+            else:
+                expected_decisions = root_decisions
+            if child_decisions != expected_decisions:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} decision-time domain differs from root"
+                )
+            child_targets = frozenset(item["target_id"] for item in child_trace)
+            if dimension == "asset" and child_targets != frozenset({name}):
+                raise FreezeError(
+                    f"renderer economic.asset.{name} target domain differs from asset key"
+                )
+            if dimension in {"horizon", "period"} and child_targets != expected_assets:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} target domain differs "
+                    "from frozen targets"
+                )
+    expected_configurations = frozenset(
+        {
+            "linear_ridge",
+            "linear_zero_return",
+            "nonlinear_huber",
+            "zero_return",
+            "local_ridge",
+            "pooled_local_ridge",
+            "local_non_graph",
+            "pooled_non_graph",
+            "fixed_graph",
+            "shuffled_graph",
+            "tiny_learned_graph",
+        }
+    )
+    if frozenset(configurations) != expected_configurations:
+        raise FreezeError("renderer economic.configurations differ from frozen configuration IDs")
+    expected_sensitivity_count = len(config.document["cost_grid"])
+    for label, view in configurations.items():
+        sensitivity = view["all_in_cost_sensitivity"]
+        if len(sensitivity) != expected_sensitivity_count:
+            raise FreezeError(
+                f"renderer economic.configurations.{label} cost grid cardinality mismatch"
+            )
+        if len(view["position_trace"]) != selection["selected_rows"]:
+            raise FreezeError(
+                f"renderer economic.configurations.{label} position trace cardinality mismatch"
+            )
+    _reconcile_economic_view(
+        economic,
+        "economic",
+        config.document["cost_grid"],
+        canonical_predecessors,
+        "economic",
+    )
+    for dimension in ("asset", "horizon", "period"):
+        for name, child in economic[dimension].items():
+            _reconcile_economic_view(
+                child,
+                f"economic.{dimension}.{name}",
+                config.document["cost_grid"],
+                canonical_predecessors,
+                "economic",
+            )
+    for name, configuration in configurations.items():
+        configuration_label = f"economic.configurations.{name}"
+        configuration_predecessors = _canonical_position_predecessors(
+            _strict_sequence(
+                configuration["position_trace"], f"{configuration_label}.position_trace"
+            ),
+            configuration_label,
+        )
+        _reconcile_economic_view(
+            configuration,
+            configuration_label,
+            config.document["cost_grid"],
+            configuration_predecessors,
+            configuration_label,
+        )
+        for dimension in ("asset", "horizon", "period"):
+            groups = _strict_mapping(configuration[dimension], f"{configuration_label}.{dimension}")
+            for group_name, subgroup in groups.items():
+                _reconcile_economic_view(
+                    subgroup,
+                    f"{configuration_label}.{dimension}.{group_name}",
+                    config.document["cost_grid"],
+                    configuration_predecessors,
+                    configuration_label,
+                )
+    statistical = _strict_mapping(
+        report["statistical"],
+        "statistical",
+        frozenset(
+            {
+                "oof",
+                "candidates",
+                "simple_controls",
+                "negative_failed_inconclusive_rendered",
+                "post_result_selection",
+            }
+        ),
+    )
+    oof = _strict_mapping(statistical["oof"], "statistical.oof", _REPORT_OOF_KEYS)
+    for key in (
+        "formulation",
+        "ordering",
+        "decision_identity",
+        "first_timestamp",
+        "last_timestamp",
+    ):
+        _strict_text(oof[key], f"statistical.oof.{key}")
+    if oof["first_fit_evaluation_time"] is not None:
+        _strict_text(oof["first_fit_evaluation_time"], "statistical.oof.first_fit_evaluation_time")
+    rows = _strict_integer(oof["rows"], "statistical.oof.rows", minimum=1)
+    first_fit_mask = _strict_sequence(
+        oof["first_fit_prediction_mask"], "statistical.oof.first_fit_prediction_mask", length=rows
+    )
+    if any(not isinstance(item, bool) for item in first_fit_mask):
+        raise FreezeError(
+            "renderer statistical.oof.first_fit_prediction_mask must contain booleans"
+        )
+    _strict_number(oof["mse"], "statistical.oof.mse")
+    _strict_bool(oof["causal"], "statistical.oof.causal")
+    _strict_number(oof["rank_correlation"], "statistical.oof.rank_correlation", nullable=True)
+    _strict_number(oof["coverage"], "statistical.oof.coverage")
+    _strict_integer(oof["support"], "statistical.oof.support", minimum=0)
+    prediction_mask = _strict_sequence(
+        oof["prediction_mask"], "statistical.oof.prediction_mask", length=rows
+    )
+    if any(not isinstance(item, bool) for item in prediction_mask):
+        raise FreezeError("renderer statistical.oof.prediction_mask must contain booleans")
+    oof_support = sum(prediction_mask)
+    if oof["support"] != oof_support:
+        raise FreezeError("renderer statistical.oof support does not reconcile with mask")
+    oof_coverage = _report_decimal(oof["coverage"], "renderer statistical.oof.coverage")
+    if oof_coverage != _qdecimal(Decimal(oof_support) / Decimal(rows)):
+        raise FreezeError("renderer statistical.oof coverage does not reconcile with mask")
+    folds = _strict_sequence(oof["folds"], "statistical.oof.folds")
+    for index, fold in enumerate(folds):
+        item = _strict_mapping(
+            fold,
+            f"statistical.oof.folds[{index}]",
+            frozenset(
+                {
+                    "evaluation_time",
+                    "training_rows",
+                    "evaluation_rows",
+                    "purged_rows",
+                    "embargoed_rows",
+                }
+            ),
+        )
+        _strict_text(item["evaluation_time"], f"statistical.oof.folds[{index}].evaluation_time")
+        for key in ("training_rows", "evaluation_rows", "purged_rows", "embargoed_rows"):
+            _strict_integer(item[key], f"statistical.oof.folds[{index}].{key}", minimum=0)
+    if sum(item["evaluation_rows"] for item in folds) != sum(first_fit_mask):
+        raise FreezeError("renderer OOF fold evaluation rows do not reconcile with first-fit mask")
+    purge = _strict_mapping(
+        oof["purge_embargo"],
+        "statistical.oof.purge_embargo",
+        frozenset({"applied", "rows_excluded", "reason"}),
+    )
+    _strict_bool(purge["applied"], "statistical.oof.purge_embargo.applied")
+    _strict_integer(
+        purge["rows_excluded"], "statistical.oof.purge_embargo.rows_excluded", minimum=0
+    )
+    _strict_text(purge["reason"], "statistical.oof.purge_embargo.reason")
+    candidates = _strict_sequence(statistical["candidates"], "statistical.candidates", length=3)
+    for index, item in enumerate(candidates):
+        _strict_metric(
+            item,
+            f"statistical.candidates[{index}]",
+            frozenset({"degree", "enabled", "family", "id"}),
+        )
+    candidate_ids = frozenset(item["id"] for item in candidates)
+    expected_candidate_ids = frozenset(
+        item["id"] for item in config.document["nonlinear_candidates"]
+    )
+    if candidate_ids != expected_candidate_ids:
+        raise FreezeError("renderer statistical candidate IDs differ from frozen candidates")
+    controls = _strict_sequence(
+        statistical["simple_controls"], "statistical.simple_controls", length=3
+    )
+    for index, item in enumerate(controls):
+        _strict_metric(
+            item,
+            f"statistical.simple_controls[{index}]",
+            frozenset({"candidate_id", "fit_policy", "id", "kind", "role_binding"}),
+        )
+    control_ids = frozenset(item["id"] for item in controls)
+    expected_control_ids = frozenset(config.document["statistical_formulations"]["controls"])
+    if control_ids != expected_control_ids:
+        raise FreezeError("renderer statistical control IDs differ from frozen controls")
+    _strict_bool(
+        statistical["negative_failed_inconclusive_rendered"],
+        "statistical.negative_failed_inconclusive_rendered",
+    )
+    _strict_bool(statistical["post_result_selection"], "statistical.post_result_selection")
+    graph = _strict_mapping(
+        report["graph"],
+        "graph",
+        frozenset({"tiny_learned_graph", "controls", "r4_replacement_required"}),
+    )
+    tiny = _strict_metric(
+        graph["tiny_learned_graph"],
+        "graph.tiny_learned_graph",
+        frozenset({"enabled", "family", "hidden_units", "id", "layers"}),
+        (_REPORT_METRIC_KEYS - {"training_rows", "fit_evaluation_time"})
+        | frozenset(
+            {
+                "model",
+                "layers",
+                "hidden_units",
+                "algorithm",
+                "feasibility_only",
+                "fits",
+                "walk_forward_fit_executions",
+            }
+        ),
+    )
+    _strict_text(tiny["model"], "graph.tiny_learned_graph.model")
+    algorithm = _strict_mapping(
+        tiny["algorithm"],
+        "graph.tiny_learned_graph.algorithm",
+        frozenset(config.document["algorithms"]["graph"]),
+    )
+    if json.dumps(_thaw_value(algorithm), sort_keys=True, separators=(",", ":")) != json.dumps(
+        _thaw_value(config.document["algorithms"]["graph"]), sort_keys=True, separators=(",", ":")
+    ):
+        raise FreezeError("renderer graph tiny algorithm differs from frozen algorithm schema")
+    _strict_bool(tiny["feasibility_only"], "graph.tiny_learned_graph.feasibility_only")
+    for key in ("layers", "hidden_units", "fits", "walk_forward_fit_executions"):
+        _strict_integer(tiny[key], f"graph.tiny_learned_graph.{key}", minimum=0)
+    graph_controls = _strict_sequence(graph["controls"], "graph.controls", length=4)
+    for index, item in enumerate(graph_controls):
+        control = _strict_metric(
+            item,
+            f"graph.controls[{index}]",
+            frozenset({"enabled", "id", "kind"}),
+            (_REPORT_METRIC_KEYS - {"training_rows", "fit_evaluation_time"})
+            | frozenset({"feasibility_only"}),
+        )
+        _strict_bool(control["feasibility_only"], f"graph.controls[{index}].feasibility_only")
+    graph_control_ids = frozenset(item["id"] for item in graph_controls)
+    expected_graph_control_ids = frozenset(item["id"] for item in config.document["graph_controls"])
+    if graph_control_ids != expected_graph_control_ids:
+        raise FreezeError("renderer graph control IDs differ from frozen controls")
+
+    def descriptor_projection(
+        receipt: Mapping[str, Any], expected: Mapping[str, Any], label: str
+    ) -> None:
+        receipt_map = _strict_mapping(receipt, label)
+        expected_keys = frozenset(expected)
+        if not expected_keys.issubset(frozenset(receipt_map)):
+            raise FreezeError(f"{label} is missing frozen descriptor fields")
+        actual = {key: receipt_map[key] for key in expected_keys}
+        if json.dumps(_thaw_value(actual), sort_keys=True, separators=(",", ":")) != json.dumps(
+            _thaw_value(expected), sort_keys=True, separators=(",", ":")
+        ):
+            raise FreezeError(f"renderer {label} differs from frozen descriptor")
+
+    expected_candidates = {item["id"]: item for item in config.document["nonlinear_candidates"]}
+    for item in candidates:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_candidates[item["id"]],
+            f"statistical.candidates.{item['id']}.execution_receipt",
+        )
+    expected_controls = {
+        item["id"]: item
+        for item in config.document["statistical_formulations"]["control_descriptors"]
+    }
+    for item in controls:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_controls[item["id"]],
+            f"statistical.simple_controls.{item['id']}.execution_receipt",
+        )
+    descriptor_projection(
+        tiny["execution_receipt"],
+        config.document["tiny_graph_candidate"],
+        "graph.tiny_learned_graph.execution_receipt",
+    )
+    expected_graph_controls = {item["id"]: item for item in config.document["graph_controls"]}
+    for item in graph_controls:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_graph_controls[item["id"]],
+            f"graph.controls.{item['id']}.execution_receipt",
+        )
+    metric_outputs = [*candidates, *controls, tiny, *graph_controls]
+    for metric in metric_outputs:
+        if len(metric["prediction_trace"]) != rows:
+            raise FreezeError(
+                f"renderer metric {metric['id']} prediction trace is not aligned with OOF rows"
+            )
+        if len(metric["prediction_mask"]) != rows:
+            raise FreezeError(
+                f"renderer metric {metric['id']} prediction mask is not aligned with OOF rows"
+            )
+        mask = metric["prediction_mask"]
+        expected_support = sum(mask)
+        if metric["support"] != expected_support:
+            raise FreezeError(
+                f"renderer metric {metric['id']} support does not reconcile with mask"
+            )
+        expected_coverage = _qdecimal(Decimal(expected_support) / Decimal(rows))
+        actual_coverage = _report_decimal(metric["coverage"], f"metric {metric['id']}.coverage")
+        if actual_coverage != expected_coverage:
+            raise FreezeError(
+                f"renderer metric {metric['id']} coverage does not reconcile with mask"
+            )
+    expected_role_pairs = {
+        (identity_bindings["dataset_ids"][role], identity_bindings["config_ids"][role])
+        for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+    }
+    expected_wrappers = identity_bindings.get("wrapper_sha256s", {})
+    for metric in metric_outputs:
+        role_binding = metric["execution_receipt"].get("role_binding")
+        if role_binding is None:
+            continue
+        pair = (role_binding["dataset_id"], role_binding["config_id"])
+        if pair not in expected_role_pairs:
+            raise FreezeError(f"renderer metric {metric['id']} has an unknown role binding")
+        role = next(
+            role
+            for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+            if pair
+            == (identity_bindings["dataset_ids"][role], identity_bindings["config_ids"][role])
+        )
+        expected_wrapper = expected_wrappers.get(role)
+        if expected_wrapper is not None and role_binding["wrapper_sha256"] != expected_wrapper:
+            raise FreezeError(
+                f"renderer metric {metric['id']} role wrapper differs from frozen role"
+            )
+    _strict_bool(graph["r4_replacement_required"], "graph.r4_replacement_required")
+    work = _strict_mapping(
+        report["work"],
+        "work",
+        frozenset(
+            {
+                "rows",
+                "candidate_count",
+                "fit_count",
+                "fit_executions",
+                "graph_fit_count",
+                "graph_control_count",
+                "within_hard_limits",
+                "limits",
+                "measurement",
+            }
+        ),
+    )
+    for key in ("rows", "candidate_count", "fit_count", "graph_fit_count", "graph_control_count"):
+        _strict_integer(work[key], f"work.{key}", minimum=0)
+    fit_executions = _strict_mapping(work["fit_executions"], "work.fit_executions")
+    expected_fit_ids = candidate_ids | frozenset({"pooled_local_ridge", "tiny_learned_graph"})
+    if frozenset(fit_executions) != expected_fit_ids:
+        raise FreezeError("renderer work.fit_executions differs from frozen execution set")
+    for key, value in fit_executions.items():
+        _strict_integer(value, f"work.fit_executions.{key}", minimum=0)
+    if sum(fit_executions.values()) != work["fit_count"]:
+        raise FreezeError("renderer work.fit_executions does not reconcile fit_count")
+    metric_by_id = {metric["id"]: metric for metric in metric_outputs}
+    for execution_id, execution_count in fit_executions.items():
+        if metric_by_id[execution_id]["fit_executions"] != execution_count:
+            raise FreezeError(f"renderer metric {execution_id} fit count does not reconcile work")
+    if work["rows"] != rows or work["rows"] != selection["selected_rows"]:
+        raise FreezeError("renderer work rows do not reconcile with selected/OOF rows")
+    if work["candidate_count"] != len(candidates):
+        raise FreezeError(
+            "renderer work candidate_count does not reconcile with emitted candidates"
+        )
+    limits_document = config.document["compute_limits"]
+    if work["candidate_count"] > limits_document["max_candidates"]:
+        raise FreezeError("renderer candidate count exceeds frozen compute cap")
+    if work["fit_count"] > limits_document["max_fits"]:
+        raise FreezeError("renderer fit count exceeds frozen compute cap")
+    if work["rows"] > limits_document["max_rows"]:
+        raise FreezeError("renderer row count exceeds frozen compute cap")
+    if work["graph_fit_count"] != tiny["fits"]:
+        raise FreezeError("renderer graph fit count does not reconcile with tiny graph fits")
+    if work["graph_control_count"] != len(graph_controls):
+        raise FreezeError("renderer graph control count does not reconcile with controls")
+    if (
+        tiny["walk_forward_fit_executions"] != tiny["fits"]
+        or tiny["walk_forward_fit_executions"] != work["graph_fit_count"]
+    ):
+        raise FreezeError("renderer graph walk-forward count does not reconcile with graph work")
+    if not any(first_fit_mask):
+        raise FreezeError("renderer OOF first-fit mask has no executable evaluation rows")
+    _strict_bool(work["within_hard_limits"], "work.within_hard_limits")
+    limits = _strict_mapping(work["limits"], "work.limits")
+    if json.dumps(_thaw_value(limits), sort_keys=True, separators=(",", ":")) != json.dumps(
+        _thaw_value(config.document["compute_limits"]), sort_keys=True, separators=(",", ":")
+    ):
+        raise FreezeError("renderer work.limits differs from the frozen compute limits")
+    measurement = _strict_mapping(
+        work["measurement"], "work.measurement", frozenset({"elapsed_seconds", "memory_mb"})
+    )
+    elapsed = _report_decimal(
+        measurement["elapsed_seconds"], "renderer work.measurement.elapsed_seconds"
+    )
+    memory = _report_decimal(measurement["memory_mb"], "renderer work.measurement.memory_mb")
+    assert elapsed is not None and memory is not None
+    max_elapsed = _report_decimal(
+        limits_document["max_elapsed_seconds"], "config.compute_limits.max_elapsed_seconds"
+    )
+    max_memory = _report_decimal(
+        limits_document["max_memory_mb"], "config.compute_limits.max_memory_mb"
+    )
+    assert max_elapsed is not None and max_memory is not None
+    within_caps = elapsed <= max_elapsed and memory <= max_memory
+    if not within_caps or work["within_hard_limits"] is not within_caps:
+        raise FreezeError("renderer measurement does not reconcile with frozen hard limits")
+    classification = _strict_mapping(
+        report["result_classification"],
+        "result_classification",
+        frozenset({"negative", "failed", "inconclusive"}),
+    )
+    seen_classified: set[str] = set()
+    expected_statuses = {"negative": "NEGATIVE", "failed": "FAILED", "inconclusive": "INCONCLUSIVE"}
+    metric_statuses = {item["id"]: item["status"] for item in metric_outputs}
+    for key, expected_status in expected_statuses.items():
+        values = _strict_sequence(classification[key], f"result_classification.{key}")
+        local_ids: set[str] = set()
+        for index, item in enumerate(values):
+            identifier = _strict_text(item, f"result_classification.{key}[{index}]")
+            if identifier in local_ids or identifier in seen_classified:
+                raise FreezeError("renderer result classification is not disjoint")
+            if metric_statuses.get(identifier) != expected_status:
+                raise FreezeError("renderer result classification status mismatch")
+            local_ids.add(identifier)
+            seen_classified.add(identifier)
+    if seen_classified != set(metric_statuses):
+        raise FreezeError("renderer result classification is not a complete metric partition")
+    _strict_text(report["create_only_destination"], "create_only_destination")
+    _strict_bool(report["no_post_result_expansion"], "no_post_result_expansion")
+
+
+def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
+    report_keys = frozenset(report)
+    if report_keys != _REPORT_TOP_LEVEL_KEYS:
+        missing = sorted(_REPORT_TOP_LEVEL_KEYS - report_keys)
+        unknown = sorted(report_keys - _REPORT_TOP_LEVEL_KEYS)
+        details = [*(f"missing {key}" for key in missing), *(f"unknown {key}" for key in unknown)]
+        raise FreezeError("renderer report schema mismatch: " + ", ".join(details))
+    _strict_text(report["contract"], "contract")
+    _strict_integer(report["schema_version"], "schema_version", minimum=1)
+    _strict_hash(report["config_semantic_identity"], "config_semantic_identity")
+    for key in ("source_class", "price_basis", "evidence_class"):
+        _strict_text(report[key], key)
+    _strict_sequence(report["claims"], "claims")
+    if report["contract"] != REPORT_CONTRACT or report["schema_version"] != 1:
+        raise FreezeError("renderer received an unsupported report contract")
+    if report["config_semantic_identity"] != config.semantic_identity:
+        raise FreezeError("renderer report/config semantic identity mismatch")
+    if report["source_class"] != "IBKR_HISTORICAL_RESEARCH":
+        raise FreezeError("renderer requires IBKR historical research source")
+    if report["price_basis"] != "MIDPOINT_OHLC":
+        raise FreezeError("renderer requires MIDPOINT-only report")
+    if report["evidence_class"] != "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE":
+        raise FreezeError("renderer requires historical exploratory evidence")
+    if report["claims"] != list(_NON_EXECUTABLE_CLAIMS):
+        raise FreezeError("renderer requires the complete non-executable claim set")
+    if not isinstance(report["no_post_result_expansion"], bool):
+        raise FreezeError("renderer requires a boolean no_post_result_expansion")
+    _require_report_sequence(report, "claims")
+    _require_report_mapping(
+        report,
+        "code_provenance",
+        frozenset({"application_contract", "module_sha256", "python_version"}),
+    )
+    _require_report_mapping(
+        report,
+        "retained_parents",
+        frozenset(
+            {
+                "paths",
+                "identities",
+                "role_bindings",
+                "terminal_authentication",
+                "authentication_performed",
+                "outcome_decode_performed",
+            }
+        ),
+    )
+    _require_report_mapping(
+        report, "target_group_resolution", frozenset({"target_ids", "group_ids"})
+    )
+    _require_report_mapping(report, "selection", frozenset({"selected_rows"}))
+    _require_report_mapping(report, "loader_contract", frozenset({"manifest_contract"}))
+    _require_report_mapping(report, "scale_projection", frozenset({"retained_row_count"}))
+    _require_report_mapping(
+        report, "observation_contract", frozenset({"event_aware", "resource_limits"})
+    )
+    _require_report_mapping(
+        report,
+        "economic",
+        frozenset(
+            {
+                "trace_id",
+                "physical_turnover_definition",
+                "gross_total",
+                "gross_mean",
+                "turnover",
+                "break_even_cost",
+                "all_in_cost_sensitivity",
+                "position_trace",
+                "asset",
+                "horizon",
+                "period",
+                "configurations",
+            }
+        ),
+    )
+    statistical = _require_report_mapping(
+        report,
+        "statistical",
+        frozenset(
+            {
+                "oof",
+                "candidates",
+                "simple_controls",
+                "negative_failed_inconclusive_rendered",
+                "post_result_selection",
+            }
+        ),
+    )
+    economic = _require_nested_mapping(report["economic"], "economic")
+    _validate_economic_view(economic, "economic")
+    for dimension in ("asset", "horizon", "period"):
+        groups = _require_nested_mapping(economic[dimension], f"economic.{dimension}")
+        if not groups:
+            raise FreezeError(f"renderer economic {dimension} must not be empty")
+        for group_name, group in groups.items():
+            _validate_economic_view(group, f"economic.{dimension}.{group_name}")
+    configurations = _require_nested_mapping(economic["configurations"], "economic.configurations")
+    if not configurations:
+        raise FreezeError("renderer economic configurations must not be empty")
+    for trace_id, configuration in configurations.items():
+        _validate_economic_view(configuration, f"economic.configurations.{trace_id}")
+
+    oof = _require_nested_mapping(
+        statistical["oof"],
+        "statistical.oof",
+        frozenset(
+            {
+                "formulation",
+                "ordering",
+                "decision_identity",
+                "rows",
+                "first_timestamp",
+                "last_timestamp",
+                "mse",
+                "causal",
+                "folds",
+                "purge_embargo",
+                "rank_correlation",
+                "coverage",
+                "support",
+                "prediction_mask",
+            }
+        ),
+    )
+    folds = _require_nested_sequence(oof["folds"], "statistical.oof.folds")
+    for index, fold in enumerate(folds):
+        _require_nested_mapping(
+            fold,
+            f"statistical.oof.folds[{index}]",
+            frozenset(
+                {
+                    "evaluation_time",
+                    "training_rows",
+                    "evaluation_rows",
+                    "purged_rows",
+                    "embargoed_rows",
+                }
+            ),
+        )
+    _require_nested_mapping(
+        oof["purge_embargo"],
+        "statistical.oof.purge_embargo",
+        frozenset({"applied", "rows_excluded", "reason"}),
+    )
+    prediction_mask = _require_nested_sequence(
+        oof["prediction_mask"], "statistical.oof.prediction_mask"
+    )
+    if any(not isinstance(value, bool) for value in prediction_mask):
+        raise FreezeError("renderer statistical.oof.prediction_mask must contain booleans")
+    for item_name in ("candidates", "simple_controls"):
+        items = _require_nested_sequence(statistical[item_name], f"statistical.{item_name}")
+        for index, item in enumerate(items):
+            item_mapping = _require_nested_mapping(
+                item,
+                f"statistical.{item_name}[{index}]",
+                frozenset({"id", "execution_receipt"}),
+            )
+            _require_nested_mapping(
+                item_mapping["execution_receipt"],
+                f"statistical.{item_name}[{index}].execution_receipt",
+            )
+    graph = _require_report_mapping(
+        report,
+        "graph",
+        frozenset({"tiny_learned_graph", "controls", "r4_replacement_required"}),
+    )
+    tiny_graph = _require_nested_mapping(
+        graph["tiny_learned_graph"],
+        "graph.tiny_learned_graph",
+        frozenset(
+            {
+                "id",
+                "status",
+                "mse",
+                "rank_correlation",
+                "coverage",
+                "support",
+                "prediction_trace",
+                "prediction_mask",
+                "fit_executions",
+                "execution_receipt",
+                "model",
+                "layers",
+                "hidden_units",
+                "algorithm",
+                "feasibility_only",
+                "fits",
+                "walk_forward_fit_executions",
+            }
+        ),
+    )
+    _require_nested_mapping(
+        tiny_graph["execution_receipt"], "graph.tiny_learned_graph.execution_receipt"
+    )
+    _require_nested_mapping(tiny_graph["algorithm"], "graph.tiny_learned_graph.algorithm")
+    _require_nested_sequence(
+        tiny_graph["prediction_trace"], "graph.tiny_learned_graph.prediction_trace"
+    )
+    _require_nested_sequence(
+        tiny_graph["prediction_mask"], "graph.tiny_learned_graph.prediction_mask"
+    )
+    graph_controls = _require_nested_sequence(graph["controls"], "graph.controls")
+    for index, item in enumerate(graph_controls):
+        item_mapping = _require_nested_mapping(
+            item,
+            f"graph.controls[{index}]",
+            frozenset({"id", "execution_receipt", "feasibility_only"}),
+        )
+        _require_nested_mapping(
+            item_mapping["execution_receipt"],
+            f"graph.controls[{index}].execution_receipt",
+        )
+    _require_report_mapping(
+        report,
+        "work",
+        frozenset(
+            {
+                "rows",
+                "candidate_count",
+                "fit_count",
+                "fit_executions",
+                "within_hard_limits",
+                "measurement",
+            }
+        ),
+    )
+    _require_nested_mapping(
+        report["work"]["measurement"],
+        "work.measurement",
+        frozenset({"elapsed_seconds", "memory_mb"}),
+    )
+    classification = _require_report_mapping(
+        report, "result_classification", frozenset({"negative", "failed", "inconclusive"})
+    )
+    for status in ("negative", "failed", "inconclusive"):
+        if isinstance(classification[status], str) or not isinstance(
+            classification[status], Sequence
+        ):
+            raise FreezeError(f"renderer classification {status} must be an array")
+    _validate_strict_canonical_report(report, config)
+
+
+def _render_section(title: str, value: Any) -> str:
+    rendered = json.dumps(_thaw_value(value), sort_keys=True, indent=2)
+    fence = chr(96) * 3
+    return f"## {title}\n\n{fence}json\n{rendered}\n{fence}\n"
+
+
+def _report_physical_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    statistical = cast(Mapping[str, Any], report["statistical"])
+    graph = cast(Mapping[str, Any], report["graph"])
+    return {
+        "code_provenance": report["code_provenance"],
+        "work_measurement": cast(Mapping[str, Any], report["work"])["measurement"],
+        "retained_parent_paths": cast(Mapping[str, Any], report["retained_parents"])["paths"],
+        "retained_role_bindings": cast(Mapping[str, Any], report["retained_parents"])[
+            "role_bindings"
+        ],
+        "statistical_execution_receipts": {
+            section: [
+                {"id": item["id"], "execution_receipt": item["execution_receipt"]}
+                for item in cast(Sequence[Any], statistical[section])
+            ]
+            for section in ("candidates", "simple_controls")
+        },
+        "graph_execution_receipts": {
+            "controls": [
+                {"id": item["id"], "execution_receipt": item["execution_receipt"]}
+                for item in cast(Sequence[Any], graph["controls"])
+            ],
+            "tiny_graph": {
+                "id": graph["tiny_learned_graph"]["id"],
+                "execution_receipt": graph["tiny_learned_graph"]["execution_receipt"],
+            },
+        },
+    }
+
+
+def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
+    """Render the frozen canonical R3.H report as deterministic final Markdown."""
+
+    report = result.report
+    _validate_renderable_report(report, config)
+
+    semantic_report = _report_semantic_payload(report)
+    semantic_identity = canonical_report_semantic_identity(report)
+    metadata = {
+        "markdown_contract": "qtrad-r3-historical-exploratory-markdown-v1",
+        "schema_version": report["schema_version"],
+        "canonical_report_contract": report["contract"],
+        "canonical_report_semantic_identity": semantic_identity,
+        "stage": "R3.H",
+        "evidence_class": "HISTORICAL_EXPLORATORY",
+        "source_class": report["source_class"],
+        "price_basis": report["price_basis"],
+        "configuration_semantic_identity": config.semantic_identity,
+        "no_post_result_expansion": report["no_post_result_expansion"],
+    }
+    claim_boundary = {
+        "claims": semantic_report["claims"],
+        "no_effectiveness_claim": True,
+        "no_executable_alpha_claim": True,
+        "no_profitability_claim": True,
+        "no_native_validity_claim": True,
+        "no_promotion_claim": True,
+        "no_order_claim": True,
+    }
+    sections = [
+        "# R3.H Historical Exploratory Report\n",
+        "This is machine-readably labelled historical, MIDPOINT-only implementation evidence. "
+        "It is not executable evidence or a recommendation.\n",
+        _render_section("Machine-readable report identity", metadata),
+        _render_section(
+            "Terminal authority and consumed child identities",
+            report["retained_parents"],
+        ),
+        _render_section(
+            "Physical closure, execution, and resource provenance",
+            _report_physical_payload(report),
+        ),
+        _render_section(
+            "Frozen configuration and code identity",
+            {
+                "configuration_semantic_identity": config.semantic_identity,
+                "code_provenance": report["code_provenance"],
+                "report_contract": report["contract"],
+            },
+        ),
+        _render_section(
+            "Loader, selection, resources, and work counts",
+            {
+                "selection": report["selection"],
+                "loader_contract": report["loader_contract"],
+                "scale_projection": report["scale_projection"],
+                "observation_contract": report["observation_contract"],
+                "work": semantic_report["work"],
+            },
+        ),
+        _render_section(
+            "Economic break-even and turnover sensitivity", semantic_report["economic"]
+        ),
+        _render_section(
+            "Chronological statistical and bounded nonlinear comparison",
+            semantic_report["statistical"],
+        ),
+        _render_section("Tiny graph/GNN feasibility and controls", semantic_report["graph"]),
+        _render_section(
+            "Negative, failed, and inconclusive outcomes",
+            semantic_report["result_classification"],
+        ),
+        _render_section("Claim boundary", claim_boundary),
+    ]
+    return "\n".join(sections)
 
 
 def _reject_unknown(value: Mapping[str, Any], allowed: frozenset[str], label: str) -> None:
@@ -1758,7 +3402,7 @@ def _metrics(
         "status": status,
         "mse": round(mse, 12),
         "rank_correlation": round(rank_correlation, 12) if rank_correlation is not None else None,
-        "coverage": len(selected_rows) / len(rows),
+        "coverage": round(len(selected_rows) / len(rows), 12),
         "support": len(selected_rows),
         "prediction_trace": prediction_trace,
         "prediction_mask": list(mask),
@@ -1907,7 +3551,6 @@ def _economic_views(
 ) -> dict[str, Any]:
     trace = _position_trace(rows, predictions)
     positions = cast(list[float], trace["positions"])
-    changes = cast(list[float], trace["changes"])
     gross_values = cast(list[float], trace["gross_values"])
     indices_by_group: dict[str, dict[str, list[int]]] = {
         "period": defaultdict(list),
@@ -1918,44 +3561,70 @@ def _economic_views(
         indices_by_group["period"][row.period].append(index)
         indices_by_group["asset"][row.asset].append(index)
         indices_by_group["horizon"][str(row.horizon_minutes)].append(index)
+    canonical_positions = {
+        index: _qdecimal(Decimal(str(round(positions[index], 12)))) for index in range(len(rows))
+    }
+    canonical_changes: dict[int, Decimal] = {}
+    prior_positions: dict[tuple[str, str, int], Decimal] = {}
+    ordered_indices = sorted(
+        range(len(rows)),
+        key=lambda index: (
+            rows[index].decision_time,
+            rows[index].period,
+            rows[index].target_id,
+            rows[index].asset,
+            rows[index].horizon_minutes,
+        ),
+    )
+    for index in ordered_indices:
+        row = rows[index]
+        key = (row.target_id, row.asset, row.horizon_minutes)
+        previous = prior_positions.get(key, Decimal("0"))
+        canonical_changes[index] = _qdecimal(canonical_positions[index] - previous)
+        prior_positions[key] = canonical_positions[index]
 
     def view(indices: Sequence[int]) -> dict[str, Any]:
-        gross_total = sum(gross_values[index] for index in indices)
-        turnover = sum(abs(changes[index]) for index in indices)
+        rendered_positions = {index: canonical_positions[index] for index in indices}
+        rendered_changes = {index: canonical_changes[index] for index in indices}
+        rendered_gross = {
+            index: _qdecimal(Decimal(str(round(gross_values[index], 12)))) for index in indices
+        }
+        gross_total = sum(rendered_gross.values(), Decimal("0"))
+        turnover = sum((abs(value) for value in rendered_changes.values()), Decimal("0"))
         count = len(indices)
-        gross_mean = gross_total / count if count else 0.0
+        gross_mean = gross_total / count if count else Decimal("0")
         break_even_cost = gross_total / turnover if turnover else None
-        sensitivities = [
-            {
-                "cost": float(point["value"]),
-                "unit": point["unit"],
-                "net_mean": (
-                    round(gross_mean - float(point["value"]) * turnover / count, 12)
-                    if count
-                    else None
-                ),
-                "break_even_cost": (
-                    round(break_even_cost, 12) if break_even_cost is not None else None
-                ),
-                "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
-            }
-            for point in config.document["cost_grid"]
-        ]
+        sensitivities: list[dict[str, Any]] = []
+        for point in config.document["cost_grid"]:
+            cost = _qdecimal(Decimal(str(point["value"])))
+            sensitivities.append(
+                {
+                    "cost": float(cost),
+                    "unit": point["unit"],
+                    "net_mean": (
+                        float(_qdecimal(gross_mean - cost * turnover / count)) if count else None
+                    ),
+                    "break_even_cost": (
+                        float(_qdecimal(break_even_cost)) if break_even_cost is not None else None
+                    ),
+                    "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
+                }
+            )
         return {
-            "gross_total": round(gross_total, 12),
-            "gross_mean": round(gross_mean, 12),
-            "turnover": round(turnover, 12),
+            "gross_total": float(_qdecimal(gross_total)),
+            "gross_mean": float(_qdecimal(gross_mean)),
+            "turnover": float(_qdecimal(turnover)),
             "break_even_cost": (
-                round(break_even_cost, 12) if break_even_cost is not None else None
+                float(_qdecimal(break_even_cost)) if break_even_cost is not None else None
             ),
             "all_in_cost_sensitivity": sensitivities,
             "position_trace": [
                 {
                     "target_id": rows[index].target_id,
                     "decision_time": rows[index].decision_time,
-                    "target_position": round(positions[index], 12),
-                    "target_position_change": round(changes[index], 12),
-                    "realised_gross": round(gross_values[index], 12),
+                    "target_position": float(rendered_positions[index]),
+                    "target_position_change": float(rendered_changes[index]),
+                    "realised_gross": float(rendered_gross[index]),
                 }
                 for index in indices
             ],

@@ -19,6 +19,7 @@ from qtrad.application.r3_historical_exploratory import (
     fixture_from_json,
     load_fixture_rows,
     load_retained_rows,
+    render_markdown,
     synthetic_fixture,
 )
 
@@ -67,6 +68,12 @@ def main() -> int:
     parser.add_argument("--zero-forecast")
     parser.add_argument("--outcome-evidence")
     parser.add_argument("--output", help="create-only report destination")
+    parser.add_argument(
+        "--output-format",
+        choices=("json", "markdown"),
+        default="json",
+        help="explicit report encoding; never inferred from the destination name",
+    )
     args = parser.parse_args()
 
     config = FreezeConfig.from_path(args.config)
@@ -89,7 +96,9 @@ def main() -> int:
         fixture_rows = fixture_from_json(args.fixture) if args.fixture else synthetic_fixture()
         rows, retained_metadata = load_fixture_rows(fixture_rows, config)
     result = analyse_fixture(rows, config, retained_metadata=retained_metadata)
-    rendered = result.canonical_json()
+    rendered = (
+        result.canonical_json() if args.output_format == "json" else render_markdown(result, config)
+    )
     if args.output:
         _write_create_only(Path(args.output), rendered)
     else:

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,10 @@ from qtrad.application.r3_historical_exploratory import (
     FixtureMeasurement,
     FreezeConfig,
     FreezeError,
+    MicroRun,
     analyse_fixture,
+    canonical_report_semantic_identity,
+    render_markdown,
     synthetic_fixture,
 )
 
@@ -641,3 +645,342 @@ def test_role_swapped_retained_locator_fails_closed() -> None:
     )
     with pytest.raises(FreezeError):
         FreezeConfig.from_mapping(_rehashed(candidate))
+
+
+def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    rendered = render_markdown(result, config)
+
+    assert rendered == render_markdown(result, config)
+    second_result = analyse_fixture(synthetic_fixture(), config)
+    assert canonical_report_semantic_identity(result.report) == (
+        canonical_report_semantic_identity(second_result.report)
+    )
+
+    provenance_changed = json.loads(result.canonical_json())
+    changed_parents = provenance_changed["retained_parents"]
+    changed_parents["paths"]["terminal_report"] = "/relocated/report.md"
+    changed_candidate = provenance_changed["statistical"]["candidates"][0]
+    changed_candidate["execution_receipt"]["wrapper_sha256"] = "f" * 64
+    changed_candidate["execution_receipt"]["path"] = "/relocated/wrapper.py"
+    assert canonical_report_semantic_identity(result.report) == canonical_report_semantic_identity(
+        provenance_changed
+    )
+    changed_rendered = render_markdown(MicroRun(provenance_changed, result.work_count), config)
+    assert ("f" * 64) in changed_rendered
+    assert "/relocated/wrapper.py" in changed_rendered
+
+    semantic_changed = json.loads(result.canonical_json())
+    semantic_changed["economic"]["trace_id"] = "changed"
+    assert canonical_report_semantic_identity(result.report) != canonical_report_semantic_identity(
+        semantic_changed
+    )
+    assert canonical_report_semantic_identity(result.report) in rendered
+    assert '"schema_version": 1' in rendered
+    assert (
+        '"elapsed_seconds": ' + str(result.report["work"]["measurement"]["elapsed_seconds"])
+        in rendered
+    )
+    for heading in (
+        "Machine-readable report identity",
+        "Terminal authority and consumed child identities",
+        "Frozen configuration and code identity",
+        "Loader, selection, resources, and work counts",
+        "Economic break-even and turnover sensitivity",
+        "Chronological statistical and bounded nonlinear comparison",
+        "Tiny graph/GNN feasibility and controls",
+        "Negative, failed, and inconclusive outcomes",
+        "Claim boundary",
+        "Physical closure, execution, and resource provenance",
+    ):
+        assert f"## {heading}" in rendered
+    for label in (
+        "HISTORICAL_EXPLORATORY",
+        "IBKR_HISTORICAL_RESEARCH",
+        "MIDPOINT_OHLC",
+        "nonlinear_huber",
+        "local_non_graph",
+        "pooled_non_graph",
+        "fixed_graph",
+        "shuffled_graph",
+        "NEGATIVE",
+        "FAILED",
+        "INCONCLUSIVE",
+        "no_effectiveness_claim",
+        "no_executable_alpha_claim",
+        "no_profitability_claim",
+        "no_native_validity_claim",
+        "no_promotion_claim",
+        "no_order_claim",
+    ):
+        assert label in rendered
+    assert json.loads(result.canonical_json())["contract"] == result.report["contract"]
+
+    malformed_reports = []
+    for section, malformed_value in (
+        ("economic", None),
+        ("claims", "not-a-list"),
+        ("work", []),
+    ):
+        malformed = json.loads(result.canonical_json())
+        malformed[section] = malformed_value
+        malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["unexpected"] = True
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["economic"]["asset"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["economic"]["all_in_cost_sensitivity"][0] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["statistical"]["oof"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["statistical"]["candidates"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["graph"]["controls"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["graph"]["tiny_learned_graph"] = None
+    malformed_reports.append(malformed)
+
+    for malformed in malformed_reports:
+        with pytest.raises(FreezeError, match="renderer"):
+            render_markdown(MicroRun(malformed, result.work_count), config)
+
+    with pytest.raises(FreezeError, match="schema mismatch"):
+        render_markdown(MicroRun({}, {}), config)
+
+
+def test_renderer_rejects_nested_schema_mutations() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    mutations: list[Callable[[dict[str, Any]], None]] = [
+        lambda report: report["loader_contract"].__setitem__("unexpected", True),
+        lambda report: report["target_group_resolution"].__setitem__("unexpected", True),
+        lambda report: report["scale_projection"]["decoder_limits"].__setitem__("unexpected", True),
+        lambda report: report["observation_contract"].__setitem__("unexpected", True),
+        lambda report: report["retained_parents"]["paths"].__setitem__("unexpected", "x"),
+        lambda report: report["selection"].__setitem__("selected_rows", "18"),
+        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", "slow"),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "unexpected", True
+        ),
+        lambda report: report["graph"]["controls"][0].__setitem__("unexpected", True),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ].pop(),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "role_binding", {"dataset_id": "bad"}
+        ),
+        lambda report: report["retained_parents"]["role_bindings"].__setitem__("UNKNOWN", {}),
+        lambda report: report["graph"]["tiny_learned_graph"]["algorithm"].__setitem__("unknown", 1),
+        lambda report: report["work"]["fit_executions"].__setitem__("unknown", 1),
+        lambda report: report["statistical"]["oof"]["prediction_mask"].pop(),
+        lambda report: report["result_classification"]["inconclusive"].append(
+            report["result_classification"]["negative"][0]
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"].__setitem__(
+            "turnover", -1.0
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("cost", -1.0),
+        lambda report: report["economic"]["configurations"]["linear_ridge"].__setitem__(
+            "gross_total",
+            report["economic"]["configurations"]["linear_ridge"]["gross_total"] + 1.0,
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"]["position_trace"][
+            0
+        ].__setitem__(
+            "realised_gross",
+            report["economic"]["configurations"]["linear_ridge"]["position_trace"][0][
+                "realised_gross"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__(
+            "net_mean",
+            report["economic"]["configurations"]["linear_ridge"]["all_in_cost_sensitivity"][0][
+                "net_mean"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["work"].__setitem__("rows", report["work"]["rows"] + 1),
+        lambda report: report["work"]["fit_executions"].__setitem__(
+            "linear_ridge", report["work"]["fit_executions"]["linear_ridge"] + 1
+        ),
+        lambda report: report["statistical"]["oof"]["folds"][0].__setitem__(
+            "evaluation_rows", report["statistical"]["oof"]["folds"][0]["evaluation_rows"] + 1
+        ),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "family", "corrupted-family"
+        ),
+        lambda report: report["graph"]["tiny_learned_graph"]["execution_receipt"].__setitem__(
+            "layers", 99
+        ),
+        lambda report: report["retained_parents"]["identities"].__setitem__(
+            "selection_manifest_id", "f" * 64
+        ),
+        lambda report: report["retained_parents"]["terminal_authentication"].__setitem__(
+            "state", "CORRUPTED"
+        ),
+        lambda report: report["selection"].__setitem__("outcome_blind", False),
+        lambda report: report["selection"]["selected_decision_times"].pop(),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("unit", "invalid"),
+        lambda report: report["statistical"]["candidates"][0].__setitem__(
+            "support", report["statistical"]["candidates"][0]["support"] + 1
+        ),
+        lambda report: report["statistical"]["candidates"][0].__setitem__("coverage", 0.0),
+        lambda report: report["graph"]["tiny_learned_graph"].__setitem__(
+            "walk_forward_fit_executions",
+            report["graph"]["tiny_learned_graph"]["walk_forward_fit_executions"] + 1,
+        ),
+        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", 61.0),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("net_mean", None),
+        lambda report: report["economic"]["configurations"]["linear_ridge"]["position_trace"][
+            0
+        ].__setitem__(
+            "target_position_change",
+            report["economic"]["configurations"]["linear_ridge"]["position_trace"][0][
+                "target_position_change"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["statistical"]["candidates"][0]["prediction_trace"].__setitem__(
+            next(
+                index
+                for index, selected in enumerate(
+                    report["statistical"]["candidates"][0]["prediction_mask"]
+                )
+                if selected
+            ),
+            None,
+        ),
+    ]
+    for mutate in mutations:
+        malformed = json.loads(result.canonical_json())
+        mutate(malformed)
+        with pytest.raises(FreezeError, match="renderer"):
+            render_markdown(MicroRun(malformed, result.work_count), config)
+
+
+def test_renderer_rejects_subgroup_change_consistent_local_aggregate() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    entry = report["economic"]["period"]["period-1"]["position_trace"][0]
+    assert entry["target_position_change"] != 0
+    entry["target_position_change"] = -entry["target_position_change"]
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_renderer_rejects_configuration_subgroup_change_consistent_local_aggregate() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    entry = report["economic"]["configurations"]["linear_ridge"]["period"]["period-1"][
+        "position_trace"
+    ][0]
+    assert entry["target_position_change"] != 0
+    entry["target_position_change"] = -entry["target_position_change"]
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_renderer_rejects_configuration_subgroup_own_predecessor() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    economic = report["economic"]
+    configuration = economic["configurations"]["fixed_graph"]
+    subgroup = configuration["period"]["period-1"]
+    entry = next(
+        item for item in subgroup["position_trace"] if item["target_id"] == "commodity:spot-gold"
+    )
+    target_id = entry["target_id"]
+    decision_time = entry["decision_time"]
+    configuration_trace = sorted(
+        configuration["position_trace"], key=lambda item: (item["decision_time"], item["target_id"])
+    )
+    subgroup_trace = sorted(
+        subgroup["position_trace"], key=lambda item: (item["decision_time"], item["target_id"])
+    )
+
+    def predecessor(trace: list[dict[str, Any]]) -> Decimal:
+        prior = Decimal("0")
+        for candidate in trace:
+            if candidate["target_id"] == target_id:
+                if candidate["decision_time"] == decision_time:
+                    return prior
+                prior = Decimal(str(candidate["target_position"]))
+        raise AssertionError("selected configuration subgroup row has no matching parent trace")
+
+    configuration_prior = predecessor(configuration_trace)
+    subgroup_prior = predecessor(subgroup_trace)
+    assert subgroup_prior != configuration_prior
+    position = Decimal(str(entry["target_position"])) + Decimal("0.1")
+    entry["target_position"] = float(position)
+    entry["target_position_change"] = float(position - subgroup_prior)
+
+    quantum = Decimal("0.000000000001")
+
+    def quantize(value: Decimal) -> Decimal:
+        return value.quantize(quantum, rounding=ROUND_HALF_EVEN)
+
+    gross_total = sum(
+        (Decimal(str(item["realised_gross"])) for item in subgroup["position_trace"]), Decimal("0")
+    )
+    turnover = sum(
+        (abs(Decimal(str(item["target_position_change"]))) for item in subgroup["position_trace"]),
+        Decimal("0"),
+    )
+    count = Decimal(len(subgroup["position_trace"]))
+    break_even = quantize(gross_total / turnover) if turnover else None
+    subgroup["gross_total"] = float(quantize(gross_total))
+    subgroup["gross_mean"] = float(quantize(gross_total / count))
+    subgroup["turnover"] = float(quantize(turnover))
+    subgroup["break_even_cost"] = float(break_even) if break_even is not None else None
+    for sensitivity in subgroup["all_in_cost_sensitivity"]:
+        cost = Decimal(str(sensitivity["cost"]))
+        sensitivity["net_mean"] = float(quantize(gross_total / count - cost * turnover / count))
+        sensitivity["break_even_cost"] = float(break_even) if break_even is not None else None
+
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_renderer_rejects_frozen_role_wrapper_mutation() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    bindings = config.document["retained_loader"]["identity_bindings"]
+    report["retained_parents"]["role_bindings"] = {
+        role: {
+            "dataset_id": bindings["dataset_ids"][role],
+            "config_id": bindings["config_ids"][role],
+            "wrapper_sha256": bindings.get("wrapper_sha256s", {}).get(role, "f" * 64),
+        }
+        for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+    }
+    report["retained_parents"]["role_bindings"]["POOLED_LOCAL_RIDGE"]["wrapper_sha256"] = "0" * 64
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
