@@ -649,6 +649,15 @@ def test_solver_policy_rejects_mutable_identity_sequences(field: str) -> None:
         )
 
 
+@pytest.mark.parametrize("field", ["variable_order", "accepted_statuses"])
+def test_solver_policy_rejects_nested_mutable_sequence(field: str) -> None:
+    nested = (
+        ("physical_target", ["nested"]) if field == "variable_order" else ("optimal", ["nested"])
+    )
+    with pytest.raises(ValueError, match="elements"):
+        replace(DEFAULT_SOLVER_POLICY, **{field: cast(tuple[str, ...], nested)})
+
+
 def test_solver_policy_is_immutable_and_decision_identity_is_stable() -> None:
     inputs = _target_inputs()
     identity = inputs.decision_input_identity

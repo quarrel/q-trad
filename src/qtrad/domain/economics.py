@@ -984,6 +984,11 @@ class SolverPolicy:
     def __post_init__(self) -> None:
         if type(self.variable_order) is not tuple or type(self.accepted_statuses) is not tuple:
             raise ValueError("solver policy variable order and statuses must be tuples")
+        if any(
+            type(value) is not str or not value
+            for value in (*self.variable_order, *self.accepted_statuses)
+        ):
+            raise ValueError("solver policy sequence elements must be non-empty strings")
         values = (
             self.policy_version,
             self.python_version,
