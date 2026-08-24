@@ -535,3 +535,41 @@ def test_positive_minimum_cost_is_rejected_before_solver() -> None:
             risk=_risk_state(),
             solver_policy=DEFAULT_SOLVER_POLICY,
         )
+
+
+def test_accepted_target_snapshots_required_mappings() -> None:
+    target = solve_continuous_target(
+        _target_inputs(),
+        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+    )
+    identity = target.semantic_identity
+    for mapping in (
+        target.expected_costs,
+        target.cost_model_identities,
+        target.reporting_currencies,
+    ):
+        with pytest.raises(AttributeError):
+            mapping.clear()  # type: ignore[attr-defined]
+    assert target.semantic_identity == identity
+    assert target.expected_costs["asset:a"].target_quantity == Decimal("1")
+
+
+def test_accepted_target_rejects_netting_external_delta_mismatch() -> None:
+    target = solve_continuous_target(
+        _target_inputs(),
+        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+    )
+    mismatch_attribution = SleeveAttribution(
+        _key("asset:a", source="MISMATCH"), Decimal("2"), Decimal("0"), Decimal("2")
+    )
+    mismatched = NettingResult(
+        assets=(
+            AssetNetting(
+                "asset:a", Decimal("2"), Decimal("2"), Decimal("0"), (mismatch_attribution,)
+            ),
+            AssetNetting("asset:b", Decimal("0"), Decimal("0"), Decimal("0"), ()),
+        ),
+        sleeves=(mismatch_attribution,),
+    )
+    with pytest.raises(ValueError, match="external deltas"):
+        replace(target, netting=mismatched)

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from math import isfinite
+from types import MappingProxyType
 from typing import Final, cast
 
 from qtrad.domain.economics import (
@@ -825,6 +826,13 @@ class ContinuousTarget:
     netting: NettingResult | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "expected_costs", MappingProxyType(dict(self.expected_costs)))
+        object.__setattr__(
+            self, "cost_model_identities", MappingProxyType(dict(self.cost_model_identities))
+        )
+        object.__setattr__(
+            self, "reporting_currencies", MappingProxyType(dict(self.reporting_currencies))
+        )
         ordered = tuple(sorted(self.asset_order))
         if not ordered or len(set(ordered)) != len(self.asset_order) or ordered != self.asset_order:
             raise ValueError("target asset order must be non-empty and canonical")
@@ -875,8 +883,17 @@ class ContinuousTarget:
                 if self.netting is not None
                 else {}
             )
-            if self.netting is not None and self.netting.asset_order != self.asset_order:
-                raise ValueError("accepted target netting order mismatch")
+            if self.netting is not None:
+                if self.netting.asset_order != self.asset_order:
+                    raise ValueError("accepted target netting order mismatch")
+                expected_external = tuple(
+                    requested - current
+                    for requested, current in zip(
+                        self.requested_position, self.current_position, strict=True
+                    )
+                )
+                if self.netting.external_deltas != expected_external:
+                    raise ValueError("accepted target netting external deltas mismatch")
             for index, asset in enumerate(self.asset_order):
                 state = self.expected_costs[asset]
                 if not state.complete:
