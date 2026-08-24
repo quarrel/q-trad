@@ -292,7 +292,10 @@ def _write_create_only(path: Path, payload: bytes) -> str:
         raise FileExistsError(f"create-only artifact already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
-    return identity(json.loads(payload))
+    persisted = path.read_bytes()
+    if persisted != payload:
+        raise ValueError(f"persisted artifact bytes changed: {path}")
+    return identity(json.loads(persisted))
 
 
 def run_fixture(output_dir: Path) -> EvaluationReport:
@@ -307,8 +310,21 @@ def run_fixture(output_dir: Path) -> EvaluationReport:
     target_receipt = _target_receipt(target)
     _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
     _write_create_only(output_dir / "target.json", target.canonical_bytes)
+    persisted_outcome_ids: list[str] = []
     for outcome in outcomes:
-        _write_create_only(output_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes)
+        persisted_id = _write_create_only(
+            output_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes
+        )
+        if persisted_id != outcome.semantic_identity:
+            raise ValueError("persisted outcome identity does not match closure")
+        persisted_outcome_ids.append(persisted_id)
+    expected_outcome_ids = (
+        report.outcome_identities
+        + report.unavailable_outcome_identities
+        + report.blocked_outcome_identities
+    )
+    if tuple(persisted_outcome_ids) != expected_outcome_ids:
+        raise ValueError("persisted outcome identities do not match report dispositions")
     _write_create_only(output_dir / "report.json", report.canonical_bytes)
     _write_create_only(output_dir / "target-receipt.json", target_receipt.canonical_bytes)
     report_receipt = VerificationReceipt(
