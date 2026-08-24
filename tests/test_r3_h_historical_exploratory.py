@@ -215,20 +215,19 @@ def test_report_carries_frozen_parent_identities_and_code_provenance() -> None:
     retained = config.document["retained_parents"]
     identities = report["retained_parents"]["identities"]
     for key in (
-        "stage7_semantic_id",
-        "stage7_dataset_id",
-        "stage7_closure_id",
-        "stage7_verification_id",
-        "stage8_foundation_id",
-        "stage8_closure_id",
-        "stage8_verification_id",
-        "stage8_manifest_sha256",
-        "stage8_verification_receipt_sha256",
+        "selection_manifest_id",
+        "consumed_marker_id",
+        "g2_manifest_id",
+        "local_forecast_dataset_id",
+        "pooled_forecast_dataset_id",
+        "zero_forecast_dataset_id",
+        "outcome_evidence_manifest_id",
         "terminal_report_sha256",
         "terminal_approval_sha256",
-        "stage8_promotion_id",
     ):
         assert identities[key] == retained[key]
+    assert "authentication_chain" not in report["retained_parents"]
+    assert "authentication_command" not in report["retained_parents"]
     provenance = report["code_provenance"]
     assert provenance["application_contract"] == "qtrad-r3-historical-exploratory-implementation-v2"
     assert len(provenance["module_sha256"]) == 64
@@ -281,10 +280,7 @@ def test_economic_positions_derive_signed_deltas_and_costs() -> None:
         rows[0].prediction * rows[0].realised_return
     )
 
-    ignored_delta = list(rows)
-    ignored_delta[0] = replace(rows[0], target_position_change=999.0)
-    ignored = analyse_fixture(tuple(ignored_delta), config).report
-    assert ignored["economic"]["configurations"]["linear_ridge"] == linear
+    assert base["retained_parents"]["outcome_decode_performed"] is False
 
     signed = list(rows)
     aud_rows = [index for index, row in enumerate(signed) if row.target_id == "fx:aud-usd"]
@@ -385,4 +381,46 @@ def test_each_economic_configuration_reports_subgroup_cost_sensitivity() -> None
                 assert all(
                     item["break_even_cost"] == subgroup["break_even_cost"] for item in sensitivity
                 )
-                assert all(item["unit"] == "fraction_of_notional" for item in sensitivity)
+        assert all(item["unit"] == "fraction_of_notional" for item in sensitivity)
+
+
+def test_outcome_blind_selector_rejects_duplicate_and_incomplete_groups() -> None:
+    from qtrad.application.r3_historical_exploratory import select_synchronised_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows = synthetic_fixture()
+    with pytest.raises(FreezeError, match="duplicate"):
+        select_synchronised_rows((*rows, rows[0]), config)
+    with pytest.raises(FreezeError, match="incomplete"):
+        select_synchronised_rows(rows[:-1], config)
+
+
+def test_fixture_loader_rejects_unknown_fields_and_retained_locator_mismatch(
+    tmp_path: Path,
+) -> None:
+    from qtrad.application.r3_historical_exploratory import fixture_from_json, load_retained_rows
+
+    fixture_path = tmp_path / "unknown.json"
+    first = synthetic_fixture()[0]
+    row = {field: getattr(first, field) for field in first.__dataclass_fields__}
+    row["unexpected"] = True
+    fixture_path.write_text(json.dumps([row]), encoding="utf-8")
+    with pytest.raises(FreezeError, match="fields"):
+        fixture_from_json(fixture_path)
+    config = FreezeConfig.from_path(CONFIG)
+    locators = {key: str(tmp_path / key) for key in config.document["retained_loader"]["locators"]}
+    with pytest.raises(FreezeError, match="locator"):
+        load_retained_rows(config, locators=locators)
+
+
+def test_algorithm_parameters_are_reported_and_consumed_from_frozen_config() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    report = analyse_fixture(synthetic_fixture(), config).report
+    assert report["loader_contract"]["decode_policy"].startswith("decode only selected")
+    algorithms = config.document["algorithms"]
+    assert algorithms["ridge"]["regularisation"] == 0.0
+    assert algorithms["huber"]["threshold"] == 0.02
+    assert algorithms["graph"]["epochs"] == 8
+    assert (
+        report["graph"]["tiny_learned_graph"]["hidden_units"] == algorithms["graph"]["hidden_units"]
+    )

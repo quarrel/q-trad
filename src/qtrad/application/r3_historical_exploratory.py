@@ -20,19 +20,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, cast
 
-CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v1"
-REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v1"
-AUTHENTICATION_COMMAND: Final = (
-    "qtrad research observations authenticate-provider-history "
-    "--manifest <stage7-v3-manifest> --receipt <stage7-v3-receipt>"
-)
-STAGE8_AUTHENTICATION_COMMAND: Final = (
-    "qtrad research baselines holdout-target-source "
-    "--foundation-bundle <stage8> --foundation-receipt <stage8-receipt> "
-    "--foundation-promotion <stage8-promotion> --experiment <experiment> --output <new-json>"
-)
+CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
+REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "bf5661eb4881e63f33d8c86d109e27d39f05a535c0b50e63228c10799ff9aeee"
+    "ff67fefe9c878235092c78e63b271843d9583064c12657f7b868d2376ceb3385"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
@@ -71,7 +62,7 @@ _TOP_LEVEL_KEYS: Final = frozenset(
         "groups",
         "target_group_resolution",
         "retained_parents",
-        "authentication_chain",
+        "terminal_authentication",
         "temporal_contract",
         "retained_loader",
         "scale_projection",
@@ -82,6 +73,7 @@ _TOP_LEVEL_KEYS: Final = frozenset(
         "nonlinear_candidates",
         "tiny_graph_candidate",
         "graph_controls",
+        "algorithms",
         "compute_limits",
         "output_contract",
         "semantic_identity",
@@ -98,45 +90,52 @@ _LIMIT_KEYS: Final = frozenset(
 )
 _RETAINED_KEYS: Final = frozenset(
     {
-        "stage7_manifest",
-        "stage7_receipt",
-        "stage7_semantic_id",
-        "stage7_dataset_id",
-        "stage7_closure_id",
-        "stage7_verification_id",
-        "stage8_foundation",
-        "stage8_receipt",
-        "stage8_promotion",
-        "stage8_foundation_id",
-        "stage8_closure_id",
-        "stage8_verification_id",
-        "stage8_manifest_sha256",
-        "stage8_verification_receipt_sha256",
+        "terminal_report",
+        "terminal_approval",
         "terminal_report_sha256",
         "terminal_approval_sha256",
-        "stage8_promotion_id",
+        "selection",
+        "consumed",
+        "local_forecast",
+        "pooled_forecast",
+        "zero_forecast",
+        "outcome_evidence",
+        "selection_manifest_id",
+        "consumed_marker_id",
+        "g2_manifest_id",
+        "local_forecast_dataset_id",
+        "pooled_forecast_dataset_id",
+        "zero_forecast_dataset_id",
+        "outcome_evidence_manifest_id",
     }
 )
 _RETAINED_IDENTITY_KEYS: Final = (
-    "stage7_semantic_id",
-    "stage7_dataset_id",
-    "stage7_closure_id",
-    "stage7_verification_id",
-    "stage8_foundation_id",
-    "stage8_closure_id",
-    "stage8_verification_id",
-    "stage8_manifest_sha256",
-    "stage8_verification_receipt_sha256",
+    "selection_manifest_id",
+    "consumed_marker_id",
+    "g2_manifest_id",
+    "local_forecast_dataset_id",
+    "pooled_forecast_dataset_id",
+    "zero_forecast_dataset_id",
+    "outcome_evidence_manifest_id",
     "terminal_report_sha256",
     "terminal_approval_sha256",
-    "stage8_promotion_id",
 )
 _SECTION_KEYS: Final = {
     "target_group_resolution": frozenset(
         {"metadata_source", "target_ids", "group_ids", "mapping", "expected_identity"}
     ),
-    "authentication_chain": frozenset({"stage7", "stage8", "terminal"}),
-    "auth_stage": frozenset({"command", "receipt_required", "promotion_required"}),
+    "terminal_authentication": frozenset(
+        {
+            "contract",
+            "state",
+            "verdict",
+            "report_path",
+            "report_sha256",
+            "report_byte_size",
+            "approval_path",
+            "approval_sha256",
+        }
+    ),
     "temporal_contract": frozenset(
         {
             "decision_time_field",
@@ -153,8 +152,13 @@ _SECTION_KEYS: Final = {
             "manifest_contract",
             "required_children",
             "required_columns",
+            "field_mappings",
             "identity_bindings",
+            "locators",
             "decode_policy",
+            "selection_policy",
+            "streaming_policy",
+            "decoder_limits",
         }
     ),
     "scale_projection": frozenset(
@@ -165,12 +169,17 @@ _SECTION_KEYS: Final = {
             "fixture_row_count",
             "projected_peak_memory_mb",
             "projected_elapsed_seconds",
+            "selection",
+            "source_scan",
+            "decoder_limits",
+            "streaming_policy",
             "stop_conditions",
         }
     ),
     "observation_contract": frozenset(
         {"event_aware", "durable_output", "resource_limits", "stop_conditions"}
     ),
+    "algorithms": frozenset({"ridge", "huber", "graph", "fixed_graph", "shuffled_graph"}),
 }
 _STATISTICAL_KEYS: Final = frozenset({"oof", "controls", "metrics", "views"})
 _OUTPUT_KEYS: Final = frozenset({"report_contract", "create_only", "post_result_expansion"})
@@ -198,8 +207,6 @@ class FixtureRow:
     dependency_start: str
     dependency_end: str
     feature_value: float
-    # Retained for input compatibility only; economic code always derives the delta.
-    target_position_change: float | None = None
 
     def __post_init__(self) -> None:
         if self.horizon_minutes <= 0:
@@ -219,8 +226,6 @@ class FixtureRow:
             self.realised_return,
             self.feature_value,
         )
-        if self.target_position_change is not None:
-            numeric_values += (self.target_position_change,)
         if not all(math.isfinite(value) for value in numeric_values):
             raise ValueError("fixture numeric values must be finite")
 
@@ -238,7 +243,7 @@ class FreezeConfig:
         missing = sorted((_TOP_LEVEL_KEYS - {"semantic_identity"}) - set(raw))
         if missing:
             raise FreezeError(f"configuration missing required keys: {', '.join(missing)}")
-        if raw["contract"] != CONTRACT or raw["schema_version"] != 1:
+        if raw["contract"] != CONTRACT or raw["schema_version"] != 2:
             raise FreezeError("unsupported freeze contract")
         if raw["stage"] != "R3.H" or raw["evidence_class"] != "HISTORICAL_EXPLORATORY":
             raise FreezeError("configuration is not an R3.H historical exploratory freeze")
@@ -252,6 +257,7 @@ class FreezeConfig:
         _validate_graph_controls(raw["graph_controls"])
         _validate_cost_grid(raw["cost_grid"])
         _validate_limits(raw["compute_limits"])
+        _validate_algorithms(raw["algorithms"])
         if raw["turnover_definition"] != (
             "physical_turnover=sum(abs(target_position_change)); "
             "target_position=prediction; change=target_position-prior_target_position; "
@@ -303,7 +309,7 @@ class FixtureMeasurement:
 
 @dataclass(frozen=True, slots=True)
 class MicroRun:
-    """Deterministic report generated without retained-data access."""
+    """Deterministic report generated by the fixture or retained-loader boundary."""
 
     report: Mapping[str, Any]
     work_count: Mapping[str, int]
@@ -347,7 +353,7 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
     if set(retained_object) != set(_RETAINED_KEYS) or any(
         not isinstance(value, str) for value in retained_object.values()
     ):
-        raise FreezeError("retained_parents must identify every named immutable parent")
+        raise FreezeError("retained_parents must identify every terminal child and locator")
 
     targets = raw["targets"]
     groups = raw["groups"]
@@ -368,19 +374,25 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
     ):
         raise FreezeError("target/group metadata resolution is not frozen")
 
-    auth_chain = raw["authentication_chain"]
-    if not isinstance(auth_chain, dict):
-        raise FreezeError("authentication_chain must be an object")
-    auth_object = cast(dict[str, Any], auth_chain)
-    _reject_unknown(auth_object, _SECTION_KEYS["authentication_chain"], "authentication_chain")
-    for name in ("stage7", "stage8", "terminal"):
-        entry = auth_object[name]
-        if not isinstance(entry, dict):
-            raise FreezeError("authentication chain entry must be an object")
-        entry_object = cast(dict[str, Any], entry)
-        _reject_unknown(entry_object, _SECTION_KEYS["auth_stage"], f"authentication_chain.{name}")
-        if set(entry_object) != set(_SECTION_KEYS["auth_stage"]):
-            raise FreezeError("authentication chain entry is incomplete")
+    terminal = raw["terminal_authentication"]
+    if not isinstance(terminal, dict):
+        raise FreezeError("terminal_authentication must be an object")
+    terminal_object = cast(dict[str, Any], terminal)
+    _reject_unknown(
+        terminal_object, _SECTION_KEYS["terminal_authentication"], "terminal_authentication"
+    )
+    expected_terminal = {
+        "contract": "qtrad-r2-decision-grade-report-review-v1",
+        "state": "FINAL_AUTHENTICATED",
+        "verdict": "APPROVED",
+        "report_path": retained_object["terminal_report"],
+        "report_sha256": retained_object["terminal_report_sha256"],
+        "report_byte_size": 13008,
+        "approval_path": retained_object["terminal_approval"],
+        "approval_sha256": retained_object["terminal_approval_sha256"],
+    }
+    if terminal_object != expected_terminal:
+        raise FreezeError("terminal authentication authority is not frozen")
 
     for name in (
         "temporal_contract",
@@ -396,6 +408,35 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         if set(section_object) != set(_SECTION_KEYS[name]):
             raise FreezeError(f"{name} is incomplete")
 
+    loader = cast(dict[str, Any], raw["retained_loader"])
+    if loader["required_columns"] != [
+        "decision_time",
+        "asset",
+        "target_id",
+        "group",
+        "horizon_minutes",
+        "period",
+        "prediction",
+        "realised_return",
+        "available_at",
+        "target_available_at",
+        "dependency_start",
+        "dependency_end",
+        "feature_value",
+    ]:
+        raise FreezeError("retained loader columns are not frozen")
+    if "target_position_change" in loader["required_columns"]:
+        raise FreezeError("target_position_change compatibility field is forbidden")
+    if loader["locators"] != {
+        "selection": retained_object["selection"],
+        "consumed": retained_object["consumed"],
+        "local_forecast": retained_object["local_forecast"],
+        "pooled_forecast": retained_object["pooled_forecast"],
+        "zero_forecast": retained_object["zero_forecast"],
+        "outcome_evidence": retained_object["outcome_evidence"],
+    }:
+        raise FreezeError("retained loader locators differ from terminal children")
+
     statistical = raw["statistical_formulations"]
     if not isinstance(statistical, dict):
         raise FreezeError("statistical_formulations must be an object")
@@ -407,6 +448,54 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
     if not isinstance(output, dict):
         raise FreezeError("output_contract must be an object")
     _reject_unknown(cast(dict[str, Any], output), _OUTPUT_KEYS, "output_contract")
+
+
+def _validate_algorithms(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise FreezeError("algorithms must be an object")
+    algorithms = cast(dict[str, Any], value)
+    _reject_unknown(algorithms, _SECTION_KEYS["algorithms"], "algorithms")
+    expected_keys = {"ridge", "huber", "graph", "fixed_graph", "shuffled_graph"}
+    if set(algorithms) != expected_keys:
+        raise FreezeError("algorithm formulations are incomplete")
+    ridge = algorithms["ridge"]
+    huber = algorithms["huber"]
+    graph = algorithms["graph"]
+    fixed = algorithms["fixed_graph"]
+    shuffled = algorithms["shuffled_graph"]
+    if ridge != {
+        "regularisation": 0.0,
+        "fit_intercept": True,
+        "iterations": 1,
+        "fit_schedule": "first_mature_fold",
+    }:
+        raise FreezeError("ridge algorithm is not frozen")
+    if huber != {
+        "loss": "huber",
+        "threshold": 0.02,
+        "iterations": 4,
+        "degree": 1,
+        "fit_schedule": "first_mature_fold",
+    }:
+        raise FreezeError("huber algorithm is not frozen")
+    if graph != {
+        "node_feature": "feature_value",
+        "adjacency": "same_decision_time",
+        "self_edge": False,
+        "hidden_units": 4,
+        "layers": 1,
+        "activation": "tanh",
+        "initialisation_seed": 17,
+        "learning_rate": 0.05,
+        "epochs": 8,
+        "loss": "mse",
+        "fit_schedule": "first_mature_fold",
+    }:
+        raise FreezeError("graph algorithm is not frozen")
+    if fixed != {"construction": "same_decision_time_excluding_self"}:
+        raise FreezeError("fixed graph construction is not frozen")
+    if shuffled != {"construction": "reverse_timestamp_group", "shuffle_seed": 0}:
+        raise FreezeError("shuffled graph construction is not frozen")
 
 
 def _validate_candidates(value: Any) -> None:
@@ -428,6 +517,8 @@ def _validate_candidates(value: Any) -> None:
         ids.append(candidate["id"])
     if tuple(ids) != _CANDIDATE_IDS:
         raise FreezeError("candidate ids differ from the frozen set")
+    if candidates[2]["degree"] != 1:
+        raise FreezeError("nonlinear_huber must use the declared linear feature mapping")
 
 
 def _validate_tiny_graph(value: Any) -> None:
@@ -496,36 +587,230 @@ def _semantic_hash(raw: Mapping[str, Any]) -> str:
 
 
 def retained_input_paths() -> Mapping[str, str]:
-    """Return exact operator-retained paths; this Stage 1 runner never opens them."""
+    """Return exact terminal children; fixture mode never opens them."""
 
+    root = Path("/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z")
+    authority = Path(f"{root}-authority")
+    forecasts = root / "g2-preparation" / "forecasts"
     return {
-        "stage7_manifest": (
-            "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/"
-            "r2-simplification-h4-670e04e-attempt3/provider-history-v3/manifest.json"
+        "terminal_report": str(root / "r2-scientific-report.md"),
+        "terminal_approval": str(authority / "r2-scientific-report-review.json"),
+        "selection": str(root / "g2-preparation" / "selection.json"),
+        "consumed": str(root / "g2-preparation" / "consumed.json"),
+        "local_forecast": str(
+            forecasts / "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9.json"
         ),
-        "stage7_receipt": (
-            "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/"
-            "r2-simplification-h4-670e04e-attempt3/provider-history-v3-verification-receipt.json"
+        "pooled_forecast": str(
+            forecasts / "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json"
         ),
-        "stage8_foundation": (
-            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/foundation"
+        "zero_forecast": str(
+            forecasts / "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json"
         ),
-        "stage8_receipt": (
-            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/"
-            "foundation-verification-receipt.json"
-        ),
-        "stage8_promotion": (
-            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/"
-            "foundation-confirmatory-promotion.json"
-        ),
-        "terminal_report": (
-            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/"
-            "r2-scientific-report.md"
-        ),
-        "terminal_approval": (
-            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z-authority/"
-            "r2-scientific-report-review.json"
-        ),
+        "outcome_evidence": str(root / "g2-preparation" / "outcome-evidence.json"),
+    }
+
+
+def _canonical_join_key(row: Mapping[str, Any], mappings: Mapping[str, str]) -> tuple[Any, ...]:
+    return tuple(
+        row[mappings[field]]
+        for field in ("decision_time", "target_id", "asset", "group", "horizon_minutes", "period")
+    )
+
+
+def select_synchronised_rows(
+    rows: Sequence[FixtureRow], config: FreezeConfig
+) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
+    """Outcome-blind, bounded selection of earliest complete decision groups."""
+
+    policy = cast(
+        Mapping[str, Any],
+        cast(Mapping[str, Any], config.document["retained_loader"])["selection_policy"],
+    )
+    target_ids = tuple(cast(Sequence[str], policy["required_target_ids"]))
+    groups: dict[str, list[FixtureRow]] = defaultdict(list)
+    seen: set[tuple[str, str, str, str, int, str]] = set()
+    for row in rows:
+        identity = _decision_identity(row)
+        if identity in seen:
+            raise FreezeError("duplicate canonical join identity")
+        seen.add(identity)
+        groups[row.decision_time].append(row)
+    selected_times: list[str] = []
+    for decision_time in sorted(groups):
+        group_rows = groups[decision_time]
+        row_targets = [row.target_id for row in group_rows]
+        if len(group_rows) != len(target_ids) or set(row_targets) != set(target_ids):
+            raise FreezeError("incomplete synchronised decision group")
+        selected_times.append(decision_time)
+        if len(selected_times) == int(policy["n_complete_decision_groups"]):
+            break
+    if len(selected_times) != int(policy["n_complete_decision_groups"]):
+        raise FreezeError("fewer than the frozen number of complete decision groups")
+    selected = tuple(
+        row
+        for row in sorted(rows, key=lambda item: _decision_identity(item))
+        if row.decision_time in selected_times
+    )
+    if len(selected) > int(policy["analysis_row_bound"]):
+        raise FreezeError("selected analysis rows exceed frozen bound")
+    return selected, {
+        "outcome_blind": True,
+        "selected_decision_times": selected_times,
+        "selected_rows": len(selected),
+        "source_rows": len(rows),
+        "complete_groups": len(selected_times),
+        "target_count": len(target_ids),
+    }
+
+
+def _authority_digest(path: Path) -> tuple[str, int]:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise FreezeError(f"cannot read terminal authority child: {path}") from exc
+    return hashlib.sha256(payload).hexdigest(), len(payload)
+
+
+def authenticate_terminal_authority(config: FreezeConfig) -> dict[str, Any]:
+    """Authenticate only the exact terminal report and independent approval child."""
+
+    authority = cast(Mapping[str, Any], config.document["terminal_authentication"])
+    report_path = Path(cast(str, authority["report_path"]))
+    approval_path = Path(cast(str, authority["approval_path"]))
+    report_hash, report_size = _authority_digest(report_path)
+    if report_hash != authority["report_sha256"] or report_size != authority["report_byte_size"]:
+        raise FreezeError("terminal report path/hash/size mismatch")
+    approval_hash, _ = _authority_digest(approval_path)
+    if approval_hash != authority["approval_sha256"]:
+        raise FreezeError("terminal approval byte hash mismatch")
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FreezeError("terminal approval is not valid JSON") from exc
+    if not isinstance(approval, dict):
+        raise FreezeError("terminal approval must be an object")
+    approval_object = cast(dict[str, Any], approval)
+    report_raw = approval_object.get("report")
+    review_raw = approval_object.get("review")
+    if not isinstance(report_raw, dict) or not isinstance(review_raw, dict):
+        raise FreezeError("terminal approval report/review sections are missing")
+    report_object = cast(dict[str, Any], report_raw)
+    review_object = cast(dict[str, Any], review_raw)
+    required: dict[str, Any] = {
+        "contract": approval_object.get("contract"),
+        "state": approval_object.get("state"),
+        "verdict": review_object.get("verdict"),
+        "report_path": report_object.get("path"),
+        "report_sha256": report_object.get("sha256"),
+        "report_byte_size": report_object.get("byte_size"),
+    }
+    expected = {
+        "contract": authority["contract"],
+        "state": authority["state"],
+        "verdict": authority["verdict"],
+        "report_path": authority["report_path"],
+        "report_sha256": authority["report_sha256"],
+        "report_byte_size": authority["report_byte_size"],
+    }
+    for key, expected_value in expected.items():
+        if required[key] != expected_value:
+            raise FreezeError(f"terminal approval field mismatch: {key}")
+    return {
+        "authentication_performed": True,
+        "report_path": str(report_path),
+        "approval_path": str(approval_path),
+        "report_sha256": report_hash,
+        "approval_sha256": approval_hash,
+        "state": authority["state"],
+        "verdict": authority["verdict"],
+    }
+
+
+def _read_json_records(path: Path, limits: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if not path.is_file():
+        raise FreezeError(f"retained child path does not exist: {path}")
+    size = path.stat().st_size
+    if size > int(limits["max_source_bytes"]):
+        raise FreezeError("retained child exceeds frozen source-byte bound")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FreezeError(f"retained child is not valid JSON: {path}") from exc
+    records_value: Any
+    if isinstance(payload, dict):
+        payload_object = cast(dict[str, Any], payload)
+        records_value = payload_object.get("rows")
+    elif isinstance(payload, list):
+        records_value = cast(Any, payload)
+    else:
+        raise FreezeError("retained child rows must be an array")
+    if not isinstance(records_value, list):
+        raise FreezeError("retained child object must contain rows")
+    records = cast(list[Any], records_value)
+    if len(records) > int(limits["max_source_rows"]):
+        raise FreezeError("retained child exceeds frozen source-row bound")
+    result: list[Mapping[str, Any]] = []
+    for record_raw in records:
+        if not isinstance(record_raw, dict):
+            raise FreezeError("retained row must be an object")
+        record = cast(Mapping[str, Any], record_raw)
+        if len(json.dumps(record, separators=(",", ":")).encode()) > int(limits["max_row_bytes"]):
+            raise FreezeError("retained row exceeds decoder byte bound")
+        result.append(record)
+    return result
+
+
+def load_retained_rows(
+    config: FreezeConfig, *, locators: Mapping[str, str] | None = None
+) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
+    """Load exact terminal children after one terminal authentication boundary."""
+
+    authority = authenticate_terminal_authority(config)
+    loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    expected_locators = cast(Mapping[str, str], loader["locators"])
+    actual_locators = expected_locators if locators is None else locators
+    if dict(actual_locators) != dict(expected_locators):
+        raise FreezeError("retained loader locator differs from frozen terminal child")
+    limits = cast(Mapping[str, Any], loader["decoder_limits"])
+    selection_records = _read_json_records(Path(actual_locators["selection"]), limits)
+    consumed_records = _read_json_records(Path(actual_locators["consumed"]), limits)
+    if len(selection_records) != 1 or len(consumed_records) != 1:
+        raise FreezeError("selection and consumed markers must be single objects")
+    selection = selection_records[0]
+    consumed = consumed_records[0]
+    if selection.get("contract") != "qtrad-r2-selection-v4" or consumed.get("state") != "CONSUMED":
+        raise FreezeError("retained lifecycle marker is not terminal")
+    if (
+        selection.get("manifest_id")
+        != cast(Mapping[str, Any], loader["identity_bindings"])["selection_manifest_id"]
+    ):
+        raise FreezeError("selection manifest identity mismatch")
+    if (
+        consumed.get("marker_id")
+        != cast(Mapping[str, Any], loader["identity_bindings"])["consumed_marker_id"]
+    ):
+        raise FreezeError("consumed marker identity mismatch")
+    rows_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    mappings = cast(Mapping[str, str], loader["field_mappings"])
+    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
+    for name in child_names:
+        for record in _read_json_records(Path(actual_locators[name]), limits):
+            key = _canonical_join_key(record, mappings)
+            existing = rows_by_key.setdefault(key, {})
+            if name == "local_forecast" or name == "outcome_evidence":
+                existing.update(record)
+    required = set(cast(Sequence[str], loader["required_columns"]))
+    rows: list[FixtureRow] = []
+    for record in rows_by_key.values():
+        if set(record) != {mappings[field] for field in required}:
+            raise FreezeError("retained row fields do not match frozen mapping")
+        rows.append(FixtureRow(**{field: record[mappings[field]] for field in required}))
+    selected, selection_meta = select_synchronised_rows(rows, config)
+    return selected, {
+        "authority": authority,
+        "selection": selection_meta,
+        "source_scan_rows": len(rows),
+        "outcome_decode_performed": True,
     }
 
 
@@ -852,33 +1137,53 @@ def _timestamp_groups(rows: Sequence[FixtureRow]) -> dict[str, list[int]]:
     return dict(groups)
 
 
-def _fit_ridge(rows: Sequence[FixtureRow], training_indices: Sequence[int]) -> tuple[float, float]:
+def _fit_ridge(
+    rows: Sequence[FixtureRow],
+    training_indices: Sequence[int],
+    algorithm: Mapping[str, Any],
+) -> tuple[float, float]:
     features = [rows[index].feature_value for index in training_indices]
     targets = [rows[index].realised_return for index in training_indices]
     mean_feature = sum(features) / len(features)
     mean_target = sum(targets) / len(targets)
     denominator = sum((feature - mean_feature) ** 2 for feature in features)
+    regularisation = float(algorithm["regularisation"])
     slope = (
         sum(
             (feature - mean_feature) * (target - mean_target)
             for feature, target in zip(features, targets, strict=True)
         )
-        / denominator
-        if denominator
+        / (denominator + regularisation)
+        if denominator + regularisation
         else 0.0
     )
-    return mean_target - slope * mean_feature, slope
+    intercept = mean_target - slope * mean_feature if algorithm["fit_intercept"] else 0.0
+    for _ in range(int(algorithm["iterations"]) - 1):
+        residuals = [
+            target - (intercept + slope * feature)
+            for feature, target in zip(features, targets, strict=True)
+        ]
+        mean_residual = sum(residuals) / len(residuals)
+        if algorithm["fit_intercept"]:
+            intercept += mean_residual
+    return intercept, slope
 
 
-def _fit_huber(rows: Sequence[FixtureRow], training_indices: Sequence[int]) -> tuple[float, float]:
-    intercept, slope = _fit_ridge(rows, training_indices)
-    for _ in range(4):
+def _fit_huber(
+    rows: Sequence[FixtureRow],
+    training_indices: Sequence[int],
+    algorithm: Mapping[str, Any],
+    ridge_algorithm: Mapping[str, Any],
+) -> tuple[float, float]:
+    intercept, slope = _fit_ridge(rows, training_indices, ridge_algorithm)
+    threshold = float(algorithm["threshold"])
+    for _ in range(int(algorithm["iterations"])):
         weighted_features: list[float] = []
         weighted_targets: list[float] = []
         weights: list[float] = []
         for index in training_indices:
             residual = rows[index].realised_return - (intercept + slope * rows[index].feature_value)
-            weight = min(1.0, 0.02 / max(abs(residual), 0.02))
+            weight = min(1.0, threshold / max(abs(residual), threshold))
             weighted_features.append(rows[index].feature_value)
             weighted_targets.append(rows[index].realised_return)
             weights.append(weight)
@@ -908,7 +1213,9 @@ def _fit_huber(rows: Sequence[FixtureRow], training_indices: Sequence[int]) -> t
             if denominator
             else 0.0
         )
-        intercept = mean_target - slope * mean_feature
+        intercept = (
+            mean_target - slope * mean_feature if algorithm.get("fit_intercept", True) else 0.0
+        )
     return intercept, slope
 
 
@@ -953,20 +1260,23 @@ def _fit_message_passing(
     rows: Sequence[FixtureRow],
     training_indices: Sequence[int],
     neighbours: Sequence[float],
+    algorithm: Mapping[str, Any],
 ) -> tuple[list[float], list[float], list[float], list[float], list[float], float]:
-    hidden_local = [0.05 * (index + 1) for index in range(4)]
-    hidden_neighbour = [-0.03 * (index + 1) for index in range(4)]
-    hidden_bias = [0.0] * 4
-    output_weights = [0.25] * 4
+    hidden_units = int(algorithm["hidden_units"])
+    seed_scale = 1.0 + (int(algorithm["initialisation_seed"]) - 17) * 0.001
+    hidden_local = [0.05 * (index + 1) * seed_scale for index in range(hidden_units)]
+    hidden_neighbour = [-0.03 * (index + 1) * seed_scale for index in range(hidden_units)]
+    hidden_bias = [0.0] * hidden_units
+    output_weights = [0.25] * hidden_units
     output_bias = sum(rows[index].realised_return for index in training_indices) / len(
         training_indices
     )
-    learning_rate = 0.05 / len(training_indices)
-    for _ in range(8):
-        gradients_local = [0.0] * 4
-        gradients_neighbour = [0.0] * 4
-        gradients_bias = [0.0] * 4
-        gradients_output = [0.0] * 4
+    learning_rate = float(algorithm["learning_rate"]) / len(training_indices)
+    for _ in range(int(algorithm["epochs"])):
+        gradients_local = [0.0] * hidden_units
+        gradients_neighbour = [0.0] * hidden_units
+        gradients_bias = [0.0] * hidden_units
+        gradients_output = [0.0] * hidden_units
         gradients_output_bias = 0.0
         for index in training_indices:
             local = rows[index].feature_value
@@ -977,21 +1287,21 @@ def _fit_message_passing(
                     + hidden_neighbour[unit] * neighbour
                     + hidden_bias[unit]
                 )
-                for unit in range(4)
+                for unit in range(hidden_units)
             ]
             prediction = output_bias + sum(
                 weight * value for weight, value in zip(output_weights, hidden, strict=True)
             )
             error = prediction - rows[index].realised_return
             gradients_output_bias += error
-            for unit in range(4):
+            for unit in range(hidden_units):
                 derivative = error * output_weights[unit] * (1.0 - hidden[unit] ** 2)
                 gradients_output[unit] += error * hidden[unit]
                 gradients_local[unit] += derivative * local
                 gradients_neighbour[unit] += derivative * neighbour
                 gradients_bias[unit] += derivative
         output_bias -= learning_rate * gradients_output_bias
-        for unit in range(4):
+        for unit in range(hidden_units):
             output_weights[unit] -= learning_rate * gradients_output[unit]
             hidden_local[unit] -= learning_rate * gradients_local[unit]
             hidden_neighbour[unit] -= learning_rate * gradients_neighbour[unit]
@@ -1018,7 +1328,7 @@ def _message_prediction(
             + hidden_neighbour[unit] * neighbour
             + hidden_bias[unit]
         )
-        for unit in range(4)
+        for unit in range(len(hidden_local))
     ]
     return output_bias + sum(
         weight * value for weight, value in zip(output_weights, hidden, strict=True)
@@ -1030,15 +1340,17 @@ def _graph_predictions(
     pooled_predictions: Sequence[float],
     training_indices: Sequence[int],
     tiny_graph: Mapping[str, Any],
+    graph_algorithm: Mapping[str, Any],
 ) -> tuple[dict[str, list[float]], int, int]:
-    if tiny_graph["layers"] != 1 or tiny_graph["hidden_units"] != 4:
-        raise FreezeError(
-            "tiny graph configuration is outside the frozen one-layer four-unit bound"
-        )
+    if (
+        tiny_graph["layers"] != graph_algorithm["layers"]
+        or tiny_graph["hidden_units"] != graph_algorithm["hidden_units"]
+    ):
+        raise FreezeError("tiny graph and algorithm dimensions differ")
     neighbours = _graph_neighbours(rows)
     shuffled = _shuffled_graph_predictions(rows)
     learned = [0.0] * len(rows)
-    model = _fit_message_passing(rows, training_indices, neighbours)
+    model = _fit_message_passing(rows, training_indices, neighbours, graph_algorithm)
     cutoff = max(rows[index].decision_time for index in training_indices)
     for index, row in enumerate(rows):
         if row.decision_time > cutoff:
@@ -1075,6 +1387,7 @@ def analyse_fixture(
     config: FreezeConfig,
     *,
     measurement: FixtureMeasurement | None = None,
+    retained_metadata: Mapping[str, Any] | None = None,
 ) -> MicroRun:
     """Run bounded causal models against synthetic/fixture rows only."""
     started = time.monotonic()
@@ -1095,11 +1408,19 @@ def analyse_fixture(
     zero_predictions = [0.0] * row_count
     local_predictions = [row.prediction for row in ordered]
 
-    pooled_coefficients = _fit_ridge(ordered, training_indices)
+    algorithms = cast(Mapping[str, Any], config.document["algorithms"])
+    pooled_coefficients = _fit_ridge(
+        ordered, training_indices, cast(Mapping[str, Any], algorithms["ridge"])
+    )
     pooled_predictions = _apply_causal_linear(ordered, training_indices, pooled_coefficients)
     pooled_fit_executions = 1 if training_indices else 0
 
-    huber_coefficients = _fit_huber(ordered, training_indices)
+    huber_coefficients = _fit_huber(
+        ordered,
+        training_indices,
+        cast(Mapping[str, Any], algorithms["huber"]),
+        cast(Mapping[str, Any], algorithms["ridge"]),
+    )
     huber_predictions = _apply_causal_linear(ordered, training_indices, huber_coefficients)
     huber_fit_executions = 1 if training_indices else 0
 
@@ -1205,7 +1526,11 @@ def analyse_fixture(
     if not tiny_graph["enabled"]:
         raise FreezeError("tiny learned graph is required and enabled")
     graph_predictions, graph_fit_count, graph_fit_executions = _graph_predictions(
-        ordered, pooled_predictions, training_indices, tiny_graph
+        ordered,
+        pooled_predictions,
+        training_indices,
+        tiny_graph,
+        cast(Mapping[str, Any], algorithms["graph"]),
     )
     fits = sum(candidate_fit_executions.values()) + pooled_fit_executions + graph_fit_count
     if fits > limits["max_fits"]:
@@ -1285,11 +1610,14 @@ def analyse_fixture(
         "retained_parents": {
             "paths": dict(retained_input_paths()),
             "identities": parent_identities,
-            "authentication_chain": config.document["authentication_chain"],
-            "authentication_command": AUTHENTICATION_COMMAND,
-            "stage8_authentication_command": STAGE8_AUTHENTICATION_COMMAND,
-            "authentication_performed": False,
-            "outcome_decode_performed": False,
+            "terminal_authentication": config.document["terminal_authentication"],
+            "authentication_performed": bool(
+                retained_metadata
+                and retained_metadata.get("authority", {}).get("authentication_performed", False)
+            ),
+            "outcome_decode_performed": bool(
+                retained_metadata and retained_metadata.get("outcome_decode_performed", False)
+            ),
         },
         "loader_contract": config.document["retained_loader"],
         "scale_projection": config.document["scale_projection"],
@@ -1385,4 +1713,13 @@ def fixture_from_json(path: str | Path) -> tuple[FixtureRow, ...]:
         raw = json.load(handle)
     if not isinstance(raw, list):
         raise FreezeError("fixture root must be a list")
-    return tuple(FixtureRow(**cast(dict[str, Any], row)) for row in cast(list[Any], raw))
+    expected = set(FixtureRow.__dataclass_fields__)
+    rows: list[FixtureRow] = []
+    for item_raw in cast(list[Any], raw):
+        if not isinstance(item_raw, dict):
+            raise FreezeError("fixture row fields do not match frozen contract")
+        item = cast(dict[str, Any], item_raw)
+        if set(item) != expected:
+            raise FreezeError("fixture row fields do not match frozen contract")
+        rows.append(FixtureRow(**item))
+    return tuple(rows)
