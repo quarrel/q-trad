@@ -97,6 +97,7 @@ class RiskEstimatorConfig:
 
     horizon: timedelta
     lookback: timedelta
+    maximum_age: timedelta
     estimator: str = SUPPORTED_ESTIMATOR
     estimator_version: str = DEFAULT_ESTIMATOR_VERSION
     return_unit: str = "LOG_RETURN"
@@ -111,14 +112,16 @@ class RiskEstimatorConfig:
             raise ValueError("risk horizon must be positive")
         if self.lookback <= timedelta(0):
             raise ValueError("risk lookback must be positive")
+        if self.maximum_age <= timedelta(0):
+            raise ValueError("risk maximum_age must be positive")
         if self.estimator != SUPPORTED_ESTIMATOR:
             raise ValueError("unsupported risk estimator")
-        if not self.estimator_version:
-            raise ValueError("risk estimator_version must be non-empty")
+        if self.estimator_version != DEFAULT_ESTIMATOR_VERSION:
+            raise ValueError("unsupported risk estimator version")
         if self.return_unit != "LOG_RETURN":
             raise ValueError("risk return_unit must be LOG_RETURN")
-        if not self.availability_policy:
-            raise ValueError("risk availability_policy must be non-empty")
+        if self.availability_policy != "AVAILABLE_BY_CUTOFF":
+            raise ValueError("unsupported risk availability policy")
         if self.minimum_observations < 2:
             raise ValueError("risk minimum_observations must be at least two")
         for value, name in (
@@ -241,6 +244,7 @@ class RiskState:
     as_of: datetime
     observation_cutoff: datetime
     lookback: timedelta
+    maximum_age: timedelta
     availability_policy: str
     return_unit: str
     estimator: str
@@ -297,8 +301,14 @@ class RiskState:
         require_utc(self.observation_cutoff, "risk observation_cutoff")
         if self.observation_cutoff > self.as_of:
             raise ValueError("risk observation_cutoff is after as_of")
-        if self.horizon <= timedelta(0) or self.lookback <= timedelta(0):
-            raise ValueError("risk horizon and lookback must be positive")
+        if (
+            self.horizon <= timedelta(0)
+            or self.lookback <= timedelta(0)
+            or self.maximum_age <= timedelta(0)
+        ):
+            raise ValueError("risk horizon, lookback and maximum_age must be positive")
+        if self.as_of - self.observation_cutoff > self.maximum_age:
+            raise ValueError("risk observation cutoff exceeds maximum age")
         for value, name in (
             (self.shrinkage, "risk shrinkage"),
             (self.symmetry_tolerance, "risk symmetry_tolerance"),
@@ -309,8 +319,10 @@ class RiskState:
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.estimator != SUPPORTED_ESTIMATOR:
             raise ValueError("unsupported risk estimator")
-        if not self.estimator_version or not self.availability_policy:
-            raise ValueError("risk estimator, version and availability policy are required")
+        if self.estimator_version != DEFAULT_ESTIMATOR_VERSION:
+            raise ValueError("unsupported risk estimator version")
+        if self.availability_policy != "AVAILABLE_BY_CUTOFF":
+            raise ValueError("unsupported risk availability policy")
         if self.return_unit != "LOG_RETURN":
             raise ValueError("risk return_unit must be LOG_RETURN")
         n = len(self.asset_order)
@@ -415,6 +427,7 @@ class RiskState:
             "as_of": self.as_of,
             "observation_cutoff": self.observation_cutoff,
             "lookback_seconds": self.lookback.total_seconds(),
+            "maximum_age_seconds": self.maximum_age.total_seconds(),
             "availability_policy": self.availability_policy,
             "return_unit": self.return_unit,
             "estimator": self.estimator,
@@ -550,7 +563,7 @@ def estimate_ordered_risk_state(
     config: RiskEstimatorConfig,
     exposure_mapping: ExposureMapping,
     caps: RiskCaps,
-    provenance: str = "r3-b-domain-risk",
+    provenance: str,
 ) -> RiskState:
     """Estimate a causal horizon-specific Ledoit-Wolf covariance state.
 
@@ -564,6 +577,8 @@ def estimate_ordered_risk_state(
     require_utc(observation_cutoff, "risk observation_cutoff")
     if observation_cutoff > as_of:
         raise ValueError("risk observation_cutoff is after as_of")
+    if as_of - observation_cutoff > config.maximum_age:
+        raise ValueError("risk observation cutoff exceeds maximum age")
     n = len(ordered)
     selected: list[RiskObservation] = []
     missing_count = 0
@@ -597,6 +612,7 @@ def estimate_ordered_risk_state(
         as_of=as_of,
         observation_cutoff=observation_cutoff,
         lookback=config.lookback,
+        maximum_age=config.maximum_age,
         availability_policy=config.availability_policy,
         return_unit=config.return_unit,
         estimator=config.estimator,

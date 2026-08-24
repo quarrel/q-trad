@@ -24,6 +24,7 @@ CUTOFF = datetime(2026, 8, 1, 12, tzinfo=UTC)
 CONFIG = RiskEstimatorConfig(
     horizon=timedelta(minutes=15),
     lookback=timedelta(hours=2),
+    maximum_age=timedelta(hours=1),
     minimum_observations=3,
 )
 MAPPING = ExposureMapping(
@@ -72,6 +73,7 @@ def _estimate(observations: tuple[RiskObservation, ...]) -> RiskState:
         config=CONFIG,
         exposure_mapping=MAPPING,
         caps=CAPS,
+        provenance="test-r3-risk",
     )
 
 
@@ -203,6 +205,65 @@ def test_direct_state_rejects_unsupported_estimator() -> None:
         replace(
             state,
             estimator="UNSUPPORTED",
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+        )
+
+
+def test_maximum_age_enforces_causal_freshness_in_estimator_and_state() -> None:
+    boundary = _estimate(_observations())
+    assert boundary.maximum_age == timedelta(hours=1)
+    at_boundary = estimate_ordered_risk_state(
+        asset_order=ASSETS,
+        observations=_observations(),
+        as_of=CUTOFF + CONFIG.maximum_age,
+        observation_cutoff=CUTOFF,
+        config=CONFIG,
+        exposure_mapping=MAPPING,
+        caps=CAPS,
+        provenance="test-r3-risk-boundary",
+    )
+    assert at_boundary.as_of - at_boundary.observation_cutoff == CONFIG.maximum_age
+    with pytest.raises(ValueError, match="maximum age"):
+        estimate_ordered_risk_state(
+            asset_order=ASSETS,
+            observations=_observations(),
+            as_of=CUTOFF + CONFIG.maximum_age + timedelta(microseconds=1),
+            observation_cutoff=CUTOFF,
+            config=CONFIG,
+            exposure_mapping=MAPPING,
+            caps=CAPS,
+            provenance="test-r3-risk-stale",
+        )
+    with pytest.raises(ValueError, match="maximum age"):
+        replace(
+            boundary,
+            as_of=CUTOFF + CONFIG.maximum_age + timedelta(microseconds=1),
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+        )
+
+
+def test_config_and_state_reject_unsupported_policy_labels() -> None:
+    with pytest.raises(ValueError, match="availability policy"):
+        replace(CONFIG, availability_policy="UNSUPPORTED")
+    with pytest.raises(ValueError, match="estimator version"):
+        replace(CONFIG, estimator_version="unsupported-version")
+    state = _estimate(_observations())
+    with pytest.raises(ValueError, match="availability policy"):
+        replace(
+            state,
+            availability_policy="UNSUPPORTED",
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+        )
+    with pytest.raises(ValueError, match="estimator version"):
+        replace(
+            state,
+            estimator_version="unsupported-version",
             semantic_identity=None,
             closure_identity=None,
             provenance_identity=None,
