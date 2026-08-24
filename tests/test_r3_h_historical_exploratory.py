@@ -424,3 +424,22 @@ def test_algorithm_parameters_are_reported_and_consumed_from_frozen_config() -> 
     assert (
         report["graph"]["tiny_learned_graph"]["hidden_units"] == algorithms["graph"]["hidden_units"]
     )
+
+
+def test_retained_child_identity_binding_is_strict() -> None:
+    from qtrad.application.r3_historical_exploratory import _validate_child_metadata
+
+    config = FreezeConfig.from_path(CONFIG)
+    loader = config.document["retained_loader"]
+    bindings = loader["identity_bindings"]
+    metadata = {
+        "contract": loader["manifest_contract"],
+        "g2_manifest_id": bindings["g2_manifest_id"],
+        "dataset_id": bindings["dataset_ids"]["LOCAL_RIDGE"],
+        "configuration_id": bindings["config_ids"]["LOCAL_RIDGE"],
+        "parts": [{"sha256": "part-hash"}],
+    }
+    _validate_child_metadata("local_forecast", metadata, loader)
+    metadata["dataset_id"] = "wrong-dataset"
+    with pytest.raises(FreezeError, match="dataset identity"):
+        _validate_child_metadata("local_forecast", metadata, loader)

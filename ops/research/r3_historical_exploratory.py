@@ -61,9 +61,11 @@ def main() -> int:
     rendered = result.canonical_json()
     if args.output:
         destination = Path(args.output)
-        if destination.exists():
-            raise FileExistsError(f"create-only report already exists: {destination}")
-        destination.write_text(rendered, encoding="utf-8")
+        try:
+            with destination.open("x", encoding="utf-8") as handle:
+                handle.write(rendered)
+        except FileExistsError as exc:
+            raise FileExistsError(f"create-only report already exists: {destination}") from exc
     else:
         sys.stdout.write(rendered)
     return 0

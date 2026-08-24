@@ -632,7 +632,7 @@ def select_synchronised_rows(
     for row in rows:
         identity = _decision_identity(row)
         if identity in seen:
-            raise FreezeError("duplicate canonical join identity")
+            raise FreezeError("duplicate decision identity")
         seen.add(identity)
         groups[row.decision_time].append(row)
     selected_times: list[str] = []
@@ -653,13 +653,36 @@ def select_synchronised_rows(
     )
     if len(selected) > int(policy["analysis_row_bound"]):
         raise FreezeError("selected analysis rows exceed frozen bound")
+    source_bytes = sum(
+        len(
+            json.dumps(
+                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
+                separators=(",", ":"),
+            ).encode()
+        )
+        for row in rows
+    )
+    selected_bytes = sum(
+        len(
+            json.dumps(
+                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
+                separators=(",", ":"),
+            ).encode()
+        )
+        for row in selected
+    )
     return selected, {
         "outcome_blind": True,
         "selected_decision_times": selected_times,
         "selected_rows": len(selected),
+        "selected_bytes": selected_bytes,
+        "selected_parts": 1 if selected else 0,
         "source_rows": len(rows),
+        "source_bytes": source_bytes,
+        "source_parts": 1 if rows else 0,
         "complete_groups": len(selected_times),
         "target_count": len(target_ids),
+        "stop_state": "STOPPED_AFTER_SELECTED_GROUPS",
     }
 
 
@@ -726,7 +749,19 @@ def authenticate_terminal_authority(config: FreezeConfig) -> dict[str, Any]:
     }
 
 
-def _read_json_records(path: Path, limits: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+def _json_depth(value: Any) -> int:
+    if isinstance(value, dict):
+        items = cast(Mapping[Any, Any], value).values()
+        return 1 + max((_json_depth(item) for item in items), default=0)
+    if isinstance(value, list):
+        items = cast(list[Any], value)
+        return 1 + max((_json_depth(item) for item in items), default=0)
+    return 0
+
+
+def _read_json_document(
+    path: Path, limits: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[Mapping[str, Any]], int]:
     if not path.is_file():
         raise FreezeError(f"retained child path does not exist: {path}")
     size = path.stat().st_size
@@ -736,11 +771,16 @@ def _read_json_records(path: Path, limits: Mapping[str, Any]) -> list[Mapping[st
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise FreezeError(f"retained child is not valid JSON: {path}") from exc
+    if _json_depth(payload) > int(limits["max_nested_depth"]):
+        raise FreezeError("retained child exceeds decoder nesting bound")
     records_value: Any
+    metadata: dict[str, Any]
     if isinstance(payload, dict):
         payload_object = cast(dict[str, Any], payload)
-        records_value = payload_object.get("rows")
+        metadata = dict(payload_object)
+        records_value = payload_object.get("rows", [payload_object])
     elif isinstance(payload, list):
+        metadata = {}
         records_value = cast(Any, payload)
     else:
         raise FreezeError("retained child rows must be an array")
@@ -757,7 +797,70 @@ def _read_json_records(path: Path, limits: Mapping[str, Any]) -> list[Mapping[st
         if len(json.dumps(record, separators=(",", ":")).encode()) > int(limits["max_row_bytes"]):
             raise FreezeError("retained row exceeds decoder byte bound")
         result.append(record)
-    return result
+    return metadata, result, size
+
+
+def _read_json_records(  # pyright: ignore[reportUnusedFunction]
+    path: Path, limits: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    return _read_json_document(path, limits)[1]
+
+
+def _validate_child_metadata(
+    name: str,
+    metadata: Mapping[str, Any],
+    loader: Mapping[str, Any],
+) -> None:
+    if not metadata:
+        raise FreezeError(f"retained child metadata is missing: {name}")
+    bindings = cast(Mapping[str, Any], loader["identity_bindings"])
+    if name == "selection":
+        if metadata.get("contract") != "qtrad-r2-selection-v4":
+            raise FreezeError("selection child contract mismatch")
+        if metadata.get("manifest_id") != bindings["selection_manifest_id"]:
+            raise FreezeError("selection child identity mismatch")
+        return
+    if name == "consumed":
+        if metadata.get("contract") != "qtrad-r2-holdout-consumed-v1":
+            raise FreezeError("consumed child contract mismatch")
+        if metadata.get("marker_id") != bindings["consumed_marker_id"]:
+            raise FreezeError("consumed child identity mismatch")
+        return
+    dataset_key = {
+        "local_forecast": "LOCAL_RIDGE",
+        "pooled_forecast": "POOLED_LOCAL_RIDGE",
+        "zero_forecast": "ZERO_RETURN",
+        "outcome_evidence": None,
+    }[name]
+    if metadata.get("contract") not in {
+        loader["manifest_contract"],
+        "qtrad-r2-holdout-forecast-seal-v1",
+    }:
+        raise FreezeError(f"{name} child contract mismatch")
+    child_manifest = metadata.get(
+        "g2_manifest_id", metadata.get("seal_id", metadata.get("manifest_id"))
+    )
+    if child_manifest != bindings["g2_manifest_id"]:
+        raise FreezeError(f"{name} manifest identity mismatch")
+    if dataset_key is not None:
+        dataset_id = cast(Mapping[str, Any], bindings["dataset_ids"])[dataset_key]
+        config_id = cast(Mapping[str, Any], bindings["config_ids"])[dataset_key]
+        if metadata.get("dataset_id") != dataset_id:
+            raise FreezeError(f"{name} dataset identity mismatch")
+        if metadata.get("configuration_id") != config_id:
+            raise FreezeError(f"{name} configuration identity mismatch")
+    elif metadata.get("manifest_id") != bindings["outcome_evidence_manifest_id"]:
+        raise FreezeError("outcome evidence manifest identity mismatch")
+    parts = metadata.get("parts")
+    if parts is not None:
+        if not isinstance(parts, list):
+            raise FreezeError(f"{name} parts metadata is malformed")
+        for part_raw in cast(list[Any], parts):
+            if not isinstance(part_raw, dict):
+                raise FreezeError(f"{name} part metadata is malformed")
+            part = cast(Mapping[str, Any], part_raw)
+            if not part.get("sha256"):
+                raise FreezeError(f"{name} part hash is missing")
 
 
 def load_retained_rows(
@@ -771,15 +874,30 @@ def load_retained_rows(
     actual_locators = expected_locators if locators is None else locators
     if dict(actual_locators) != dict(expected_locators):
         raise FreezeError("retained loader locator differs from frozen terminal child")
-    limits = cast(Mapping[str, Any], loader["decoder_limits"])
-    selection_records = _read_json_records(Path(actual_locators["selection"]), limits)
-    consumed_records = _read_json_records(Path(actual_locators["consumed"]), limits)
+    decoder_limits = cast(Mapping[str, Any], loader["decoder_limits"])
+    streaming = cast(Mapping[str, Any], loader["streaming_policy"])
+    limits = dict(decoder_limits)
+    limits["max_source_rows"] = streaming["max_source_rows"]
+    limits["max_source_bytes"] = streaming["max_source_bytes"]
+    selection_metadata, selection_records, selection_size = _read_json_document(
+        Path(actual_locators["selection"]), limits
+    )
+    consumed_metadata, consumed_records, consumed_size = _read_json_document(
+        Path(actual_locators["consumed"]), limits
+    )
+    _validate_child_metadata("selection", selection_metadata, loader)
+    _validate_child_metadata("consumed", consumed_metadata, loader)
     if len(selection_records) != 1 or len(consumed_records) != 1:
         raise FreezeError("selection and consumed markers must be single objects")
     selection = selection_records[0]
     consumed = consumed_records[0]
-    if selection.get("contract") != "qtrad-r2-selection-v4" or consumed.get("state") != "CONSUMED":
+    if consumed.get("state") != "CONSUMED":
         raise FreezeError("retained lifecycle marker is not terminal")
+    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
+    child_data: dict[str, tuple[dict[str, Any], list[Mapping[str, Any]], int]] = {}
+    for name in child_names:
+        child_data[name] = _read_json_document(Path(actual_locators[name]), limits)
+        _validate_child_metadata(name, child_data[name][0], loader)
     if (
         selection.get("manifest_id")
         != cast(Mapping[str, Any], loader["identity_bindings"])["selection_manifest_id"]
@@ -790,26 +908,48 @@ def load_retained_rows(
         != cast(Mapping[str, Any], loader["identity_bindings"])["consumed_marker_id"]
     ):
         raise FreezeError("consumed marker identity mismatch")
-    rows_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    bindings = cast(Mapping[str, Any], loader["identity_bindings"])
+    if consumed.get("selection_manifest_id") != bindings["selection_manifest_id"]:
+        raise FreezeError("consumed selection identity mismatch")
+    if consumed.get("g2_manifest_id", consumed.get("seal_id")) != bindings["g2_manifest_id"]:
+        raise FreezeError("consumed G2 manifest identity mismatch")
     mappings = cast(Mapping[str, str], loader["field_mappings"])
-    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
+    rows_by_key: dict[tuple[Any, ...], dict[str, Mapping[str, Any]]] = {}
     for name in child_names:
-        for record in _read_json_records(Path(actual_locators[name]), limits):
+        for record in child_data[name][1]:
             key = _canonical_join_key(record, mappings)
-            existing = rows_by_key.setdefault(key, {})
-            if name == "local_forecast" or name == "outcome_evidence":
-                existing.update(record)
+            if key in rows_by_key and name in rows_by_key[key]:
+                raise FreezeError(f"duplicate canonical identity in {name}")
+            rows_by_key.setdefault(key, {})[name] = record
     required = set(cast(Sequence[str], loader["required_columns"]))
+    expected_fields = {mappings[field] for field in required}
     rows: list[FixtureRow] = []
-    for record in rows_by_key.values():
-        if set(record) != {mappings[field] for field in required}:
+    for key, children in rows_by_key.items():
+        if set(children) != set(child_names):
+            raise FreezeError(f"incomplete canonical join for {key}")
+        local = children["local_forecast"]
+        outcome = children["outcome_evidence"]
+        if set(local) != expected_fields or set(outcome) != expected_fields:
             raise FreezeError("retained row fields do not match frozen mapping")
-        rows.append(FixtureRow(**{field: record[mappings[field]] for field in required}))
+        rows.append(
+            FixtureRow(
+                **{field: local[mappings[field]] for field in required}
+                | {"realised_return": outcome[mappings["realised_return"]]}
+            )
+        )
     selected, selection_meta = select_synchronised_rows(rows, config)
+    source_sizes = {name: child_data[name][2] for name in child_names}
+    source_sizes.update(selection=selection_size, consumed=consumed_size)
     return selected, {
         "authority": authority,
         "selection": selection_meta,
-        "source_scan_rows": len(rows),
+        "source_scan_rows": sum(len(child_data[name][1]) for name in child_names),
+        "source_scan_bytes": sum(source_sizes.values()),
+        "source_scan_parts": 2
+        + sum(
+            len(cast(list[Any], child_data[name][0].get("parts") or [])) or 1
+            for name in child_names
+        ),
         "outcome_decode_performed": True,
     }
 
@@ -1142,6 +1282,8 @@ def _fit_ridge(
     training_indices: Sequence[int],
     algorithm: Mapping[str, Any],
 ) -> tuple[float, float]:
+    if algorithm["fit_schedule"] != "first_mature_fold":
+        raise FreezeError("ridge fit schedule is not frozen")
     features = [rows[index].feature_value for index in training_indices]
     targets = [rows[index].realised_return for index in training_indices]
     mean_feature = sum(features) / len(features)
@@ -1175,6 +1317,12 @@ def _fit_huber(
     algorithm: Mapping[str, Any],
     ridge_algorithm: Mapping[str, Any],
 ) -> tuple[float, float]:
+    if (
+        algorithm["loss"] != "huber"
+        or algorithm["degree"] != 1
+        or algorithm["fit_schedule"] != "first_mature_fold"
+    ):
+        raise FreezeError("Huber loss/degree/schedule is not frozen")
     intercept, slope = _fit_ridge(rows, training_indices, ridge_algorithm)
     threshold = float(algorithm["threshold"])
     for _ in range(int(algorithm["iterations"])):
@@ -1232,28 +1380,56 @@ def _apply_causal_linear(
     ]
 
 
-def _graph_neighbours(rows: Sequence[FixtureRow]) -> list[float]:
+def _node_feature(row: FixtureRow, node_feature: str) -> float:
+    if node_feature != "feature_value":
+        raise FreezeError("graph node feature is not frozen")
+    return row.feature_value
+
+
+def _graph_neighbours(
+    rows: Sequence[FixtureRow], graph_algorithm: Mapping[str, Any]
+) -> list[float]:
+    if graph_algorithm["adjacency"] != "same_decision_time":
+        raise FreezeError("graph adjacency is not frozen")
     groups = _timestamp_groups(rows)
     neighbours = [0.0] * len(rows)
+    include_self = bool(graph_algorithm["self_edge"])
     for indexes in groups.values():
         for index in indexes:
-            others = [other for other in indexes if other != index]
+            others = [other for other in indexes if include_self or other != index]
             neighbours[index] = (
-                sum(rows[other].feature_value for other in others) / len(others)
+                sum(_node_feature(rows[other], graph_algorithm["node_feature"]) for other in others)
+                / len(others)
                 if others
-                else rows[index].feature_value
+                else _node_feature(rows[index], graph_algorithm["node_feature"])
             )
     return neighbours
 
 
-def _shuffled_graph_predictions(rows: Sequence[FixtureRow]) -> list[float]:
+def _shuffled_graph_predictions(
+    rows: Sequence[FixtureRow], shuffled_algorithm: Mapping[str, Any]
+) -> list[float]:
+    if shuffled_algorithm["construction"] != "reverse_timestamp_group":
+        raise FreezeError("shuffled graph construction is not frozen")
+    seed = int(shuffled_algorithm["shuffle_seed"])
     groups = _timestamp_groups(rows)
     predictions = [0.0] * len(rows)
     for indexes in groups.values():
-        shuffled = list(reversed(indexes))
+        order = list(reversed(indexes))
+        if order:
+            rotation = seed % len(order)
+            order = order[rotation:] + order[:rotation]
         for position, index in enumerate(indexes):
-            predictions[index] = rows[shuffled[position]].feature_value
+            predictions[index] = _node_feature(rows[order[position]], "feature_value")
     return predictions
+
+
+def _activation(value: float, activation: str) -> float:
+    if activation == "tanh":
+        return math.tanh(value)
+    if activation == "identity":
+        return value
+    raise FreezeError("graph activation is not frozen")
 
 
 def _fit_message_passing(
@@ -1262,7 +1438,12 @@ def _fit_message_passing(
     neighbours: Sequence[float],
     algorithm: Mapping[str, Any],
 ) -> tuple[list[float], list[float], list[float], list[float], list[float], float]:
+    if algorithm["layers"] != 1 or algorithm["loss"] != "mse":
+        raise FreezeError("graph layers/loss are not frozen")
+    if algorithm["fit_schedule"] != "first_mature_fold":
+        raise FreezeError("graph fit schedule is not frozen")
     hidden_units = int(algorithm["hidden_units"])
+    activation = cast(str, algorithm["activation"])
     seed_scale = 1.0 + (int(algorithm["initialisation_seed"]) - 17) * 0.001
     hidden_local = [0.05 * (index + 1) * seed_scale for index in range(hidden_units)]
     hidden_neighbour = [-0.03 * (index + 1) * seed_scale for index in range(hidden_units)]
@@ -1279,23 +1460,24 @@ def _fit_message_passing(
         gradients_output = [0.0] * hidden_units
         gradients_output_bias = 0.0
         for index in training_indices:
-            local = rows[index].feature_value
+            local = _node_feature(rows[index], algorithm["node_feature"])
             neighbour = neighbours[index]
-            hidden = [
-                math.tanh(
-                    hidden_local[unit] * local
-                    + hidden_neighbour[unit] * neighbour
-                    + hidden_bias[unit]
-                )
+            preactivations = [
+                hidden_local[unit] * local + hidden_neighbour[unit] * neighbour + hidden_bias[unit]
                 for unit in range(hidden_units)
             ]
+            hidden = [_activation(value, activation) for value in preactivations]
             prediction = output_bias + sum(
                 weight * value for weight, value in zip(output_weights, hidden, strict=True)
             )
             error = prediction - rows[index].realised_return
             gradients_output_bias += error
             for unit in range(hidden_units):
-                derivative = error * output_weights[unit] * (1.0 - hidden[unit] ** 2)
+                derivative = (
+                    error
+                    * output_weights[unit]
+                    * (1.0 - hidden[unit] ** 2 if activation == "tanh" else 1.0)
+                )
                 gradients_output[unit] += error * hidden[unit]
                 gradients_local[unit] += derivative * local
                 gradients_neighbour[unit] += derivative * neighbour
@@ -1320,13 +1502,15 @@ def _message_prediction(
     row: FixtureRow,
     neighbour: float,
     model: tuple[list[float], list[float], list[float], list[float], list[float], float],
+    activation: str,
+    node_feature: str,
 ) -> float:
     hidden_local, hidden_neighbour, hidden_bias, output_weights, _, output_bias = model
+    local = _node_feature(row, node_feature)
     hidden = [
-        math.tanh(
-            hidden_local[unit] * row.feature_value
-            + hidden_neighbour[unit] * neighbour
-            + hidden_bias[unit]
+        _activation(
+            hidden_local[unit] * local + hidden_neighbour[unit] * neighbour + hidden_bias[unit],
+            activation,
         )
         for unit in range(len(hidden_local))
     ]
@@ -1341,20 +1525,30 @@ def _graph_predictions(
     training_indices: Sequence[int],
     tiny_graph: Mapping[str, Any],
     graph_algorithm: Mapping[str, Any],
+    fixed_algorithm: Mapping[str, Any],
+    shuffled_algorithm: Mapping[str, Any],
 ) -> tuple[dict[str, list[float]], int, int]:
     if (
         tiny_graph["layers"] != graph_algorithm["layers"]
         or tiny_graph["hidden_units"] != graph_algorithm["hidden_units"]
     ):
         raise FreezeError("tiny graph and algorithm dimensions differ")
-    neighbours = _graph_neighbours(rows)
-    shuffled = _shuffled_graph_predictions(rows)
+    if fixed_algorithm["construction"] != "same_decision_time_excluding_self":
+        raise FreezeError("fixed graph construction is not frozen")
+    neighbours = _graph_neighbours(rows, graph_algorithm)
+    shuffled = _shuffled_graph_predictions(rows, shuffled_algorithm)
     learned = [0.0] * len(rows)
     model = _fit_message_passing(rows, training_indices, neighbours, graph_algorithm)
     cutoff = max(rows[index].decision_time for index in training_indices)
     for index, row in enumerate(rows):
         if row.decision_time > cutoff:
-            learned[index] = _message_prediction(row, neighbours[index], model)
+            learned[index] = _message_prediction(
+                row,
+                neighbours[index],
+                model,
+                cast(str, graph_algorithm["activation"]),
+                cast(str, graph_algorithm["node_feature"]),
+            )
     graph_fit_executions = 1 if training_indices else 0
     return (
         {
@@ -1395,7 +1589,8 @@ def analyse_fixture(
     if len(rows) > limits["max_rows"]:
         raise FreezeError("fixture exceeds max_rows")
 
-    oof, row_count, ordered = _chronological_oof(rows)
+    selected_rows, selection_metadata = select_synchronised_rows(rows, config)
+    oof, row_count, ordered = _chronological_oof(selected_rows)
     training_indices, first_evaluation_time = _first_training_fold(ordered)
     evaluation_mask = _evaluation_mask(ordered, training_indices)
     all_mask = [True] * row_count
@@ -1531,6 +1726,8 @@ def analyse_fixture(
         training_indices,
         tiny_graph,
         cast(Mapping[str, Any], algorithms["graph"]),
+        cast(Mapping[str, Any], algorithms["fixed_graph"]),
+        cast(Mapping[str, Any], algorithms["shuffled_graph"]),
     )
     fits = sum(candidate_fit_executions.values()) + pooled_fit_executions + graph_fit_count
     if fits > limits["max_fits"]:
@@ -1557,6 +1754,7 @@ def analyse_fixture(
             "model": "deterministic_one_hidden_layer_message_passing",
             "layers": tiny_graph["layers"],
             "hidden_units": tiny_graph["hidden_units"],
+            "algorithm": dict(cast(Mapping[str, Any], algorithms["graph"])),
             "feasibility_only": True,
             "fits": graph_fit_count,
             "walk_forward_fit_executions": graph_fit_executions,
@@ -1617,6 +1815,14 @@ def analyse_fixture(
             ),
             "outcome_decode_performed": bool(
                 retained_metadata and retained_metadata.get("outcome_decode_performed", False)
+            ),
+        },
+        "selection": {
+            **selection_metadata,
+            **(
+                cast(Mapping[str, Any], retained_metadata["selection"])
+                if retained_metadata and "selection" in retained_metadata
+                else {}
             ),
         },
         "loader_contract": config.document["retained_loader"],
