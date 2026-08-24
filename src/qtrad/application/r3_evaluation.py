@@ -41,6 +41,7 @@ from qtrad.domain.r3_rounding import (
     RoundingDisposition,
     cost_states_identity,
 )
+from qtrad.domain.risk import RiskCaps, RiskState
 
 _FIXTURE_TIME = datetime(2025, 1, 2, tzinfo=UTC)
 
@@ -80,7 +81,7 @@ def _model(asset_id: str) -> ContinuousCostModel:
         horizon=timedelta(minutes=15),
         reporting_currency="AUD",
         components=components,
-        economics_identity="a" * 64,
+        economics_identity=identity({"contract": "fixture-economics-v1", "asset_id": asset_id}),
         commission_version="fixture-cost-v1",
         commission_provenance="R3.E fixture implementation evidence",
         financing_version="fixture-cost-v1",
@@ -93,14 +94,75 @@ def _model(asset_id: str) -> ContinuousCostModel:
     )
 
 
+def _decision_input_receipt(target: RoundedTarget) -> VerificationReceipt:
+    semantic = target.decision_input_identity
+    parent = identity(
+        {"contract": "r3-d-input-root-v1", "asset_order": target.asset_order, "semantic": semantic}
+    )
+    return VerificationReceipt(
+        artefact_contract="qtrad-r3d-decision-input-v1",
+        semantic_identity=semantic,
+        closure_identity=identity(
+            {"contract": "qtrad-r3d-decision-input-closure-v1", "target": target.semantic_identity}
+        ),
+        parent_verification_identity=parent,
+        verifier_contract="r3-d-input-fixture-verifier-v1",
+        checks=("canonical-bytes", "input-identity", "create-only"),
+    )
+
+
 def _target_receipt(target: RoundedTarget) -> VerificationReceipt:
     return VerificationReceipt(
         artefact_contract=ROUNDING_CONTRACT,
         semantic_identity=target.semantic_identity,
         closure_identity=target.semantic_identity,
-        parent_verification_identity="d" * 64,
+        parent_verification_identity=_decision_input_receipt(target).receipt_identity,
         verifier_contract="r3-d-fixture-verifier-v1",
         checks=("canonical-bytes", "target-reconciliation", "create-only"),
+    )
+
+
+def _risk_state(source: MarketDataSourceClass, purpose: EvidencePurpose) -> RiskState:
+    caps = RiskCaps(
+        asset_caps=(1.0,),
+        gross_cap=1.0,
+        net_cap=1.0,
+        concentration_cap=1.0,
+        portfolio_risk_cap=1.0,
+        group_caps=(1.0,),
+        currency_caps=(1.0,),
+    )
+    return RiskState(
+        asset_order=("ASSET_A",),
+        horizon=timedelta(minutes=15),
+        as_of=_FIXTURE_TIME,
+        observation_cutoff=_FIXTURE_TIME,
+        lookback=timedelta(days=1),
+        maximum_age=timedelta(days=1),
+        availability_policy="AVAILABLE_BY_CUTOFF",
+        return_unit="LOG_RETURN",
+        estimator="LEDOIT_WOLF",
+        estimator_version="qtrad-ledoit-wolf-pure-python-v1",
+        shrinkage=0.25,
+        covariance=((0.04,),),
+        sample_count=2,
+        raw_observation_count=2,
+        missing_observation_count=0,
+        excluded_observation_count=0,
+        effective_observations=2,
+        symmetry_tolerance=1e-12,
+        psd_tolerance=1e-12,
+        finite_tolerance=0.0,
+        group_keys=("fixture-group",),
+        group_exposure_matrix=((1.0,),),
+        group_caps=(1.0,),
+        currency_keys=("AUD",),
+        currency_exposure_matrix=((1.0,),),
+        currency_caps=(1.0,),
+        caps=caps,
+        source_class=source,
+        evidence_purpose=purpose,
+        provenance="R3.E fixture implementation evidence: ordered risk state",
     )
 
 
@@ -145,6 +207,17 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
     )
     assert financing is not None
     total = expected_state.require_total_reporting()
+    decision_input_identity = identity(
+        {
+            "contract": "qtrad-r3d-decision-input-v1",
+            "source_class": source,
+            "evidence_purpose": purpose,
+            "asset_order": assets,
+            "current_position": current,
+            "target_position": target_position,
+            "expected_cost_identity": cost_states_identity(expected),
+        }
+    )
     target = RoundedTarget(
         source_class=source,
         evidence_purpose=purpose,
@@ -160,9 +233,15 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         expected_financing_reporting=financing,
         netting=netting,
         attributions=repaired,
-        policy_identity="a" * 64,
-        decision_input_identity="b" * 64,
-        continuous_target_identity="c" * 64,
+        policy_identity=identity({"contract": ROUNDING_CONTRACT, "policy": "fixture"}),
+        decision_input_identity=decision_input_identity,
+        continuous_target_identity=identity(
+            {
+                "contract": "qtrad-continuous-target-v1",
+                "asset_order": assets,
+                "target": target_position,
+            }
+        ),
         cost_state_identity=cost_states_identity(expected),
     )
     target_receipt = _target_receipt(target)
@@ -170,6 +249,7 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         SleeveAttribution("long", asset, Decimal("1"), Decimal("0.5"), Decimal("0.5")),
         SleeveAttribution("short", asset, Decimal("-0.5"), Decimal("0.5"), Decimal("0")),
     )
+    risk = _risk_state(source, purpose)
     decision = DecisionClosure(
         source_class=source,
         evidence_purpose=purpose,
@@ -185,15 +265,23 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         expected_costs=expected,
         cost_models={asset: model},
         attributions=attributions,
-        decision_input_identity="e" * 64,
+        decision_input_identity=decision_input_identity,
         parent_verification_identity=target_receipt.receipt_identity,
         rounded_target=target,
         target_verification_identity=target_receipt.receipt_identity,
+        risk_state=risk,
     )
     quotes = (
-        QuoteEvidence(asset, _FIXTURE_TIME + timedelta(seconds=1), Decimal("99"), Decimal("101")),
+        QuoteEvidence(asset, _FIXTURE_TIME, Decimal("99"), Decimal("101"), sequence=0),
         QuoteEvidence(
-            asset, _FIXTURE_TIME + timedelta(minutes=15, seconds=1), Decimal("102"), Decimal("104")
+            asset, _FIXTURE_TIME + timedelta(seconds=2), Decimal("99"), Decimal("101"), sequence=1
+        ),
+        QuoteEvidence(
+            asset,
+            _FIXTURE_TIME + timedelta(minutes=15, seconds=1),
+            Decimal("102"),
+            Decimal("104"),
+            sequence=2,
         ),
     )
     return decision, quotes
@@ -221,8 +309,7 @@ def run_fixture(output_dir: Path) -> EvaluationReport:
     _write_create_only(output_dir / "target.json", target.canonical_bytes)
     for outcome in outcomes:
         _write_create_only(output_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes)
-    report_path = output_dir / "report.json"
-    _write_create_only(report_path, report.canonical_bytes)
+    _write_create_only(output_dir / "report.json", report.canonical_bytes)
     _write_create_only(output_dir / "target-receipt.json", target_receipt.canonical_bytes)
     report_receipt = VerificationReceipt(
         artefact_contract=report.report_contract,

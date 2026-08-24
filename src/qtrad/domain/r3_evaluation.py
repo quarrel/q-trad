@@ -26,6 +26,7 @@ from qtrad.domain.economics import (
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.r3_rounding import RoundedTarget
+from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
 
 EVALUATION_CONTRACT = "qtrad-r3-independent-evaluation-v1"
@@ -46,6 +47,7 @@ class EvaluationReasonCode(StrEnum):
     STALE_QUOTE = "STALE_QUOTE"
     CLOSED_SESSION = "CLOSED_SESSION"
     INCOMPLETE_QUOTE = "INCOMPLETE_QUOTE"
+    SOURCE_EVIDENCE_MISMATCH = "SOURCE_EVIDENCE_MISMATCH"
     BAD_FX = "BAD_FX"
     ATTRIBUTION_MUTATION = "ATTRIBUTION_MUTATION"
     DOUBLE_COUNTING = "DOUBLE_COUNTING"
@@ -170,7 +172,10 @@ class DecisionClosure:
     parent_verification_identity: str
     rounded_target: RoundedTarget | None = None
     target_verification_identity: str = ""
+    target_verification_identity: str = ""
     reporting_currency: str = "AUD"
+    contract: str = DECISION_CONTRACT
+    risk_state: RiskState | None = None
     contract: str = DECISION_CONTRACT
 
     def __post_init__(self) -> None:
@@ -238,6 +243,12 @@ class DecisionClosure:
                     or actual.external_delta_share != item.external_delta_share
                 ):
                     raise ValueError("decision attribution differs from rounded target")
+        if self.risk_state is not None and (
+            self.risk_state.source_class is not self.source_class
+            or self.risk_state.evidence_purpose is not self.evidence_purpose
+            or self.risk_state.asset_order != assets
+        ):
+            raise ValueError("decision risk state does not bind source, evidence or asset order")
         object.__setattr__(
             self, "gross_forecast_return", MappingProxyType(dict(self.gross_forecast_return))
         )
@@ -296,6 +307,9 @@ class DecisionClosure:
             else None,
             "target_verification_identity": self.target_verification_identity,
             "reporting_currency": self.reporting_currency,
+            "risk_state_identity": self.risk_state.semantic_id
+            if self.risk_state is not None
+            else None,
         }
 
     @property
@@ -403,6 +417,19 @@ class OutcomeClosure:
             raise ValueError("entry asset mismatch")
         if self.exit is not None and self.exit.asset_id != self.asset_id:
             raise ValueError("exit asset mismatch")
+        if self.entry is not None and (
+            self.entry.received_time <= self.decision_time + self.latency
+            or self.entry.received_time > self.target_time
+        ):
+            raise ValueError("entry quote is outside the strict causal decision boundary")
+        if self.exit is not None and self.exit.received_time <= self.target_time:
+            raise ValueError("exit quote must be strictly after target time")
+        if (
+            self.entry is not None
+            and self.exit is not None
+            and self.entry.received_time >= self.exit.received_time
+        ):
+            raise ValueError("entry quote must precede exit quote")
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     @property
@@ -532,12 +559,22 @@ class EvaluationReport:
     decision_identity: str
     decision_closure_identity: str
     outcome_identities: tuple[str, ...]
+    unavailable_outcome_identities: tuple[str, ...]
     assets: tuple[AssetReconciliation, ...]
     gross_forecast: Mapping[str, Decimal]
     expected_cost: Mapping[str, Decimal]
     expected_net_contribution: Mapping[str, Decimal]
+    gross_expected_contribution: Mapping[str, Decimal] = MappingProxyType({})
+    expected_cost_components: Mapping[str, Mapping[str, Decimal]] = MappingProxyType({})
     group_exposure: tuple[tuple[str, Decimal], ...] = ()
     currency_exposure: tuple[tuple[str, Decimal], ...] = ()
+    group_exposure_before: tuple[tuple[str, Decimal], ...] = ()
+    currency_exposure_before: tuple[tuple[str, Decimal], ...] = ()
+    marginal_risk_before: tuple[tuple[str, Decimal], ...] = ()
+    marginal_risk_after: tuple[tuple[str, Decimal], ...] = ()
+    allocations: tuple[tuple[str, Decimal], ...] = ()
+    portfolio_risk_before: Decimal = Decimal("0")
+    portfolio_risk_after: Decimal = Decimal("0")
     risk_residual: Decimal = Decimal("0")
     risk_tolerance: Decimal = Decimal("0")
     report_contract: str = REPORT_CONTRACT
@@ -551,7 +588,13 @@ class EvaluationReport:
         _digest(self.decision_identity, "decision identity")
         _digest(self.decision_closure_identity, "decision closure identity")
         object.__setattr__(self, "outcome_identities", tuple(self.outcome_identities))
-        if any(len(value) != 64 for value in self.outcome_identities):
+        object.__setattr__(
+            self, "unavailable_outcome_identities", tuple(self.unavailable_outcome_identities)
+        )
+        if any(
+            len(value) != 64
+            for value in (*self.outcome_identities, *self.unavailable_outcome_identities)
+        ):
             raise ValueError("outcome identities must be SHA-256 digests")
         object.__setattr__(self, "gross_forecast", MappingProxyType(dict(self.gross_forecast)))
         object.__setattr__(self, "expected_cost", MappingProxyType(dict(self.expected_cost)))
@@ -560,10 +603,46 @@ class EvaluationReport:
             "expected_net_contribution",
             MappingProxyType(dict(self.expected_net_contribution)),
         )
+        object.__setattr__(
+            self,
+            "gross_expected_contribution",
+            MappingProxyType(dict(self.gross_expected_contribution)),
+        )
+        object.__setattr__(
+            self,
+            "expected_cost_components",
+            MappingProxyType(
+                {
+                    asset: MappingProxyType(dict(values))
+                    for asset, values in self.expected_cost_components.items()
+                }
+            ),
+        )
         object.__setattr__(self, "group_exposure", tuple(self.group_exposure))
         object.__setattr__(self, "currency_exposure", tuple(self.currency_exposure))
-        _decimal(self.risk_residual, "risk residual")
-        _decimal(self.risk_tolerance, "risk tolerance")
+        object.__setattr__(self, "group_exposure_before", tuple(self.group_exposure_before))
+        object.__setattr__(self, "currency_exposure_before", tuple(self.currency_exposure_before))
+        object.__setattr__(self, "marginal_risk_before", tuple(self.marginal_risk_before))
+        object.__setattr__(self, "marginal_risk_after", tuple(self.marginal_risk_after))
+        object.__setattr__(self, "allocations", tuple(self.allocations))
+        for mapping in (
+            self.gross_forecast,
+            self.expected_cost,
+            self.expected_net_contribution,
+            self.gross_expected_contribution,
+        ):
+            for value in mapping.values():
+                _decimal(value, "report monetary value")
+        for components in self.expected_cost_components.values():
+            for value in components.values():
+                _decimal(value, "report expected component")
+        for value, name in (
+            (self.portfolio_risk_before, "portfolio risk before"),
+            (self.portfolio_risk_after, "portfolio risk after"),
+            (self.risk_residual, "risk residual"),
+            (self.risk_tolerance, "risk tolerance"),
+        ):
+            _decimal(value, name)
         if self.risk_residual < 0 or self.risk_tolerance < 0:
             raise ValueError("risk residual and tolerance must be non-negative")
 
@@ -576,12 +655,25 @@ class EvaluationReport:
             "decision_identity": self.decision_identity,
             "decision_closure_identity": self.decision_closure_identity,
             "outcome_identities": self.outcome_identities,
+            "unavailable_outcome_identities": self.unavailable_outcome_identities,
             "assets": tuple(item.canonical_payload for item in self.assets),
             "gross_forecast": tuple(sorted(self.gross_forecast.items())),
+            "gross_expected_contribution": tuple(sorted(self.gross_expected_contribution.items())),
             "expected_cost": tuple(sorted(self.expected_cost.items())),
+            "expected_cost_components": tuple(
+                (asset, tuple(sorted(values.items())))
+                for asset, values in sorted(self.expected_cost_components.items())
+            ),
             "expected_net_contribution": tuple(sorted(self.expected_net_contribution.items())),
             "group_exposure": self.group_exposure,
             "currency_exposure": self.currency_exposure,
+            "group_exposure_before": self.group_exposure_before,
+            "currency_exposure_before": self.currency_exposure_before,
+            "marginal_risk_before": self.marginal_risk_before,
+            "marginal_risk_after": self.marginal_risk_after,
+            "allocations": self.allocations,
+            "portfolio_risk_before": self.portfolio_risk_before,
+            "portfolio_risk_after": self.portfolio_risk_after,
             "risk_residual": self.risk_residual,
             "risk_tolerance": self.risk_tolerance,
         }
@@ -690,20 +782,25 @@ def _select_quote(
     asset_id: str,
     minimum_time: datetime,
     direction: int,
+    maximum_time: datetime | None = None,
+    source_class: MarketDataSourceClass,
+    evidence_purpose: EvidencePurpose,
 ) -> tuple[QuoteEvidence | None, tuple[str, ...]]:
     candidates = tuple(
         quote
         for quote in sorted(quotes, key=lambda item: (item.received_time, item.sequence))
-        if quote.asset_id == asset_id and quote.received_time > minimum_time
+        if (
+            quote.asset_id == asset_id
+            and quote.received_time > minimum_time
+            and (maximum_time is None or quote.received_time <= maximum_time)
+        )
     )
     if not candidates:
         return None, (EvaluationReasonCode.MISSING_QUOTE.value,)
     for quote in candidates:
-        if not quote.healthy:
+        if quote.source_class is not source_class or quote.evidence_purpose is not evidence_purpose:
             continue
-        if not quote.session_open:
-            continue
-        if not quote.complete:
+        if not quote.healthy or not quote.session_open or not quote.complete:
             continue
         if direction > 0 and quote.ask is None:
             continue
@@ -711,13 +808,47 @@ def _select_quote(
             continue
         return quote, ()
     reasons: list[str] = []
-    if any(not item.healthy for item in candidates):
+    if any(
+        item.source_class is not source_class or item.evidence_purpose is not evidence_purpose
+        for item in candidates
+    ):
+        reasons.append(EvaluationReasonCode.SOURCE_EVIDENCE_MISMATCH.value)
+    matching = tuple(
+        item
+        for item in candidates
+        if item.source_class is source_class and item.evidence_purpose is evidence_purpose
+    )
+    if any(not item.healthy for item in matching):
         reasons.append(EvaluationReasonCode.STALE_QUOTE.value)
-    if any(not item.session_open for item in candidates):
+    if any(not item.session_open for item in matching):
         reasons.append(EvaluationReasonCode.CLOSED_SESSION.value)
-    if any(not item.complete for item in candidates):
+    if any(not item.complete for item in matching):
         reasons.append(EvaluationReasonCode.INCOMPLETE_QUOTE.value)
     return None, tuple(dict.fromkeys(reasons or [EvaluationReasonCode.MISSING_QUOTE.value]))
+
+
+def _decision_reference_quote(
+    quotes: Sequence[QuoteEvidence],
+    *,
+    decision: DecisionClosure,
+    asset_id: str,
+) -> QuoteEvidence | None:
+    candidates = sorted(
+        (
+            quote
+            for quote in quotes
+            if quote.asset_id == asset_id
+            and quote.received_time <= decision.decision_time
+            and quote.source_class is decision.source_class
+            and quote.evidence_purpose is decision.evidence_purpose
+            and quote.healthy
+            and quote.session_open
+            and quote.complete
+        ),
+        key=lambda item: (item.received_time, item.sequence),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
 
 
 def _recompute_expected_costs(
@@ -788,29 +919,90 @@ def reconcile_positions(decision: DecisionClosure) -> dict[str, Decimal]:
     return residuals
 
 
-def _risk_projection(
-    decision: DecisionClosure,
-) -> tuple[tuple[tuple[str, Decimal], ...], tuple[tuple[str, Decimal], ...], Decimal, Decimal]:
-    """Recompute ordered exposure and the target-owned risk residual."""
-    external = (
-        decision.rounded_target.netting.external_deltas
-        if decision.rounded_target is not None
-        else decision.physical_delta
-    )
-    group_exposure = tuple(
-        (asset, delta) for asset, delta in zip(decision.asset_order, external, strict=True)
-    )
-    currency_exposure = ((decision.reporting_currency, sum(external, Decimal("0"))),)
-    residual = sum(
-        (
-            abs(delta - (target - current))
-            for target, current, delta in zip(
-                decision.target_position, decision.current_position, external, strict=True
+@dataclass(frozen=True, slots=True)
+class _RiskProjection:
+    group_after: tuple[tuple[str, Decimal], ...]
+    currency_after: tuple[tuple[str, Decimal], ...]
+    group_before: tuple[tuple[str, Decimal], ...]
+    currency_before: tuple[tuple[str, Decimal], ...]
+    marginal_before: tuple[tuple[str, Decimal], ...]
+    marginal_after: tuple[tuple[str, Decimal], ...]
+    allocations: tuple[tuple[str, Decimal], ...]
+    portfolio_before: Decimal
+    portfolio_after: Decimal
+    residual: Decimal
+    tolerance: Decimal
+
+
+def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
+    """Project positions through the authoritative ordered R3.D risk state."""
+    risk = decision.risk_state
+    if risk is None:
+        raise ValueError("decision risk state is required for independent evaluation")
+    risk_state = risk
+    before = tuple(float(value) for value in decision.current_position)
+    after = tuple(float(value) for value in decision.target_position)
+    risk_state.validate_position(after)
+
+    def decimal(value: float) -> Decimal:
+        return Decimal(str(value))
+
+    def marginal(position: tuple[float, ...]) -> tuple[tuple[str, Decimal], ...]:
+        denominator = risk_state.portfolio_risk(position)
+        values = tuple(
+            sum(
+                risk_state.covariance[row][column] * position[column]
+                for column in range(len(position))
             )
-        ),
-        Decimal("0"),
+            / denominator
+            if denominator > 0
+            else 0.0
+            for row in range(len(position))
+        )
+        return tuple(
+            (asset, decimal(value))
+            for asset, value in zip(risk_state.asset_order, values, strict=True)
+        )
+
+    group_before = tuple(
+        (key, decimal(value))
+        for key, value in zip(risk_state.group_keys, risk_state.group_exposure(before), strict=True)
     )
-    return group_exposure, currency_exposure, residual, Decimal("0")
+    group_after = tuple(
+        (key, decimal(value))
+        for key, value in zip(risk_state.group_keys, risk_state.group_exposure(after), strict=True)
+    )
+    currency_before = tuple(
+        (key, decimal(value))
+        for key, value in zip(
+            risk_state.currency_keys, risk_state.currency_exposure(before), strict=True
+        )
+    )
+    currency_after = tuple(
+        (key, decimal(value))
+        for key, value in zip(
+            risk_state.currency_keys, risk_state.currency_exposure(after), strict=True
+        )
+    )
+    portfolio_before = decimal(risk_state.portfolio_risk(before))
+    portfolio_after = decimal(risk_state.portfolio_risk(after))
+    tolerance = decimal(risk_state.caps.portfolio_risk_cap)
+    return _RiskProjection(
+        group_after,
+        currency_after,
+        group_before,
+        currency_before,
+        marginal(before),
+        marginal(after),
+        tuple(
+            (asset, target)
+            for asset, target in zip(decision.asset_order, decision.target_position, strict=True)
+        ),
+        portfolio_before,
+        portfolio_after,
+        max(Decimal("0"), portfolio_after - tolerance),
+        tolerance,
+    )
 
 
 def evaluate_independently(
@@ -822,7 +1014,6 @@ def evaluate_independently(
     fx_translation: Mapping[str, Decimal] | None = None,
 ) -> EvaluationReport:
     """Recompute position, expected costs and executable-side P&L independently."""
-
     if latency < timedelta(0) or adverse_slippage_increments < 0:
         raise ValueError("latency and slippage must be non-negative")
     reconcile_positions(decision)
@@ -830,8 +1021,20 @@ def evaluate_independently(
     fx = dict(fx_translation or {})
     assets: list[AssetReconciliation] = []
     outcome_ids: list[str] = []
+    unavailable_outcome_ids: list[str] = []
     for index, asset in enumerate(decision.asset_order):
         if asset in fx and fx[asset] < 0:
+            outcome = OutcomeClosure(
+                asset,
+                decision.decision_time,
+                decision.expiry_time,
+                latency,
+                None,
+                None,
+                EvaluationDisposition.UNAVAILABLE,
+                (EvaluationReasonCode.BAD_FX.value,),
+            )
+            unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
                 AssetReconciliation(
                     asset,
@@ -851,23 +1054,52 @@ def evaluate_independently(
             else 0
         )
         if direction == 0:
+            outcome = OutcomeClosure(
+                asset,
+                decision.decision_time,
+                decision.expiry_time,
+                latency,
+                None,
+                None,
+                EvaluationDisposition.ACCEPTED,
+            )
+            outcome_ids.append(outcome.semantic_identity)
             assets.append(
                 AssetReconciliation(
                     asset, EvaluationDisposition.ACCEPTED, Decimal("0"), expected[asset], None
                 )
             )
             continue
-        entry, reasons = _select_quote(
+        entry, entry_reasons = _select_quote(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
+            maximum_time=decision.expiry_time,
             direction=direction,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
         )
         exit_quote, exit_reasons = _select_quote(
-            quotes, asset_id=asset, minimum_time=decision.expiry_time, direction=-direction
+            quotes,
+            asset_id=asset,
+            minimum_time=decision.expiry_time,
+            direction=-direction,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
         )
+        reasons = tuple(dict.fromkeys((*entry_reasons, *exit_reasons)))
         if entry is None or exit_quote is None:
-            all_reasons = tuple(dict.fromkeys((*reasons, *exit_reasons)))
+            outcome = OutcomeClosure(
+                asset,
+                decision.decision_time,
+                decision.expiry_time,
+                latency,
+                entry,
+                exit_quote,
+                EvaluationDisposition.UNAVAILABLE,
+                reasons,
+            )
+            unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
                 AssetReconciliation(
                     asset,
@@ -875,10 +1107,12 @@ def evaluate_independently(
                     Decimal("0"),
                     expected[asset],
                     None,
-                    all_reasons,
+                    reasons,
                 )
             )
             continue
+        if entry.received_time >= exit_quote.received_time:
+            raise ValueError("entry quote must precede exit quote")
         assert entry.midpoint is not None and exit_quote.midpoint is not None
         if (
             entry.bid is None
@@ -889,8 +1123,12 @@ def evaluate_independently(
             raise ValueError("complete quote lost bid/ask during evaluation")
         quantity = abs(decision.physical_delta[index])
         gross_mid = (exit_quote.midpoint - entry.midpoint) * quantity * Decimal(direction)
-        # Costs are physical, not sleeve counts. Spread and adverse slippage are signed
-        # conservative deductions from the midpoint result.
+        reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
+        latency_movement = (
+            (entry.midpoint - reference.midpoint) * quantity * Decimal(direction)
+            if reference is not None and reference.midpoint is not None
+            else Decimal("0")
+        )
         spread = abs(entry.ask - entry.bid) * quantity / Decimal("2") + abs(
             exit_quote.ask - exit_quote.bid
         ) * quantity / Decimal("2")
@@ -899,12 +1137,13 @@ def evaluate_independently(
         financing = by_component[CostComponentKind.FINANCING]
         commission = by_component[CostComponentKind.COMMISSION]
         impact = by_component[CostComponentKind.IMPACT]
-        latency_cost = by_component[CostComponentKind.LATENCY_MOVEMENT]
         fx_cost = fx.get(asset, Decimal("0"))
         _decimal(fx_cost, f"FX translation for {asset}")
-        net = gross_mid - spread - latency_cost - slip - commission - financing - impact - fx_cost
+        net = (
+            gross_mid - spread - latency_movement - slip - commission - financing - impact - fx_cost
+        )
         pnl = PnlBreakdown(
-            gross_mid, spread, latency_cost, slip, commission, financing, impact, fx_cost, net
+            gross_mid, spread, latency_movement, slip, commission, financing, impact, fx_cost, net
         )
         outcome = OutcomeClosure(
             asset,
@@ -921,24 +1160,39 @@ def evaluate_independently(
                 asset, EvaluationDisposition.ACCEPTED, Decimal("0"), expected[asset], pnl
             )
         )
-    group_exposure, currency_exposure, risk_residual, risk_tolerance = _risk_projection(decision)
+    risk = _risk_projection(decision)
     return EvaluationReport(
         source_class=decision.source_class,
         evidence_purpose=decision.evidence_purpose,
         decision_identity=decision.semantic_identity,
         decision_closure_identity=decision.closure_identity,
         outcome_identities=tuple(outcome_ids),
+        unavailable_outcome_identities=tuple(unavailable_outcome_ids),
         assets=tuple(assets),
         gross_forecast=decision.gross_forecast_return,
         expected_cost=expected,
+        gross_expected_contribution=decision.gross_contribution,
+        expected_cost_components={
+            asset: {
+                component.value: amount for component, amount in computed_components[asset].items()
+            }
+            for asset in decision.asset_order
+        },
         expected_net_contribution={
             asset: decision.gross_contribution[asset] - expected[asset]
             for asset in decision.asset_order
         },
-        group_exposure=group_exposure,
-        currency_exposure=currency_exposure,
-        risk_residual=risk_residual,
-        risk_tolerance=risk_tolerance,
+        group_exposure=risk.group_after,
+        currency_exposure=risk.currency_after,
+        group_exposure_before=risk.group_before,
+        currency_exposure_before=risk.currency_before,
+        marginal_risk_before=risk.marginal_before,
+        marginal_risk_after=risk.marginal_after,
+        allocations=risk.allocations,
+        portfolio_risk_before=risk.portfolio_before,
+        portfolio_risk_after=risk.portfolio_after,
+        risk_residual=risk.residual,
+        risk_tolerance=risk.tolerance,
     )
 
 
@@ -998,13 +1252,18 @@ def build_outcome_closures(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
+            maximum_time=decision.expiry_time,
             direction=direction,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
         )
         exit_quote, exit_reasons = _select_quote(
             quotes,
             asset_id=asset,
             minimum_time=decision.expiry_time,
             direction=-direction,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
         )
         reasons = tuple(dict.fromkeys((*entry_reasons, *exit_reasons)))
         outcomes.append(
