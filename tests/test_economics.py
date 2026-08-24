@@ -55,14 +55,14 @@ def _economics(
             currency="AUD",
             basis=CostBasis.PHYSICAL_DELTA,
             version="commission-v1",
-            provenance="fixture"
+            provenance="fixture",
         ),
         financing=financing
         or CostSchedule.documented_zero(
             currency="AUD",
             basis=CostBasis.PHYSICAL_HOLDING,
             version="financing-v1",
-            provenance="fixture"
+            provenance="fixture",
         ),
         impact_disposition=impact,
         session_state=SessionState.ELIGIBLE,
@@ -253,9 +253,10 @@ def test_capped_impact_requires_quantity_and_caps_it() -> None:
     )
     assert not economics.eligibility(decision_time=NOW).eligible
     assert economics.eligibility(decision_time=NOW, proposed_quantity=Decimal("2")).eligible
-    assert "IMPACT_QUANTITY_EXCEEDS_CAP" in economics.eligibility(
-        decision_time=NOW, proposed_quantity=Decimal("3")
-    ).reasons
+    assert (
+        "IMPACT_QUANTITY_EXCEEDS_CAP"
+        in economics.eligibility(decision_time=NOW, proposed_quantity=Decimal("3")).reasons
+    )
 
 
 def test_solver_policy_rejects_non_optimal_status() -> None:
@@ -302,9 +303,7 @@ def test_product_economics_rejects_future_observation() -> None:
         observed_at=NOW + timedelta(minutes=1),
         economics_max_age=timedelta(hours=1),
     )
-    assert "ECONOMICS_OBSERVED_IN_FUTURE" in economics.eligibility(
-        decision_time=NOW
-    ).reasons
+    assert "ECONOMICS_OBSERVED_IN_FUTURE" in economics.eligibility(decision_time=NOW).reasons
 
 
 def test_expected_net_rejects_non_reporting_return_unit() -> None:
@@ -339,13 +338,13 @@ def test_component_cost_requires_reconciling_conversion_evidence() -> None:
 
 
 def test_internal_crosses_can_exceed_final_physical_delta() -> None:
-    # Sleeve intents +10 and -9 net to a physical target delta of +1.
+    # +10/-9 opposing intents match 9 internally; net physical delta is +1.
     state = replace(
         _cost_state(target="1"),
-        internal_cross_quantity=Decimal("19"),
+        internal_cross_quantity=Decimal("9"),
     )
     assert state.physical_delta == Decimal("1")
-    assert state.internal_cross_quantity == Decimal("19")
+    assert state.internal_cross_quantity == Decimal("9")  # matched sleeve transfer amount
     assert state.expected_total_reporting == Decimal("6")
 
 
@@ -378,9 +377,7 @@ def test_solver_capability_exact_convex_form() -> None:
         cp.sum(physical_target) >= -0.3,
         risk <= 0.04,
     ]
-    objective = cp.Minimize(
-        -expected_return @ physical_target + 0.01 * turnover + 0.10 * risk
-    )
+    objective = cp.Minimize(-expected_return @ physical_target + 0.01 * turnover + 0.10 * risk)
     problem = cp.Problem(objective, constraints)
     objective_value = problem.solve(
         solver="CLARABEL",
@@ -408,4 +405,4 @@ def test_solver_capability_exact_convex_form() -> None:
         max(0.0, abs(sum(values)) - 0.3),
         max(0.0, risk_value - 0.04),
     )
-    assert residual <= 1e-7
+    assert residual <= 1e-8
