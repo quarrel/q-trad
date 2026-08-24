@@ -881,6 +881,17 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
             render_markdown(MicroRun(malformed, result.work_count), config)
 
 
+def test_renderer_rejects_subgroup_change_consistent_local_aggregate() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    entry = report["economic"]["period"]["period-1"]["position_trace"][0]
+    assert entry["target_position_change"] != 0
+    entry["target_position_change"] = -entry["target_position_change"]
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
+
+
 def test_renderer_rejects_frozen_role_wrapper_mutation() -> None:
     config = FreezeConfig.from_path(CONFIG)
     result = analyse_fixture(synthetic_fixture(), config)

@@ -950,36 +950,62 @@ def _qdecimal(value: Decimal) -> Decimal:
     return value.quantize(_DECIMAL_QUANTUM, rounding=ROUND_HALF_EVEN)
 
 
+def _canonical_position_predecessors(
+    trace: Sequence[Any], label: str
+) -> dict[tuple[str, str], Decimal]:
+    entries = [
+        _strict_mapping(item, f"{label}.position_trace[{index}]")
+        for index, item in enumerate(trace)
+    ]
+    identities = [
+        (
+            _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id"),
+            _strict_text(entry["decision_time"], f"{label}.position_trace[{index}].decision_time"),
+        )
+        for index, entry in enumerate(entries)
+    ]
+    ordered_indices = sorted(
+        range(len(entries)), key=lambda index: (identities[index][1], identities[index][0])
+    )
+    prior_positions: dict[str, Decimal] = {}
+    predecessors: dict[tuple[str, str], Decimal] = {}
+    for index in ordered_indices:
+        entry = entries[index]
+        target_id, decision_time = identities[index]
+        position = _report_decimal(
+            entry["target_position"], f"{label}.position_trace[{index}].target_position"
+        )
+        assert position is not None
+        identity = (target_id, decision_time)
+        if identity in predecessors:
+            raise FreezeError(f"renderer {label}.position_trace has duplicate identity")
+        predecessors[identity] = prior_positions.get(target_id, Decimal("0"))
+        prior_positions[target_id] = position
+    return predecessors
+
+
 def _reconcile_economic_view(
     view: Mapping[str, Any],
     label: str,
     cost_grid: Sequence[Any] | None = None,
+    canonical_predecessors: Mapping[tuple[str, str], Decimal] | None = None,
 ) -> None:
     trace = _strict_sequence(view["position_trace"], f"{label}.position_trace")
     if not trace:
         raise FreezeError(f"{label}.position_trace must not be empty")
+    if canonical_predecessors is None:
+        canonical_predecessors = _canonical_position_predecessors(trace, label)
     gross_total = Decimal("0")
     turnover = Decimal("0")
     entries = [
         _strict_mapping(item, f"{label}.position_trace[{index}]")
         for index, item in enumerate(trace)
     ]
-    target_ids = [
-        _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id")
-        for index, entry in enumerate(entries)
-    ]
-    decision_times = [
-        _strict_text(entry["decision_time"], f"{label}.position_trace[{index}].decision_time")
-        for index, entry in enumerate(entries)
-    ]
-    full_trace = len(set(target_ids)) < len(target_ids)
-    ordered_indices = sorted(
-        range(len(entries)), key=lambda index: (decision_times[index], target_ids[index])
-    )
-    prior_positions: dict[str, Decimal] = {}
-    for index in ordered_indices:
-        entry = entries[index]
-        target_id = target_ids[index]
+    for index, entry in enumerate(entries):
+        target_id = _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id")
+        decision_time = _strict_text(
+            entry["decision_time"], f"{label}.position_trace[{index}].decision_time"
+        )
         position = _report_decimal(
             entry["target_position"], f"{label}.position_trace[{index}].target_position"
         )
@@ -991,13 +1017,14 @@ def _reconcile_economic_view(
             f"{label}.position_trace[{index}].target_position_change",
         )
         assert position is not None and realised is not None and change is not None
-        if full_trace or target_id in prior_positions:
-            expected_change = _qdecimal(position - prior_positions.get(target_id, Decimal("0")))
-            if change != expected_change:
-                raise FreezeError(
-                    f"renderer {label}.position_trace[{index}] change does not reconcile"
-                )
-        prior_positions[target_id] = position
+        identity = (target_id, decision_time)
+        if identity not in canonical_predecessors:
+            raise FreezeError(
+                f"renderer {label}.position_trace identity is absent from canonical root trace"
+            )
+        expected_change = _qdecimal(position - canonical_predecessors[identity])
+        if change != expected_change:
+            raise FreezeError(f"renderer {label}.position_trace[{index}] change does not reconcile")
         gross_total += realised
         turnover += abs(change)
     count = Decimal(len(trace))
@@ -1291,6 +1318,11 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         raise FreezeError("renderer economic turnover definition differs from frozen contract")
     expected_assets = frozenset(config.document["target_group_resolution"]["target_ids"])
     expected_periods = frozenset({"period-0", "period-1", "period-2"})
+    root_trace = _strict_sequence(economic["position_trace"], "economic.position_trace")
+    if len(root_trace) != selection["selected_rows"]:
+        raise FreezeError("renderer economic root trace does not reconcile with selection rows")
+    canonical_predecessors = _canonical_position_predecessors(root_trace, "economic")
+    root_decisions = frozenset(item["decision_time"] for item in root_trace)
     for dimension, expected_keys in (
         ("asset", expected_assets),
         ("horizon", frozenset({str(config.document["primary_horizon_minutes"])})),
@@ -1299,10 +1331,6 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         groups = _strict_mapping(economic[dimension], f"economic.{dimension}")
         if frozenset(groups) != expected_keys:
             raise FreezeError(f"renderer economic.{dimension} keys differ from frozen dimensions")
-        root_trace = _strict_sequence(economic["position_trace"], "economic.position_trace")
-        if len(root_trace) != selection["selected_rows"]:
-            raise FreezeError("renderer economic root trace does not reconcile with selection rows")
-        root_decisions = frozenset(item["decision_time"] for item in root_trace)
         expected_count = {
             "asset": len(root_trace) // len(expected_assets),
             "horizon": len(root_trace),
@@ -1366,15 +1394,26 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
                 f"renderer economic.configurations.{label} position trace cardinality mismatch"
             )
     for view_label, view in [("economic", economic)]:
-        _reconcile_economic_view(view, view_label, config.document["cost_grid"])
+        _reconcile_economic_view(
+            view, view_label, config.document["cost_grid"], canonical_predecessors
+        )
         for dimension in ("asset", "horizon", "period"):
             for name, child in view[dimension].items():
                 _reconcile_economic_view(
-                    child, f"{view_label}.{dimension}.{name}", config.document["cost_grid"]
+                    child,
+                    f"{view_label}.{dimension}.{name}",
+                    config.document["cost_grid"],
+                    canonical_predecessors,
                 )
         for name, child in view["configurations"].items():
+            configuration_predecessors = _canonical_position_predecessors(
+                child["position_trace"], f"{view_label}.configurations.{name}"
+            )
             _reconcile_economic_view(
-                child, f"{view_label}.configurations.{name}", config.document["cost_grid"]
+                child,
+                f"{view_label}.configurations.{name}",
+                config.document["cost_grid"],
+                configuration_predecessors,
             )
     statistical = _strict_mapping(
         report["statistical"],
