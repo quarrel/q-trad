@@ -4,7 +4,7 @@ This is implementation evidence only. It is not a retained result, effectiveness
 
 ## Exact micro-run
 
-This candidate is based on clean R3.D lineage `716288bf9e23a20d364bec19b22715bb68ec8013`; the exact source commit is recorded by the Git delivery receipt.
+The authorised integration base is `edc727a66ebbc989d0e4488950166eb77ed397d7`. The reviewed implementation source candidate is `93e3ba598ca0a5102d7cb9eba97c402bd06713e3`; this documentation-only carrier must retain it as an immediate ancestor, while its final exact Git identity is bound externally by the delivery receipt.
 
 ```text
 TMPDIR=/workspace/tmp uv run python -m qtrad r3-e --output <new-output-directory>
