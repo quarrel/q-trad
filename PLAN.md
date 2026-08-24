@@ -9,9 +9,9 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 orders or production broker connectivity.
 
 `docs/TRADING_RESEARCH.md` defines the stable research programme. The completed R2 decision-grade
-execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. No separate R3
-execution authority exists yet. This file selects the current work and records only the milestone
-sequence needed to reach the next trustworthy decision.
+execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. The active R3
+execution authority is `docs/R3_EXECUTION_PLAN.md`; this file selects the current work and records
+only the milestone sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
@@ -157,6 +157,11 @@ chronology ambiguity before those contracts are fixed.
   physical paper target with stable reason codes.
 - Select solver and numerical dependencies at milestone entry. Preserve `Decimal` at price,
   quantity, conversion and money boundaries.
+- Run a mandatory lightweight historical-exploratory lane over authenticated R2 evidence: break-even
+  cost/turnover sensitivity, a small pre-declared statistical/nonlinear comparison and one tiny
+  graph/GNN feasibility configuration with controls. It is not decision-grade and does not replace R4.
+- Freeze the precise future native decision-grade experiment protocol before R3 completes, without
+  provider acquisition, qualification execution, holdout opening or outcome access.
 
 ## R4 — residual structural graph experiment
 
