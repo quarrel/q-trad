@@ -23,7 +23,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "ff67fefe9c878235092c78e63b271843d9583064c12657f7b868d2376ceb3385"
+    "341d15247f3763c0489984e16df4ce241dd22b0cb753e136199ff4423e9ef667"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
@@ -436,6 +436,27 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         "outcome_evidence": retained_object["outcome_evidence"],
     }:
         raise FreezeError("retained loader locators differ from terminal children")
+    bindings = cast(Mapping[str, Any], loader["identity_bindings"])
+    expected_datasets = {
+        "LOCAL_RIDGE": "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9",
+        "POOLED_LOCAL_RIDGE": "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b",
+        "ZERO_RETURN": "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223",
+    }
+    expected_configs = {
+        "LOCAL_RIDGE": "7fad71b132e9ef29fa1d18c9d6c3a2f729f56191d6ec6ddeff767171393f27e8",
+        "POOLED_LOCAL_RIDGE": "05e4767b32e5a59b6510eee10f9308c40cbaa18199bcf95a7bf5e61a1636fe28",
+        "ZERO_RETURN": "6ea3c2aff09d5dae7d30d8cc7eb7883382bfb2ce7a3b51cf5f80bb1d69604f4b",
+    }
+    expected_wrappers = {
+        "POOLED_LOCAL_RIDGE": "e973e855ab2d62585cd8b809d9a57e74f6fc5b0908b292c08b7ad42ba16df6b6",
+        "ZERO_RETURN": "bfba06f10de85ad356bfc587d2010544a3f3959d13204f987f22773e916cd72d",
+    }
+    if (
+        bindings.get("dataset_ids") != expected_datasets
+        or bindings.get("config_ids") != expected_configs
+        or bindings.get("wrapper_sha256s") != expected_wrappers
+    ):
+        raise FreezeError("retained forecast role bindings are not frozen")
 
     statistical = raw["statistical_formulations"]
     if not isinstance(statistical, dict):
@@ -1029,11 +1050,22 @@ def load_retained_rows(
     mappings = cast(Mapping[str, str], loader["field_mappings"])
     required = set(cast(Sequence[str], loader["required_columns"]))
     expected_fields = {mappings[field] for field in required}
+    wrapper_hashes = cast(Mapping[str, Any], bindings.get("wrapper_sha256s", {}))
+    wrapper_roles = {
+        "pooled_forecast": "POOLED_LOCAL_RIDGE",
+        "zero_forecast": "ZERO_RETURN",
+    }
     rows_by_key: dict[tuple[Any, ...], dict[str, Mapping[str, Any]]] = {}
     child_summaries: dict[str, tuple[dict[str, Any], int, int]] = {}
     for name in child_names:
         child_limits = dict(limits)
         child_limits["required_record_keys"] = expected_fields
+        role = wrapper_roles.get(name)
+        if role is not None:
+            expected_hash = wrapper_hashes.get(role)
+            if not isinstance(expected_hash, str):
+                raise FreezeError(f"missing frozen wrapper hash: {name}")
+            child_limits["expected_wrapper_sha256"] = expected_hash
         metadata, records, size = _read_json_document(Path(actual_locators[name]), child_limits)
         _validate_child_metadata(name, metadata, loader)
         child_summaries[name] = (metadata, size, len(records))

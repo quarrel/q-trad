@@ -381,7 +381,7 @@ def test_each_economic_configuration_reports_subgroup_cost_sensitivity() -> None
                 assert all(
                     item["break_even_cost"] == subgroup["break_even_cost"] for item in sensitivity
                 )
-        assert all(item["unit"] == "fraction_of_notional" for item in sensitivity)
+                assert all(item["unit"] == "fraction_of_notional" for item in sensitivity)
 
 
 def test_outcome_blind_selector_rejects_duplicate_and_incomplete_groups() -> None:
@@ -518,3 +518,24 @@ def test_create_only_writer_is_atomic_on_collision_and_failure(
         module._write_create_only(failed, "{}")
     assert not failed.exists()
     assert not list(tmp_path.glob(".failed.json.*.tmp"))
+
+
+def test_retained_forecast_role_bindings_reject_swapped_datasets() -> None:
+    document = json.loads(CONFIG.read_text(encoding="utf-8"))
+    bindings = document["retained_loader"]["identity_bindings"]
+    assert bindings["dataset_ids"]["POOLED_LOCAL_RIDGE"].startswith("d2d07d40")
+    assert bindings["dataset_ids"]["ZERO_RETURN"].startswith("93eb9453")
+    assert bindings["wrapper_sha256s"]["POOLED_LOCAL_RIDGE"].startswith("e973e855")
+    assert bindings["wrapper_sha256s"]["ZERO_RETURN"].startswith("bfba06f1")
+
+    swapped = json.loads(CONFIG.read_text(encoding="utf-8"))
+    swapped_bindings = swapped["retained_loader"]["identity_bindings"]
+    (
+        swapped_bindings["dataset_ids"]["POOLED_LOCAL_RIDGE"],
+        swapped_bindings["dataset_ids"]["ZERO_RETURN"],
+    ) = (
+        swapped_bindings["dataset_ids"]["ZERO_RETURN"],
+        swapped_bindings["dataset_ids"]["POOLED_LOCAL_RIDGE"],
+    )
+    with pytest.raises(FreezeError, match="role bindings"):
+        FreezeConfig.from_mapping(_rehashed(swapped))
