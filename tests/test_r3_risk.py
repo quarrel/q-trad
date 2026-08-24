@@ -268,3 +268,33 @@ def test_config_and_state_reject_unsupported_policy_labels() -> None:
             closure_identity=None,
             provenance_identity=None,
         )
+
+
+def test_huge_finite_positions_fail_closed_on_derived_overflow() -> None:
+    state = _estimate(_observations())
+    huge_caps = RiskCaps(
+        asset_caps=(1e308, 1e308, 1e308),
+        gross_cap=1e308,
+        net_cap=1e308,
+        concentration_cap=1.0,
+        portfolio_risk_cap=1e308,
+        group_caps=(1e308, 1e308),
+        currency_caps=(1e308, 1e308),
+    )
+    state = replace(
+        state,
+        caps=huge_caps,
+        group_caps=huge_caps.group_caps,
+        currency_caps=huge_caps.currency_caps,
+        semantic_identity=None,
+        closure_identity=None,
+        provenance_identity=None,
+    )
+    huge_position = (1e308, 1e308, 1e308)
+    with pytest.raises(ValueError, match="non-finite"):
+        state.portfolio_variance(huge_position)
+    with pytest.raises(ValueError, match="non-finite"):
+        state.group_exposure(huge_position)
+    with pytest.raises(ValueError, match="non-finite"):
+        state.validate_position(huge_position)
+    assert not state.position_is_valid(huge_position)

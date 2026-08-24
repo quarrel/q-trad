@@ -476,44 +476,67 @@ class RiskState:
 
     def group_exposure(self, position: Sequence[float]) -> Position:
         values = self._position(position)
-        return tuple(
+        exposures = tuple(
             sum(row[index] * values[index] for index in range(len(values)))
             for row in self.group_exposure_matrix
         )
+        if any(not isfinite(exposure) for exposure in exposures):
+            raise ValueError("group exposure produced a non-finite result")
+        return exposures
 
     def currency_exposure(self, position: Sequence[float]) -> Position:
         values = self._position(position)
-        return tuple(
+        exposures = tuple(
             sum(row[index] * values[index] for index in range(len(values)))
             for row in self.currency_exposure_matrix
         )
+        if any(not isfinite(exposure) for exposure in exposures):
+            raise ValueError("currency exposure produced a non-finite result")
+        return exposures
 
     def portfolio_variance(self, position: Sequence[float]) -> float:
         values = self._position(position)
-        return float(
+        variance = float(
             sum(
                 values[row] * self.covariance[row][column] * values[column]
                 for row in range(len(values))
                 for column in range(len(values))
             )
         )
+        if not isfinite(variance):
+            raise ValueError("portfolio variance produced a non-finite result")
+        return variance
 
     def portfolio_risk(self, position: Sequence[float]) -> float:
         variance = self.portfolio_variance(position)
         if variance < -self.psd_tolerance:
             raise ValueError("risk covariance produced a materially negative variance")
-        return sqrt(max(variance, 0.0))
+        risk = sqrt(max(variance, 0.0))
+        if not isfinite(risk):
+            raise ValueError("portfolio risk produced a non-finite result")
+        return risk
 
     def gross_exposure(self, position: Sequence[float]) -> float:
-        return sum(abs(value) for value in self._position(position))
+        gross = sum(abs(value) for value in self._position(position))
+        if not isfinite(gross):
+            raise ValueError("gross exposure produced a non-finite result")
+        return gross
 
     def net_exposure(self, position: Sequence[float]) -> float:
-        return abs(sum(self._position(position)))
+        net = abs(sum(self._position(position)))
+        if not isfinite(net):
+            raise ValueError("net exposure produced a non-finite result")
+        return net
 
     def concentration(self, position: Sequence[float]) -> float:
         values = self._position(position)
         gross = sum(abs(value) for value in values)
-        return 0.0 if gross == 0 else max(abs(value) for value in values) / gross
+        if not isfinite(gross):
+            raise ValueError("concentration produced a non-finite gross exposure")
+        concentration = 0.0 if gross == 0 else max(abs(value) for value in values) / gross
+        if not isfinite(concentration):
+            raise ValueError("concentration produced a non-finite result")
+        return concentration
 
     def validate_position(self, position: Sequence[float]) -> None:
         values = self._position(position)
