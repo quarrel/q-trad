@@ -82,6 +82,15 @@ _RETAINED_KEYS: Final = frozenset(
         "stage8_promotion_id",
     }
 )
+_RETAINED_IDENTITY_KEYS: Final = (
+    "stage7_semantic_id",
+    "stage7_dataset_id",
+    "stage7_closure_id",
+    "stage7_verification_id",
+    "terminal_report_sha256",
+    "terminal_approval_sha256",
+    "stage8_promotion_id",
+)
 _STATISTICAL_KEYS: Final = frozenset({"oof", "controls", "metrics", "views"})
 _OUTPUT_KEYS: Final = frozenset({"report_contract", "create_only", "post_result_expansion"})
 
@@ -411,8 +420,9 @@ def _metrics(
         "status": status,
         "mse": round(mse, 12),
         "rank_correlation": round(rank_correlation, 12) if rank_correlation is not None else None,
-        "coverage": 1.0,
+        "coverage": len(rows) / len(rows),
         "support": len(rows),
+        "prediction_trace": [round(prediction, 12) for prediction in predictions],
     }
 
 
@@ -509,20 +519,131 @@ def _check_hard_limits(limits: Mapping[str, Any], measurement: FixtureMeasuremen
         raise FreezeError("fixture analysis exceeded max_memory_mb")
 
 
-def _graph_predictions(rows: Sequence[FixtureRow]) -> dict[str, list[float]]:
+def _timestamp_groups(rows: Sequence[FixtureRow]) -> dict[str, list[int]]:
+    groups: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        groups[row.timestamp].append(index)
+    return dict(groups)
+
+
+def _pooled_predictions(rows: Sequence[FixtureRow], values: Sequence[float]) -> list[float]:
+    if len(rows) != len(values):
+        raise FreezeError("pooled control received unaligned values")
+    groups = _timestamp_groups(rows)
+    predictions = [0.0] * len(rows)
+    for indexes in groups.values():
+        mean_value = sum(values[index] for index in indexes) / len(indexes)
+        for index in indexes:
+            predictions[index] = mean_value
+    return predictions
+
+
+def _fixed_graph_neighbors(rows: Sequence[FixtureRow], values: Sequence[float]) -> list[float]:
+    groups = _timestamp_groups(rows)
+    neighbours = [0.0] * len(rows)
+    for indexes in groups.values():
+        for index in indexes:
+            others = [other for other in indexes if other != index]
+            neighbours[index] = (
+                sum(values[other] for other in others) / len(others) if others else values[index]
+            )
+    return neighbours
+
+
+def _shuffled_graph_predictions(rows: Sequence[FixtureRow], values: Sequence[float]) -> list[float]:
+    groups = _timestamp_groups(rows)
+    predictions = [0.0] * len(rows)
+    for indexes in groups.values():
+        shuffled = list(reversed(indexes))
+        for position, index in enumerate(indexes):
+            predictions[index] = values[shuffled[position]]
+    return predictions
+
+
+def _fit_tiny_graph_weights(
+    rows: Sequence[FixtureRow],
+    values: Sequence[float],
+    neighbours: Sequence[float],
+    training_indices: Sequence[int],
+) -> tuple[float, float, float, float]:
+    totals = [0.0] * 4
+    squares = [0.0] * 4
+    for index in training_indices:
+        features = (
+            values[index],
+            neighbours[index],
+            values[index] * neighbours[index],
+            1.0,
+        )
+        target = rows[index].realised_return
+        for feature_index, feature in enumerate(features):
+            totals[feature_index] += feature * target
+            squares[feature_index] += feature * feature
+    return cast(
+        tuple[float, float, float, float],
+        tuple(
+            total / square if square else 0.0 for total, square in zip(totals, squares, strict=True)
+        ),
+    )
+
+
+def _graph_predictions(
+    rows: Sequence[FixtureRow],
+    tiny_graph: Mapping[str, Any],
+) -> tuple[dict[str, list[float]], int, int]:
+    if tiny_graph["layers"] != 1 or tiny_graph["hidden_units"] != 4:
+        raise FreezeError(
+            "tiny graph configuration is outside the frozen one-layer four-unit bound"
+        )
     values = [row.prediction for row in rows]
-    mean_prediction = sum(values) / len(values)
+    pooled = _pooled_predictions(rows, values)
+    neighbours = _fixed_graph_neighbors(rows, values)
+    shuffled = _shuffled_graph_predictions(rows, values)
+    groups = _timestamp_groups(rows)
+    timestamps = sorted(groups)
+    learned = [0.0] * len(rows)
+    fit_executions = 0
+    if len(timestamps) > 1:
+        weights = _fit_tiny_graph_weights(rows, values, neighbours, groups[timestamps[0]])
+        fit_executions = 1
+        for index in (item for timestamp in timestamps[1:] for item in groups[timestamp]):
+            features = (
+                values[index],
+                neighbours[index],
+                values[index] * neighbours[index],
+                1.0,
+            )
+            learned[index] = max(
+                -0.05,
+                min(
+                    0.05,
+                    sum(weight * feature for weight, feature in zip(weights, features, strict=True))
+                    / 4.0,
+                ),
+            )
+    return (
+        {
+            "local_non_graph": values,
+            "pooled_non_graph": pooled,
+            "fixed_graph": neighbours,
+            "shuffled_graph": shuffled,
+            "tiny_learned_graph": learned,
+        },
+        int(bool(fit_executions)),
+        fit_executions,
+    )
+
+
+def _code_provenance() -> dict[str, str]:
+    try:
+        source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError as exc:
+        raise FreezeError("cannot establish application code identity") from exc
+    python_version = ".".join(str(part) for part in sys.version_info[:3])
     return {
-        "local_non_graph": values,
-        "pooled_non_graph": [mean_prediction] * len(rows),
-        "fixed_graph": [
-            (value + values[(index - 1) % len(values)]) / 2 for index, value in enumerate(values)
-        ],
-        "shuffled_graph": [values[(index + 1) % len(values)] for index in range(len(values))],
-        "tiny_learned_graph": [
-            0.75 * value + 0.25 * values[(index - 1) % len(values)]
-            for index, value in enumerate(values)
-        ],
+        "application_contract": "qtrad-r3-historical-exploratory-implementation-v2",
+        "module_sha256": source_sha256,
+        "python_version": python_version,
     }
 
 
@@ -542,7 +663,7 @@ def analyse_fixture(
     candidate_ids = list(_CANDIDATE_IDS)
     zero_predictions = [0.0] * row_count
     local_predictions = [row.prediction for row in ordered]
-    pooled_value = sum(local_predictions) / row_count
+    pooled_predictions = _pooled_predictions(ordered, local_predictions)
     candidate_predictions = {
         "linear_ridge": local_predictions,
         "linear_zero_return": zero_predictions,
@@ -560,14 +681,12 @@ def analyse_fixture(
         for candidate_id in candidate_ids
     }
     tiny_graph = cast(Mapping[str, Any], config.document["tiny_graph_candidate"])
-    graph_fit_count = 1 if tiny_graph["enabled"] else 0
-    fits = len(candidate_metrics) + graph_fit_count
-    if fits > limits["max_fits"] or len(candidate_ids) > limits["max_candidates"]:
-        raise FreezeError("fixture analysis exceeded frozen work limits")
+    if not tiny_graph["enabled"] or len(candidate_ids) > limits["max_candidates"]:
+        raise FreezeError("fixture analysis exceeded frozen candidate limits")
     control_predictions = {
         "zero_return": zero_predictions,
         "local_ridge": local_predictions,
-        "pooled_local_ridge": [pooled_value] * row_count,
+        "pooled_local_ridge": pooled_predictions,
     }
     control_metrics = {
         control_id: _metrics(
@@ -595,7 +714,12 @@ def analyse_fixture(
         >= {"NEGATIVE", "FAILED", "INCONCLUSIVE"},
         "post_result_selection": False,
     }
-    graph_predictions = _graph_predictions(ordered)
+    graph_predictions, graph_fit_count, graph_fit_executions = _graph_predictions(
+        ordered, tiny_graph
+    )
+    fits = len(candidate_metrics) + graph_fit_count
+    if fits > limits["max_fits"]:
+        raise FreezeError("fixture analysis exceeded frozen fit limits")
     graph_metrics = {
         control_id: _metrics(
             ordered,
@@ -608,8 +732,11 @@ def analyse_fixture(
         "tiny_learned_graph": {
             "id": "tiny_learned_graph",
             **graph_metrics["tiny_learned_graph"],
+            "layers": tiny_graph["layers"],
+            "hidden_units": tiny_graph["hidden_units"],
             "feasibility_only": True,
             "fits": graph_fit_count,
+            "walk_forward_fit_executions": graph_fit_executions,
         },
         "controls": [
             {
@@ -627,6 +754,8 @@ def analyse_fixture(
         candidate_id: metric["status"] for candidate_id, metric in candidate_metrics.items()
     }
     graph_statuses = {control_id: metric["status"] for control_id, metric in graph_metrics.items()}
+    retained = cast(Mapping[str, Any], config.document["retained_parents"])
+    parent_identities = {key: retained[key] for key in _RETAINED_IDENTITY_KEYS}
     report: dict[str, Any] = {
         "contract": REPORT_CONTRACT,
         "schema_version": 1,
@@ -635,8 +764,10 @@ def analyse_fixture(
         "price_basis": config.document["price_basis"],
         "evidence_class": "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE",
         "claims": list(_NON_EXECUTABLE_CLAIMS),
+        "code_provenance": _code_provenance(),
         "retained_parents": {
             "paths": dict(retained_input_paths()),
+            "identities": parent_identities,
             "authentication_command": AUTHENTICATION_COMMAND,
             "authentication_performed": False,
             "outcome_decode_performed": False,

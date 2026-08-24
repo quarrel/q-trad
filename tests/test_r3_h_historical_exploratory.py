@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -148,3 +149,68 @@ def test_work_and_resource_limits_fail_closed() -> None:
             config,
             measurement=FixtureMeasurement(elapsed_seconds=1, memory_mb=513),
         )
+
+
+def _control(report: Mapping[str, Any], control_id: str) -> dict[str, Any]:
+    return next(control for control in report["graph"]["controls"] if control["id"] == control_id)
+
+
+def _simple_control(report: Mapping[str, Any], control_id: str) -> dict[str, Any]:
+    return next(
+        control
+        for control in report["statistical"]["simple_controls"]
+        if control["id"] == control_id
+    )
+
+
+def test_pooled_and_graph_controls_are_causal_and_use_frozen_graph() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    rows = list(synthetic_fixture())
+    rows[1] = replace(rows[1], timestamp=rows[0].timestamp, asset="B")
+    baseline = analyse_fixture(tuple(rows), config).report
+    future = replace(
+        rows[-1],
+        timestamp="2026-02-01T00:10:00Z",
+        period="period-future",
+        prediction=9.0,
+        realised_return=0.9,
+    )
+    extended = analyse_fixture((*rows, future), config).report
+
+    baseline_pooled = _simple_control(baseline, "pooled_local_ridge")["prediction_trace"]
+    extended_pooled = _simple_control(extended, "pooled_local_ridge")["prediction_trace"]
+    assert extended_pooled[: len(rows)] == baseline_pooled
+
+    baseline_tiny = baseline["graph"]["tiny_learned_graph"]["prediction_trace"]
+    extended_tiny = extended["graph"]["tiny_learned_graph"]["prediction_trace"]
+    assert extended_tiny[: len(rows)] == baseline_tiny
+    assert baseline["graph"]["tiny_learned_graph"]["layers"] == 1
+    assert baseline["graph"]["tiny_learned_graph"]["hidden_units"] == 4
+    assert baseline["work"]["graph_fit_count"] == 1
+    assert baseline["graph"]["tiny_learned_graph"]["walk_forward_fit_executions"] == 1
+
+    fixed = _control(baseline, "fixed_graph")["prediction_trace"]
+    shuffled = _control(baseline, "shuffled_graph")["prediction_trace"]
+    assert fixed[0] == rows[1].prediction
+    assert shuffled[0] == rows[1].prediction
+
+
+def test_report_carries_frozen_parent_identities_and_code_provenance() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    report = analyse_fixture(synthetic_fixture(), config).report
+    retained = config.document["retained_parents"]
+    identities = report["retained_parents"]["identities"]
+    for key in (
+        "stage7_semantic_id",
+        "stage7_dataset_id",
+        "stage7_closure_id",
+        "stage7_verification_id",
+        "terminal_report_sha256",
+        "terminal_approval_sha256",
+        "stage8_promotion_id",
+    ):
+        assert identities[key] == retained[key]
+    provenance = report["code_provenance"]
+    assert provenance["application_contract"] == "qtrad-r3-historical-exploratory-implementation-v2"
+    assert len(provenance["module_sha256"]) == 64
+    assert len(provenance["python_version"].split(".")) == 3
