@@ -555,18 +555,41 @@ def _metrics(
     *,
     baseline_mse: float | None,
     minimum_support: int = 1,
+    prediction_mask: Sequence[bool] | None = None,
 ) -> dict[str, Any]:
     if len(rows) != len(predictions) or not rows:
         raise FreezeError("fixture control produced no aligned predictions")
-    if any(
-        not math.isfinite(prediction) or not math.isfinite(row.realised_return)
-        for row, prediction in zip(rows, predictions, strict=True)
-    ):
-        raise FreezeError("fixture control produced non-finite values")
-    realised = [row.realised_return for row in rows]
-    errors = [prediction - actual for prediction, actual in zip(predictions, realised, strict=True)]
+    mask = tuple(True for _ in rows) if prediction_mask is None else tuple(prediction_mask)
+    if len(mask) != len(rows):
+        raise FreezeError("fixture control prediction mask is not aligned")
+    if any(not math.isfinite(prediction) for prediction in predictions):
+        raise FreezeError("fixture control produced non-finite predictions")
+    selected_indices = tuple(index for index, included in enumerate(mask) if included)
+    prediction_trace = [
+        round(prediction, 12) if mask[index] else None
+        for index, prediction in enumerate(predictions)
+    ]
+    if not selected_indices:
+        return {
+            "status": "FAILED",
+            "mse": None,
+            "rank_correlation": None,
+            "coverage": 0.0,
+            "support": 0,
+            "prediction_trace": prediction_trace,
+            "prediction_mask": list(mask),
+        }
+    selected_rows = [rows[index] for index in selected_indices]
+    selected_predictions = [predictions[index] for index in selected_indices]
+    if any(not math.isfinite(row.realised_return) for row in selected_rows):
+        raise FreezeError("fixture control produced non-finite realised returns")
+    realised = [row.realised_return for row in selected_rows]
+    errors = [
+        prediction - actual
+        for prediction, actual in zip(selected_predictions, realised, strict=True)
+    ]
     mse = sum(error * error for error in errors) / len(errors)
-    prediction_ranks = _rank_values(predictions)
+    prediction_ranks = _rank_values(selected_predictions)
     realised_ranks = _rank_values(realised)
     mean_prediction_rank = sum(prediction_ranks) / len(prediction_ranks)
     mean_realised_rank = sum(realised_ranks) / len(realised_ranks)
@@ -581,16 +604,17 @@ def _metrics(
         if prediction_scale and realised_scale
         else None
     )
-    status = "FAILED" if len(rows) < minimum_support else "INCONCLUSIVE"
+    status = "FAILED" if len(selected_rows) < minimum_support else "INCONCLUSIVE"
     if baseline_mse is not None and mse > baseline_mse + 1e-15 and status != "FAILED":
         status = "NEGATIVE"
     return {
         "status": status,
         "mse": round(mse, 12),
         "rank_correlation": round(rank_correlation, 12) if rank_correlation is not None else None,
-        "coverage": len(rows) / len(rows),
-        "support": len(rows),
-        "prediction_trace": [round(prediction, 12) for prediction in predictions],
+        "coverage": len(selected_rows) / len(rows),
+        "support": len(selected_rows),
+        "prediction_trace": prediction_trace,
+        "prediction_mask": list(mask),
     }
 
 
@@ -611,6 +635,13 @@ def _first_training_fold(rows: Sequence[FixtureRow]) -> tuple[list[int], str]:
         if training:
             return training, evaluation_time
     raise FreezeError("fixture has no matured causal training fold")
+
+
+def _evaluation_mask(rows: Sequence[FixtureRow], training_indices: Sequence[int]) -> list[bool]:
+    if not training_indices:
+        raise FreezeError("fixture has no causal fit rows")
+    cutoff = max(rows[index].decision_time for index in training_indices)
+    return [row.decision_time > cutoff for row in rows]
 
 
 def _chronological_oof(rows: Sequence[FixtureRow]) -> tuple[dict[str, Any], int, list[FixtureRow]]:
@@ -746,11 +777,31 @@ def _economic_views(
         turnover = sum(abs(changes[index]) for index in indices)
         count = len(indices)
         gross_mean = gross_total / count if count else 0.0
+        break_even_cost = gross_total / turnover if turnover else None
+        sensitivities = [
+            {
+                "cost": float(point["value"]),
+                "unit": point["unit"],
+                "net_mean": (
+                    round(gross_mean - float(point["value"]) * turnover / count, 12)
+                    if count
+                    else None
+                ),
+                "break_even_cost": (
+                    round(break_even_cost, 12) if break_even_cost is not None else None
+                ),
+                "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
+            }
+            for point in config.document["cost_grid"]
+        ]
         return {
             "gross_total": round(gross_total, 12),
             "gross_mean": round(gross_mean, 12),
             "turnover": round(turnover, 12),
-            "break_even_cost": round(gross_total / turnover, 12) if turnover else None,
+            "break_even_cost": (
+                round(break_even_cost, 12) if break_even_cost is not None else None
+            ),
+            "all_in_cost_sensitivity": sensitivities,
             "position_trace": [
                 {
                     "target_id": rows[index].target_id,
@@ -764,24 +815,10 @@ def _economic_views(
         }
 
     all_indices = tuple(range(len(rows)))
-    sensitivities = [
-        {
-            "cost": float(point["value"]),
-            "unit": point["unit"],
-            "net_mean": round(
-                view(all_indices)["gross_mean"]
-                - float(point["value"]) * view(all_indices)["turnover"] / len(rows),
-                12,
-            ),
-            "break_even_cost": view(all_indices)["break_even_cost"],
-            "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
-        }
-        for point in config.document["cost_grid"]
-    ]
+    all_view = view(all_indices)
     return {
         "trace_id": trace_id,
         "physical_turnover_definition": config.document["turnover_definition"],
-        "all_in_cost_sensitivity": sensitivities,
         "asset": {
             name: view(indices) for name, indices in sorted(indices_by_group["asset"].items())
         },
@@ -791,7 +828,7 @@ def _economic_views(
         "period": {
             name: view(indices) for name, indices in sorted(indices_by_group["period"].items())
         },
-        **view(all_indices),
+        **all_view,
     }
 
 
@@ -1046,7 +1083,11 @@ def analyse_fixture(
         raise FreezeError("fixture exceeds max_rows")
 
     oof, row_count, ordered = _chronological_oof(rows)
-    training_indices, _ = _first_training_fold(ordered)
+    training_indices, first_evaluation_time = _first_training_fold(ordered)
+    evaluation_mask = _evaluation_mask(ordered, training_indices)
+    all_mask = [True] * row_count
+    oof["first_fit_evaluation_time"] = first_evaluation_time
+    oof["first_fit_prediction_mask"] = evaluation_mask
     candidate_ids = list(_CANDIDATE_IDS)
     if len(candidate_ids) > limits["max_candidates"]:
         raise FreezeError("fixture analysis exceeded frozen candidate limits")
@@ -1067,9 +1108,21 @@ def analyse_fixture(
         "linear_zero_return": zero_predictions,
         "nonlinear_huber": huber_predictions,
     }
-    zero_metrics = _metrics(ordered, zero_predictions, baseline_mse=None)
+    candidate_masks = {
+        "linear_ridge": all_mask,
+        "linear_zero_return": all_mask,
+        "nonlinear_huber": evaluation_mask,
+    }
+    zero_metrics = _metrics(
+        ordered,
+        zero_predictions,
+        baseline_mse=None,
+        prediction_mask=all_mask,
+    )
     baseline_mse = float(zero_metrics["mse"])
-    local_reference_mse = float(_metrics(ordered, local_predictions, baseline_mse=None)["mse"])
+    local_reference_mse = float(
+        _metrics(ordered, local_predictions, baseline_mse=None, prediction_mask=all_mask)["mse"]
+    )
     candidate_fit_executions = {
         "linear_ridge": 0,
         "linear_zero_return": 0,
@@ -1082,8 +1135,13 @@ def analyse_fixture(
                 candidate_predictions[candidate_id],
                 baseline_mse=baseline_mse if candidate_id != "linear_zero_return" else None,
                 minimum_support=19 if candidate_id == "nonlinear_huber" else 1,
+                prediction_mask=candidate_masks[candidate_id],
             ),
             "fit_executions": candidate_fit_executions[candidate_id],
+            "training_rows": len(training_indices) if candidate_fit_executions[candidate_id] else 0,
+            "fit_evaluation_time": (
+                first_evaluation_time if candidate_fit_executions[candidate_id] else None
+            ),
         }
         for candidate_id in candidate_ids
     }
@@ -1092,6 +1150,11 @@ def analyse_fixture(
         "zero_return": zero_predictions,
         "local_ridge": local_predictions,
         "pooled_local_ridge": pooled_predictions,
+    }
+    control_masks = {
+        "zero_return": all_mask,
+        "local_ridge": all_mask,
+        "pooled_local_ridge": evaluation_mask,
     }
     control_fit_executions = {
         "zero_return": 0,
@@ -1104,8 +1167,13 @@ def analyse_fixture(
                 ordered,
                 predictions,
                 baseline_mse=(local_reference_mse if control_id == "zero_return" else baseline_mse),
+                prediction_mask=control_masks[control_id],
             ),
             "fit_executions": control_fit_executions[control_id],
+            "training_rows": len(training_indices) if control_fit_executions[control_id] else 0,
+            "fit_evaluation_time": (
+                first_evaluation_time if control_fit_executions[control_id] else None
+            ),
         }
         for control_id, predictions in control_predictions.items()
     }
@@ -1116,7 +1184,12 @@ def analyse_fixture(
             "rank_correlation": oof_metrics["rank_correlation"],
             "coverage": oof_metrics["coverage"],
             "support": oof_metrics["support"],
+            "prediction_mask": oof_metrics["prediction_mask"],
         },
+        "candidates": [
+            {"id": candidate_id, **candidate_metrics[candidate_id]}
+            for candidate_id in candidate_ids
+        ],
         "simple_controls": [
             {"id": control_id, **control_metrics[control_id]}
             for control_id in ("zero_return", "local_ridge", "pooled_local_ridge")
@@ -1137,11 +1210,14 @@ def analyse_fixture(
     fits = sum(candidate_fit_executions.values()) + pooled_fit_executions + graph_fit_count
     if fits > limits["max_fits"]:
         raise FreezeError("fixture analysis exceeded frozen fit limits")
+    graph_masks = {control_id: all_mask for control_id in _GRAPH_CONTROL_IDS}
+    graph_masks["tiny_learned_graph"] = evaluation_mask
     graph_metrics = {
         control_id: _metrics(
             ordered,
             predictions,
             baseline_mse=baseline_mse,
+            prediction_mask=graph_masks[control_id],
         )
         for control_id, predictions in graph_predictions.items()
     }

@@ -317,3 +317,64 @@ def test_economic_positions_derive_signed_deltas_and_costs() -> None:
     flat_asset = flat_report["economic"]["configurations"]["linear_ridge"]["asset"]["fx:aud-usd"]
     assert flat_asset["turnover"] == 0.0
     assert flat_asset["break_even_cost"] is None
+
+
+def test_causal_model_diagnostics_mask_prefit_rows() -> None:
+    report = analyse_fixture(synthetic_fixture(), FreezeConfig.from_path(CONFIG)).report
+    candidates = {item["id"]: item for item in report["statistical"]["candidates"]}
+    controls = {item["id"]: item for item in report["statistical"]["simple_controls"]}
+    assert set(candidates) == {"linear_ridge", "linear_zero_return", "nonlinear_huber"}
+    assert {
+        "status",
+        "mse",
+        "rank_correlation",
+        "coverage",
+        "support",
+        "prediction_trace",
+        "prediction_mask",
+        "fit_executions",
+        "training_rows",
+        "fit_evaluation_time",
+    } <= candidates["nonlinear_huber"].keys()
+    assert candidates["nonlinear_huber"]["status"] == "FAILED"
+    assert candidates["nonlinear_huber"]["support"] == 12
+    assert candidates["nonlinear_huber"]["coverage"] == pytest.approx(2 / 3)
+    assert candidates["nonlinear_huber"]["prediction_trace"][:6] == [None] * 6
+    assert candidates["nonlinear_huber"]["prediction_mask"] == [False] * 6 + [True] * 12
+    assert controls["pooled_local_ridge"]["support"] == 12
+    assert controls["pooled_local_ridge"]["coverage"] == pytest.approx(2 / 3)
+    assert controls["pooled_local_ridge"]["prediction_trace"][:6] == [None] * 6
+
+
+def test_future_maturity_mutation_does_not_rewrite_earlier_predictions() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    rows = synthetic_fixture()
+    baseline = analyse_fixture(rows, config).report
+    mutated_last = replace(
+        rows[-1],
+        target_available_at="2026-01-01T23:00:00Z",
+        dependency_end="2026-01-01T23:00:00Z",
+        realised_return=99.0,
+    )
+    mutated = analyse_fixture((*rows[:-1], mutated_last), config).report
+    baseline_pooled = _simple_control(baseline, "pooled_local_ridge")["prediction_trace"]
+    mutated_pooled = _simple_control(mutated, "pooled_local_ridge")["prediction_trace"]
+    assert mutated_pooled[:-1] == baseline_pooled[:-1]
+    baseline_tiny = baseline["graph"]["tiny_learned_graph"]["prediction_trace"]
+    mutated_tiny = mutated["graph"]["tiny_learned_graph"]["prediction_trace"]
+    assert mutated_tiny[:-1] == baseline_tiny[:-1]
+
+
+def test_each_economic_configuration_reports_subgroup_cost_sensitivity() -> None:
+    report = analyse_fixture(synthetic_fixture(), FreezeConfig.from_path(CONFIG)).report
+    for economic in report["economic"]["configurations"].values():
+        assert len(economic["all_in_cost_sensitivity"]) == 4
+        for dimension in ("asset", "horizon", "period"):
+            assert set(economic[dimension])
+            for subgroup in economic[dimension].values():
+                sensitivity = subgroup["all_in_cost_sensitivity"]
+                assert len(sensitivity) == 4
+                assert all(
+                    item["break_even_cost"] == subgroup["break_even_cost"] for item in sensitivity
+                )
+                assert all(item["unit"] == "fraction_of_notional" for item in sensitivity)
