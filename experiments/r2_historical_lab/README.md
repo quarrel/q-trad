@@ -31,3 +31,15 @@ with `freeze_finalists`, and supply the exact freeze SHA-256 and configuration I
 `TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt failed, evaluated training-only
 rows, or evaluated the terminal block, that configuration is permanently ineligible for a later
 freeze in the same workstream and manifest.
+
+## LAB-U universe experiment
+
+Run the authenticated smoke and the complete universe matrix from the LAB-U worktree:
+
+    uv run -m experiments.r2_historical_lab.universe smoke --config experiments/r2_historical_lab/universe-config.json
+    uv run -m experiments.r2_historical_lab.universe run --config experiments/r2_historical_lab/universe-config.json
+
+LAB-U recomputes the original cross-market availability count for each declared training universe,
+fits only chronological and horizon-mature rows, freezes no more than three finalists from DEV_1
+through DEV_3, and only then loads the former consumed holdout as a terminal post-hoc development
+block. Outputs remain non-authoritative under /workspace/tmp/qtrad-r2-lab/LAB-U.
