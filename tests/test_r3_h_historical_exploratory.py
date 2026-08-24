@@ -651,30 +651,36 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
     result = analyse_fixture(synthetic_fixture(), config)
     rendered = render_markdown(result, config)
 
-    second_result = analyse_fixture(synthetic_fixture(), config)
     assert rendered == render_markdown(result, config)
-    assert rendered == render_markdown(second_result, config)
+    second_result = analyse_fixture(synthetic_fixture(), config)
     assert canonical_report_semantic_identity(result.report) == (
         canonical_report_semantic_identity(second_result.report)
     )
 
-    provenance_changed = dict(result.report)
-    changed_parents = dict(result.report["retained_parents"])
-    changed_paths = dict(changed_parents["paths"])
-    changed_paths["terminal_report"] = "/relocated/report.md"
-    changed_parents["paths"] = changed_paths
-    provenance_changed["retained_parents"] = changed_parents
+    provenance_changed = json.loads(result.canonical_json())
+    changed_parents = provenance_changed["retained_parents"]
+    changed_parents["paths"]["terminal_report"] = "/relocated/report.md"
+    changed_candidate = provenance_changed["statistical"]["candidates"][0]
+    changed_candidate["execution_receipt"]["wrapper_sha256"] = "changed-wrapper"
+    changed_candidate["execution_receipt"]["path"] = "/relocated/wrapper.py"
     assert canonical_report_semantic_identity(result.report) == canonical_report_semantic_identity(
         provenance_changed
     )
-    semantic_changed = dict(result.report)
-    changed_economic = dict(result.report["economic"])
-    changed_economic["trace_id"] = "changed"
-    semantic_changed["economic"] = changed_economic
+    changed_rendered = render_markdown(MicroRun(provenance_changed, result.work_count), config)
+    assert "changed-wrapper" in changed_rendered
+    assert "/relocated/wrapper.py" in changed_rendered
+
+    semantic_changed = json.loads(result.canonical_json())
+    semantic_changed["economic"]["trace_id"] = "changed"
     assert canonical_report_semantic_identity(result.report) != canonical_report_semantic_identity(
         semantic_changed
     )
     assert canonical_report_semantic_identity(result.report) in rendered
+    assert '"schema_version": 1' in rendered
+    assert (
+        '"elapsed_seconds": ' + str(result.report["work"]["measurement"]["elapsed_seconds"])
+        in rendered
+    )
     for heading in (
         "Machine-readable report identity",
         "Terminal authority and consumed child identities",
@@ -685,6 +691,7 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
         "Tiny graph/GNN feasibility and controls",
         "Negative, failed, and inconclusive outcomes",
         "Claim boundary",
+        "Physical closure, execution, and resource provenance",
     ):
         assert f"## {heading}" in rendered
     for label in (
@@ -709,15 +716,47 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
         assert label in rendered
     assert json.loads(result.canonical_json())["contract"] == result.report["contract"]
 
+    malformed_reports = []
     for section, malformed_value in (
         ("economic", None),
         ("claims", "not-a-list"),
         ("work", []),
     ):
-        malformed = dict(result.report)
+        malformed = json.loads(result.canonical_json())
         malformed[section] = malformed_value
+        malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["unexpected"] = True
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["economic"]["asset"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["economic"]["all_in_cost_sensitivity"][0] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["statistical"]["oof"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["statistical"]["candidates"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["graph"]["controls"] = None
+    malformed_reports.append(malformed)
+
+    malformed = json.loads(result.canonical_json())
+    malformed["graph"]["tiny_learned_graph"] = None
+    malformed_reports.append(malformed)
+
+    for malformed in malformed_reports:
         with pytest.raises(FreezeError, match="renderer"):
             render_markdown(MicroRun(malformed, result.work_count), config)
 
-    with pytest.raises(FreezeError, match="missing required"):
+    with pytest.raises(FreezeError, match="schema mismatch"):
         render_markdown(MicroRun({}, {}), config)

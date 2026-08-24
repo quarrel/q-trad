@@ -84,6 +84,47 @@ _CANDIDATE_IDS: Final = ("linear_ridge", "linear_zero_return", "nonlinear_huber"
 _GRAPH_CONTROL_IDS: Final = ("local_non_graph", "pooled_non_graph", "fixed_graph", "shuffled_graph")
 _CANDIDATE_KEYS: Final = frozenset({"id", "family", "degree", "enabled"})
 _GRAPH_KEYS: Final = frozenset({"id", "kind", "enabled"})
+_REPORT_TOP_LEVEL_KEYS: Final = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "config_semantic_identity",
+        "source_class",
+        "price_basis",
+        "evidence_class",
+        "claims",
+        "code_provenance",
+        "target_group_resolution",
+        "retained_parents",
+        "selection",
+        "loader_contract",
+        "scale_projection",
+        "observation_contract",
+        "economic",
+        "statistical",
+        "graph",
+        "work",
+        "result_classification",
+        "create_only_destination",
+        "no_post_result_expansion",
+    }
+)
+_SEMANTIC_EXCLUDED_KEYS: Final = frozenset(
+    {
+        "execution_receipt",
+        "role_binding",
+        "code_provenance",
+        "execution_provenance",
+        "measurement",
+        "path",
+        "paths",
+        "wrapper_sha256",
+        "module_sha256",
+        "python_version",
+        "closure_identity",
+        "physical_identity",
+    }
+)
 _CHILD_WRAPPER_NAMES: Final = (
     "selection",
     "consumed",
@@ -496,6 +537,20 @@ class MicroRun:
         return json.dumps(_thaw_value(self.report), sort_keys=True, indent=2) + "\n"
 
 
+def _semantic_projection(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, Any], value)
+        return {
+            str(key): _semantic_projection(item)
+            for key, item in mapping.items()
+            if str(key) not in _SEMANTIC_EXCLUDED_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        sequence = cast(Sequence[Any], value)
+        return [_semantic_projection(item) for item in sequence]
+    return value
+
+
 def _report_semantic_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     """Return the report's semantic identity projection, excluding physical provenance."""
 
@@ -515,7 +570,7 @@ def _report_semantic_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "result_classification",
         "no_post_result_expansion",
     )
-    payload = {field: _thaw_value(report[field]) for field in semantic_fields}
+    payload = {field: _semantic_projection(report[field]) for field in semantic_fields}
     work = cast(dict[str, Any], payload["work"])
     work.pop("measurement", None)
     return payload
@@ -551,31 +606,66 @@ def _require_report_sequence(report: Mapping[str, Any], section: str) -> Sequenc
     return cast(Sequence[Any], value)
 
 
-def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
-    required_sections = {
-        "contract",
-        "schema_version",
-        "config_semantic_identity",
-        "source_class",
-        "price_basis",
-        "evidence_class",
-        "claims",
-        "code_provenance",
-        "target_group_resolution",
-        "retained_parents",
-        "selection",
-        "loader_contract",
-        "scale_projection",
-        "observation_contract",
-        "economic",
-        "statistical",
-        "graph",
-        "work",
-        "result_classification",
-        "no_post_result_expansion",
+def _require_nested_mapping(
+    value: Any, label: str, required_keys: frozenset[str] = frozenset()
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise FreezeError(f"renderer {label} must be an object")
+    mapping = cast(Mapping[str, Any], value)
+    missing = required_keys - set(mapping)
+    if missing:
+        raise FreezeError(f"renderer {label} is missing keys: {', '.join(sorted(missing))}")
+    return mapping
+
+
+def _require_nested_sequence(value: Any, label: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise FreezeError(f"renderer {label} must be an array")
+    return cast(Sequence[Any], value)
+
+
+_ECONOMIC_VIEW_KEYS: Final = frozenset(
+    {
+        "gross_total",
+        "gross_mean",
+        "turnover",
+        "break_even_cost",
+        "all_in_cost_sensitivity",
+        "position_trace",
     }
-    if not required_sections <= set(report):
-        raise FreezeError("report is missing required R3.H renderer sections")
+)
+_ECONOMIC_SENSITIVITY_KEYS: Final = frozenset(
+    {"cost", "unit", "net_mean", "break_even_cost", "label"}
+)
+_ECONOMIC_POSITION_KEYS: Final = frozenset(
+    {"target_id", "decision_time", "target_position", "target_position_change", "realised_gross"}
+)
+
+
+def _validate_economic_view(value: Any, label: str) -> Mapping[str, Any]:
+    view = _require_nested_mapping(value, label, _ECONOMIC_VIEW_KEYS)
+    sensitivity = _require_nested_sequence(
+        view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
+    )
+    for index, item in enumerate(sensitivity):
+        _require_nested_mapping(
+            item,
+            f"{label}.all_in_cost_sensitivity[{index}]",
+            _ECONOMIC_SENSITIVITY_KEYS,
+        )
+    positions = _require_nested_sequence(view["position_trace"], f"{label}.position_trace")
+    for index, item in enumerate(positions):
+        _require_nested_mapping(item, f"{label}.position_trace[{index}]", _ECONOMIC_POSITION_KEYS)
+    return view
+
+
+def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
+    report_keys = frozenset(report)
+    if report_keys != _REPORT_TOP_LEVEL_KEYS:
+        missing = sorted(_REPORT_TOP_LEVEL_KEYS - report_keys)
+        unknown = sorted(report_keys - _REPORT_TOP_LEVEL_KEYS)
+        details = [*(f"missing {key}" for key in missing), *(f"unknown {key}" for key in unknown)]
+        raise FreezeError("renderer report schema mismatch: " + ", ".join(details))
     if report["contract"] != REPORT_CONTRACT or report["schema_version"] != 1:
         raise FreezeError("renderer received an unsupported report contract")
     if report["config_semantic_identity"] != config.semantic_identity:
@@ -622,24 +712,178 @@ def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig)
     _require_report_mapping(
         report,
         "economic",
-        frozenset({"asset", "horizon", "period", "all_in_cost_sensitivity", "configurations"}),
+        frozenset(
+            {
+                "trace_id",
+                "physical_turnover_definition",
+                "gross_total",
+                "gross_mean",
+                "turnover",
+                "break_even_cost",
+                "all_in_cost_sensitivity",
+                "position_trace",
+                "asset",
+                "horizon",
+                "period",
+                "configurations",
+            }
+        ),
     )
     statistical = _require_report_mapping(
         report,
         "statistical",
-        frozenset({"oof", "candidates", "simple_controls", "post_result_selection"}),
+        frozenset(
+            {
+                "oof",
+                "candidates",
+                "simple_controls",
+                "negative_failed_inconclusive_rendered",
+                "post_result_selection",
+            }
+        ),
     )
-    if not isinstance(statistical["candidates"], Sequence) or isinstance(
-        statistical["candidates"], str
-    ):
-        raise FreezeError("renderer statistical candidates must be an array")
-    graph = _require_report_mapping(report, "graph", frozenset({"controls"}))
-    if not isinstance(graph["controls"], Sequence) or isinstance(graph["controls"], str):
-        raise FreezeError("renderer graph controls must be an array")
+    economic = _require_nested_mapping(report["economic"], "economic")
+    _validate_economic_view(economic, "economic")
+    for dimension in ("asset", "horizon", "period"):
+        groups = _require_nested_mapping(economic[dimension], f"economic.{dimension}")
+        if not groups:
+            raise FreezeError(f"renderer economic {dimension} must not be empty")
+        for group_name, group in groups.items():
+            _validate_economic_view(group, f"economic.{dimension}.{group_name}")
+    configurations = _require_nested_mapping(economic["configurations"], "economic.configurations")
+    if not configurations:
+        raise FreezeError("renderer economic configurations must not be empty")
+    for trace_id, configuration in configurations.items():
+        _validate_economic_view(configuration, f"economic.configurations.{trace_id}")
+
+    oof = _require_nested_mapping(
+        statistical["oof"],
+        "statistical.oof",
+        frozenset(
+            {
+                "formulation",
+                "ordering",
+                "decision_identity",
+                "rows",
+                "first_timestamp",
+                "last_timestamp",
+                "mse",
+                "causal",
+                "folds",
+                "purge_embargo",
+                "rank_correlation",
+                "coverage",
+                "support",
+                "prediction_mask",
+            }
+        ),
+    )
+    folds = _require_nested_sequence(oof["folds"], "statistical.oof.folds")
+    for index, fold in enumerate(folds):
+        _require_nested_mapping(
+            fold,
+            f"statistical.oof.folds[{index}]",
+            frozenset(
+                {
+                    "evaluation_time",
+                    "training_rows",
+                    "evaluation_rows",
+                    "purged_rows",
+                    "embargoed_rows",
+                }
+            ),
+        )
+    _require_nested_mapping(
+        oof["purge_embargo"],
+        "statistical.oof.purge_embargo",
+        frozenset({"applied", "rows_excluded", "reason"}),
+    )
+    prediction_mask = _require_nested_sequence(
+        oof["prediction_mask"], "statistical.oof.prediction_mask"
+    )
+    if any(not isinstance(value, bool) for value in prediction_mask):
+        raise FreezeError("renderer statistical.oof.prediction_mask must contain booleans")
+    for item_name in ("candidates", "simple_controls"):
+        items = _require_nested_sequence(statistical[item_name], f"statistical.{item_name}")
+        for index, item in enumerate(items):
+            item_mapping = _require_nested_mapping(
+                item,
+                f"statistical.{item_name}[{index}]",
+                frozenset({"id", "execution_receipt"}),
+            )
+            _require_nested_mapping(
+                item_mapping["execution_receipt"],
+                f"statistical.{item_name}[{index}].execution_receipt",
+            )
+    graph = _require_report_mapping(
+        report,
+        "graph",
+        frozenset({"tiny_learned_graph", "controls", "r4_replacement_required"}),
+    )
+    tiny_graph = _require_nested_mapping(
+        graph["tiny_learned_graph"],
+        "graph.tiny_learned_graph",
+        frozenset(
+            {
+                "id",
+                "status",
+                "mse",
+                "rank_correlation",
+                "coverage",
+                "support",
+                "prediction_trace",
+                "prediction_mask",
+                "fit_executions",
+                "execution_receipt",
+                "model",
+                "layers",
+                "hidden_units",
+                "algorithm",
+                "feasibility_only",
+                "fits",
+                "walk_forward_fit_executions",
+            }
+        ),
+    )
+    _require_nested_mapping(
+        tiny_graph["execution_receipt"], "graph.tiny_learned_graph.execution_receipt"
+    )
+    _require_nested_mapping(tiny_graph["algorithm"], "graph.tiny_learned_graph.algorithm")
+    _require_nested_sequence(
+        tiny_graph["prediction_trace"], "graph.tiny_learned_graph.prediction_trace"
+    )
+    _require_nested_sequence(
+        tiny_graph["prediction_mask"], "graph.tiny_learned_graph.prediction_mask"
+    )
+    graph_controls = _require_nested_sequence(graph["controls"], "graph.controls")
+    for index, item in enumerate(graph_controls):
+        item_mapping = _require_nested_mapping(
+            item,
+            f"graph.controls[{index}]",
+            frozenset({"id", "execution_receipt", "feasibility_only"}),
+        )
+        _require_nested_mapping(
+            item_mapping["execution_receipt"],
+            f"graph.controls[{index}].execution_receipt",
+        )
     _require_report_mapping(
         report,
         "work",
-        frozenset({"rows", "candidate_count", "fit_count", "fit_executions", "within_hard_limits"}),
+        frozenset(
+            {
+                "rows",
+                "candidate_count",
+                "fit_count",
+                "fit_executions",
+                "within_hard_limits",
+                "measurement",
+            }
+        ),
+    )
+    _require_nested_mapping(
+        report["work"]["measurement"],
+        "work.measurement",
+        frozenset({"elapsed_seconds", "memory_mb"}),
     )
     classification = _require_report_mapping(
         report, "result_classification", frozenset({"negative", "failed", "inconclusive"})
@@ -657,6 +901,36 @@ def _render_section(title: str, value: Any) -> str:
     return f"## {title}\n\n{fence}json\n{rendered}\n{fence}\n"
 
 
+def _report_physical_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    statistical = cast(Mapping[str, Any], report["statistical"])
+    graph = cast(Mapping[str, Any], report["graph"])
+    return {
+        "code_provenance": report["code_provenance"],
+        "work_measurement": cast(Mapping[str, Any], report["work"])["measurement"],
+        "retained_parent_paths": cast(Mapping[str, Any], report["retained_parents"])["paths"],
+        "retained_role_bindings": cast(Mapping[str, Any], report["retained_parents"])[
+            "role_bindings"
+        ],
+        "statistical_execution_receipts": {
+            section: [
+                {"id": item["id"], "execution_receipt": item["execution_receipt"]}
+                for item in cast(Sequence[Any], statistical[section])
+            ]
+            for section in ("candidates", "simple_controls")
+        },
+        "graph_execution_receipts": {
+            "controls": [
+                {"id": item["id"], "execution_receipt": item["execution_receipt"]}
+                for item in cast(Sequence[Any], graph["controls"])
+            ],
+            "tiny_graph": {
+                "id": graph["tiny_learned_graph"]["id"],
+                "execution_receipt": graph["tiny_learned_graph"]["execution_receipt"],
+            },
+        },
+    }
+
+
 def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
     """Render the frozen canonical R3.H report as deterministic final Markdown."""
 
@@ -667,6 +941,7 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
     semantic_identity = canonical_report_semantic_identity(report)
     metadata = {
         "markdown_contract": "qtrad-r3-historical-exploratory-markdown-v1",
+        "schema_version": report["schema_version"],
         "canonical_report_contract": report["contract"],
         "canonical_report_semantic_identity": semantic_identity,
         "stage": "R3.H",
@@ -693,6 +968,10 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
         _render_section(
             "Terminal authority and consumed child identities",
             report["retained_parents"],
+        ),
+        _render_section(
+            "Physical closure, execution, and resource provenance",
+            _report_physical_payload(report),
         ),
         _render_section(
             "Frozen configuration and code identity",
