@@ -616,7 +616,7 @@ def test_accepted_target_snapshots_required_mappings() -> None:
         target.reporting_currencies,
     ):
         with pytest.raises(AttributeError):
-            mapping.clear()  # type: ignore[attr-defined]
+            getattr(mapping, "clear")()  # noqa: B009
     assert target.semantic_identity == identity
     assert target.expected_costs["asset:a"].target_quantity == Decimal("1")
 

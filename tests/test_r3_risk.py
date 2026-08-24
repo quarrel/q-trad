@@ -160,7 +160,7 @@ def test_mapping_exposures_and_caps_are_ordered_and_fail_closed() -> None:
 def test_risk_state_is_frozen_and_identity_fields_are_content_bound() -> None:
     state = _estimate(_observations())
     with pytest.raises(FrozenInstanceError):
-        state.covariance = state.covariance  # type: ignore[misc]
+        setattr(state, "covariance", state.covariance)  # noqa: B010
     with pytest.raises(ValueError, match="semantic identity"):
         replace(state, semantic_identity="0" * 64)
     assert len(state.semantic_id) == 64
