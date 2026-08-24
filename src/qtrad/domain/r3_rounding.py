@@ -413,8 +413,8 @@ class RoundedTarget:
                     "disposition": self.disposition,
                     "reason_codes": self.reason_codes,
                     "expected_costs": tuple(
-                        (asset, state.require_total_reporting())
-                        for asset, state in self.expected_costs.items()
+                        (asset, self.expected_costs[asset].require_total_reporting())
+                        for asset in self.asset_order
                     ),
                     "expected_cost_reporting": self.expected_cost_reporting,
                     "expected_financing_reporting": self.expected_financing_reporting,

@@ -375,3 +375,13 @@ def test_nonzero_attribution_residual_is_rejected() -> None:
     assert result.disposition is RoundingDisposition.ACCEPTED
     with pytest.raises(ValueError, match="attribution residual"):
         replace(result, attribution_residual=Decimal("0.01"))
+
+
+def test_cost_mapping_order_does_not_change_identity() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    result = round_and_repair_target(_target(inputs, (1.0, 0.0)), inputs)
+    assert result.disposition is RoundingDisposition.ACCEPTED
+    reversed_costs = dict(reversed(tuple(result.expected_costs.items())))
+    replay = replace(result, expected_costs=reversed_costs)
+    assert replay.canonical_bytes == result.canonical_bytes
+    assert replay.semantic_identity == result.semantic_identity
