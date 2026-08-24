@@ -9,39 +9,48 @@
 
 No current IG or IBKR row is `ECONOMICS_READY`.
 
-The current IG release has exact reviewed listings and useful product metadata for 23 instruments.
-All 23 listing records have product type, currency, minimum quantity, contract/lot size and
-pip/value information, but all 23 have `price_increment = null`, none records a quantity
-increment, non-AUD rows lack a source-aligned conversion contract, and no row has a
-source-aligned commission, financing or authoritative-session contract. Native bid/ask evidence
-exists for all 23, but the bounded `capture-v4` observation is a deployment smoke rather than representative-session cost evidence. Twenty-two are potentially
-tradable; `index:volatility` remains context-only and `PAPER_INELIGIBLE`.
+The tracked current IG configuration identifies 23 canonical instruments, currencies and selected
+epics. The ignored local review inputs used during this inventory supplied a mechanically reconciled
+planning summary of minimum quantity, contract/lot size and pip/value fields for those rows; those
+copied fields are not independently verifiable at this Git head and are not R3 product-economics
+authority. The tracked R0 report independently supports the broad conclusion that all 23 reviewed
+listing records had `price_increment = null` and lacked an authoritative session calendar. No row
+has a quantity increment or source-aligned commission, financing or non-AUD conversion contract.
+Native bid/ask evidence exists for all 23, but the bounded `capture-v4` observation is a deployment
+smoke rather than representative-session cost evidence. Twenty-two are potentially tradable;
+`index:volatility` remains context-only and `PAPER_INELIGIBLE`.
 
-The locally retained IBKR historical selection identifies 20 exact contracts and currencies. Its
-fingerprints have `multiplier = null` and do not contain minimum quantities, quantity increments or
-minimum ticks. The B5 construction code requires an authenticated non-null minimum tick and constructs
-a listing with configured minimum deal size `1`, but the exact numeric B5 tick values and retained B5
-listing artefact are not present in the local evidence consumed by this inventory. The B5 authority
-does prove fresh LIVE bid/ask capture for the same-sized 20-contract native universe; it does not
-supply per-instrument spread distributions, latency, commission, financing, conversion or impact
-economics.
+At inventory time an ignored local IBKR historical plan identified 20 contract fingerprints and
+currencies. The copied fingerprints are planning summaries, not independently reproducible retained
+authority. They had `multiplier = null` and did not contain minimum quantities, quantity increments
+or minimum ticks. B5 construction code requires an authenticated non-null minimum tick and constructs
+a listing with configured minimum deal size `1`, but the exact numeric B5 ticks and retained B5
+listing artefact are not present in the evidence available at this reviewed head. The tracked B5
+authority proves fresh LIVE bid/ask capture for an exact-20 native universe; it does not expose the
+row binding or supply per-instrument spread distributions, market-data timing, commission, financing,
+conversion or impact economics.
 
 The first subset suitable for R3 **implementation evidence** is the single native IG
-`index:australia-200` listing. Its existing framework proof already joins exact listing metadata,
+`index:australia-200` listing. Its tracked proof binds the selected epic, embedded listing metadata,
 native bid/ask paper fills, AUD identity conversion and explicit configured tick/session/latency/
 slippage assumptions. It is not source-aligned economic evidence and cannot support a post-cost
 conclusion without the additional facts listed below.
 
 ## Scope and evidence classes
 
-This inventory used only repository files and existing local retained artefacts. It did not contact
+This inventory used only repository files and existing local artefacts. It did not contact
 IG, IBKR, either collector, a collector database, or a broker endpoint. Historical IBKR MIDPOINT and
 SCHEDULE evidence remains provenance-distinct from native top-of-book evidence and is never used as
 IG spread or fill evidence.
 
 Evidence tags used below are:
 
-- **PM — product metadata:** an exact provider review/listing or authenticated contract field.
+- **PM-R — retained product metadata:** an exact provider review/listing or authenticated contract
+  field whose source bytes or governed retained authority are independently available to a reviewer.
+  Admissibility and freshness remain field-specific.
+- **PM-S — product-metadata planning summary:** a field copied from an identified but non-retained
+  local input. It is useful for planning and reconciliation but cannot satisfy an R3
+  product-economics contract.
 - **NM — observed native market evidence:** retained source-native quotes or callbacks.
 - **CA — configured assumption:** a research or runtime value, not a provider economic fact.
 - **UA — unsupported assumption:** no qualifying evidence; it must remain explicit and cannot be
@@ -51,19 +60,22 @@ The following evidence sources are used by short code in the instrument tables:
 
 | Code | Exact source and identity | Use |
 |---|---|---|
-| IG-V2 | `tmp/capture-v2-review-v2.json`, review `aff32264bfc9dade67bf1df06cf689d55b1b3f5b60550f28332da3826dae0dc9`; `tmp/capture-v2-selections-v2.toml` | 19 exact IG selections and listing economics |
-| IG-HS | `tmp/hang-seng-review.json`, review `f7aa58a401e3ac2bf8b5beb74ff00d2f0122871e0790894d2207c252eb04284e`; `tmp/hang-seng-selection.toml` | exact HS50 selection and listing economics |
-| IG-AP | `tmp/capture-v4-corrected-review.json`, review `ed17cf86d566f742c0be3e0f003fa24ffc0bbb7a31642c71a386ec3e3782cf13`; `tmp/capture-v4-apac-selection.toml` | exact China A50, Taiwan and VIX selections |
-| IG-CFG | `config/capture-v4.toml`; `config/capture-v4-deployment.toml`, universe hash `eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078` | current 23 canonical IDs, currencies and exact preferred epics |
-| IG-R0 | `docs/R0_DATA_READINESS.md`, measured 2026-07-22 15:35 UTC against live OCI `capture-v4`; abbreviated hash in that report resolves to IG-CFG `eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078` | native field availability and bounded bid/ask/bar coverage |
-| IG-PROOF | `config/research-proof-v1.toml`, source manifest `5289530e6b5d946c626593f74eda8d14774d1454774fff666c9c313a9946565d` | Australia 200 configured paper assumptions only |
-| IB-P | `tmp/ibkr-run-20260806T035300Z/plan.json`, plan `555b2acb3f730f908f362fbfdae7fdc90dc46f5320272ed8ea4899a1787d6bac`, selection `788bd8304781bc8aff0614dc6622f84a934e85e9bc9ffa002bfc66e7f46f1f88` | 20 exact historical contract fingerprints; not native cost evidence |
-| IB-C | `tmp/ibkr-run-20260806T035300Z/evidence/stage5-canary-20260806T035300Z.json`, evidence `68c9a42bddfd5a660ce7614aec1bb1b9b1977d27e4491c3fefb7fb9aecde70a1` | 12 successful historical MIDPOINT/SCHEDULE cases for three contracts |
-| IB-B5 | `docs/STATUS.md` B5 authority: canonical artefact `efb6f465221659cb0b1c65d6e0df12ac01d20a9227d07e606e8febf78152ed24`, qualification file `87c4860dbc97b7e73e1849ed58ba528b1b630cdd13207393fec32ebfb1eb9218`, verifier `dbca7ba916fa2c1a97fecc2dd1ef71f73621ddf87cbe6313ca7f416b41949a67` | native exact-20 LIVE bid/ask qualification at authority level; row artefact not locally consumed |
-| IB-CODE | `src/qtrad/runtime/ibkr_b5.py::_expected_listing` | configured listing-ID/minimum-size policy and requirement for authenticated non-null minimum tick |
+| IG-V2 | ignored local `tmp/capture-v2-review-v2.json`, review `aff32264bfc9dade67bf1df06cf689d55b1b3f5b60550f28332da3826dae0dc9`; `tmp/capture-v2-selections-v2.toml` | 19 copied IG selections and listing-economics rows; **PM-S** only |
+| IG-HS | ignored local `tmp/hang-seng-review.json`, review `f7aa58a401e3ac2bf8b5beb74ff00d2f0122871e0790894d2207c252eb04284e`; `tmp/hang-seng-selection.toml` | copied HS50 selection and listing-economics row; **PM-S** only |
+| IG-AP | ignored local `tmp/capture-v4-corrected-review.json`, review `ed17cf86d566f742c0be3e0f003fa24ffc0bbb7a31642c71a386ec3e3782cf13`; `tmp/capture-v4-apac-selection.toml` | copied China A50, Taiwan and VIX rows; **PM-S** only |
+| IG-CFG | tracked `config/capture-v4.toml`; `config/capture-v4-deployment.toml`, universe hash `eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078` | current 23 canonical IDs, currencies and exact preferred epics |
+| IG-R0 | tracked `docs/R0_DATA_READINESS.md`, measured 2026-07-22 15:35 UTC against live OCI `capture-v4`; abbreviated hash in that report resolves to IG-CFG `eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078` | retained authority for broad native field availability, null-tick and bounded bid/ask/bar findings |
+| IG-PROOF | tracked `config/research-proof-v1.toml`, source manifest `5289530e6b5d946c626593f74eda8d14774d1454774fff666c9c313a9946565d` | **PM-R** embedded Australia 200 metadata and **CA** paper assumptions, for implementation evidence only |
+| IB-P | ignored local `tmp/ibkr-run-20260806T035300Z/plan.json`, plan `555b2acb3f730f908f362fbfdae7fdc90dc46f5320272ed8ea4899a1787d6bac`, selection `788bd8304781bc8aff0614dc6622f84a934e85e9bc9ffa002bfc66e7f46f1f88` | 20 copied historical contract fingerprints; **PM-S** only, not native cost evidence |
+| IB-C | ignored local `tmp/ibkr-run-20260806T035300Z/evidence/stage5-canary-20260806T035300Z.json`, evidence `68c9a42bddfd5a660ce7614aec1bb1b9b1977d27e4491c3fefb7fb9aecde70a1` | copied planning summary of 12 historical MIDPOINT/SCHEDULE cases; not retained authority |
+| IB-B5 | tracked `docs/STATUS.md` B5 authority: canonical artefact `efb6f465221659cb0b1c65d6e0df12ac01d20a9227d07e606e8febf78152ed24`, qualification file `87c4860dbc97b7e73e1849ed58ba528b1b630cdd13207393fec32ebfb1eb9218`, verifier `dbca7ba916fa2c1a97fecc2dd1ef71f73621ddf87cbe6313ca7f416b41949a67` | retained authority-level exact-20 LIVE bid/ask qualification; row artefact not available here |
+| IB-CODE | tracked `src/qtrad/runtime/ibkr_b5.py::_expected_listing` | configured listing-ID/minimum-size policy and requirement for authenticated non-null minimum tick |
 
-The ignored `tmp/` files are local evidence inputs, not durable tracked authorities. Their identities
-are recorded here so a later inventory cannot silently substitute different bytes.
+The ignored `tmp/` inputs are absent from the reviewed Git head. Recording their hashes prevents
+silent local substitution but does not make the copied values or reconciliations independently
+verifiable. Every value sourced only from IG-V2, IG-HS, IG-AP, IB-P or IB-C is therefore **PM-S**:
+a non-authoritative planning summary that must be reacquired from an accepted retained authority
+before it can populate or satisfy an R3 product-economics contract.
 
 ## Source-wide cost evidence
 
@@ -71,18 +83,35 @@ These findings apply to every row for the named source unless a row-specific exc
 
 | Field | IG | IBKR |
 |---|---|---|
-| Product metadata | **PM:** exact selected listing; product type, currency, minimum quantity, contract/lot size and pip/value fields present | **PM:** exact local historical contract fingerprint. Native B5 code requires a non-null authenticated tick; configured minimum deal size is `1`; economics mapping is empty |
-| Observed spread | **NM available:** IG-R0 has 23 healthy current quotes and BID/ASK/MID bars. **Insufficient:** bounded smoke interval, not representative by session, size or decision time | **NM available at authority level:** IB-B5 has fresh post-reconnect LIVE bid/ask for 20/20. Exact per-row observations/distributions were not locally consumed. IB-C MIDPOINT is not spread evidence |
-| Latency | **UA:** no validated provider-event-to-receive or decision-to-fill distribution. IG-PROOF only configures 1 s/1 tick, 2 s/2 ticks and 5 s/3 ticks scenarios | **UA:** callback counts, zero-drop qualification and historical request completion do not establish quote or execution latency |
+| Product metadata | IG-CFG retains selected IDs/currencies; IG-R0 retains the broad null-tick/missing-session finding. Per-row minimum quantity, contract/lot and pip/value fields are **PM-S**, except the Australia 200 fields embedded in IG-PROOF (**PM-R** for implementation-bound use) | Per-row IB-P fingerprints are **PM-S**. Native B5 code requires a non-null authenticated tick, configures minimum deal size `1`, and leaves economics empty; the retained row artefact is unavailable |
+| Observed spread | **NM available:** IG-R0 has 23 healthy current quotes and BID/ASK/MID bars. **Insufficient:** bounded smoke interval, not representative by session, size or decision time | **NM available at authority level:** IB-B5 has fresh post-reconnect LIVE bid/ask for 20/20. Exact per-row observations/distributions are unavailable here. IB-C MIDPOINT is not spread evidence |
+| Latency | Native provider/source/receive timing and paper execution policy are separate. No representative native market-data timing study was retained. IG-PROOF supplies **CA** delay/slippage scenarios, not observed fills. Paper readiness requires a reviewed, versioned delay policy and first qualifying healthy executable-side quote after that delay; real decision-to-broker-fill latency is **UA** and out of scope | Callback counts, zero-drop qualification and historical request completion do not establish market-data or broker execution latency. A reviewed, versioned paper delay policy may support paper readiness without pretending it is observed fill latency; real broker-fill latency remains **UA** and out of scope |
 | Commission | **UA:** no schedule | **UA:** no account/product schedule |
 | Financing | **UA:** no schedule, cut-off, day-count or multi-day rule | **UA:** no schedule, cut-off, day-count or multi-day rule |
-| Sessions | **UA:** listing metadata has no authoritative calendar. IG-PROOF configures weekdays 10:00–16:00 Australia/Sydney with an empty holiday list for Australia 200 only | **Partial PM:** IB-C returned historical SCHEDULE callbacks for EUR/USD, Australia 200 and spot gold over 1D/1W/2W/4W. This is not a current all-contract calendar |
+| Sessions | **UA:** listing metadata has no authoritative calendar. IG-PROOF configures weekdays 10:00–16:00 Australia/Sydney with an empty holiday list for Australia 200 only | Copied IB-C rows reported historical SCHEDULE callbacks for EUR/USD, Australia 200 and spot gold over 1D/1W/2W/4W. They are **PM-S**, not a current all-contract calendar |
 | Quote to AUD | AUD identity is exact. Same-source canonical FX pairs define mathematical candidate paths for USD, EUR, GBP, JPY, CAD and CHF, but no causal rate-selection/staleness contract exists. No selected HKD conversion pair exists | Same position as IG within the IBKR 20-contract universe. No cross-provider substitution is permitted |
-| Impact | **UA:** no validated trade-volume or fill-response evidence; top-of-book size is not executed volume or CVD | **UA:** no validated trade-volume or fill-response evidence |
+| Impact | `UNSUPPORTED_BLOCKING`: no supported model or evidenced size-validity cap; top-of-book size meaning is not qualified trade volume | `UNSUPPORTED_BLOCKING`: no supported model or evidenced size-validity cap |
 | Existing paper cost | IG-PROOF measures spread plus configured adverse tick slippage through executable bid/ask sides. Production paper code has no commission, financing or impact component | No retained source-aligned paper-economics configuration was found |
 
 The existing paper ledger's `execution_cost` is the difference between gross-mid and bid/ask-plus-
 slippage P&L. It must not be described as commission, financing or market impact.
+
+### Impact disposition
+
+An R3 cost state must use exactly one explicit impact disposition:
+
+- `SUPPORTED_MODEL`: a versioned, source/product-specific quantity-dependent model with evidence,
+  units, calibration interval and stated validity range.
+- `CAPPED_NO_IMPACT_RANGE`: a reviewed no-impact approximation that is valid only up to an immutable
+  quantity ceiling, with source/product rationale and qualifying size evidence. The evaluator must
+  block or mark ineligible every proposed change above the ceiling; this is not a measured-impact
+  claim.
+- `UNSUPPORTED_BLOCKING`: neither an accepted model nor an evidenced cap exists. Impact cannot be
+  silently set to zero, and a source-aligned economic conclusion is blocked.
+
+All 43 planning rows are currently `UNSUPPORTED_BLOCKING`. The Australia 200 proof may still exercise
+implementation mechanics under **CA**, but it cannot promote that assumption into source-aligned
+economics.
 
 ## AUD conversion paths
 
@@ -105,6 +134,16 @@ configured or qualified conversion evidence.
 Instrument rows reference one of these profiles. Each profile is the row's current readiness state
 and exact missing-field set; no abbreviated profile hides a favourable exception.
 
+For every profile, paper latency readiness means: timestamp semantics sufficient to preserve
+provider/source, receive and decision ordering and quote health; a reviewed/versioned configured delay
+plus frozen sensitivity or calibration basis; and selection of the first qualifying healthy
+executable-side observation after that delay. Observed native market-data timing is recorded where
+available but is not broker-fill evidence. Actual decision-to-broker-fill latency is
+`UNSUPPORTED`, outside the no-order architecture and not required for paper readiness.
+
+Every profile also has impact disposition `UNSUPPORTED_BLOCKING`: no accepted
+`SUPPORTED_MODEL` or evidenced `CAPPED_NO_IMPACT_RANGE` exists.
+
 ### IG-AUD
 
 States: `MISSING_PRICE_INCREMENT`, `MISSING_QUANTITY_RULE`, `MISSING_COMMISSION`,
@@ -113,9 +152,8 @@ States: `MISSING_PRICE_INCREMENT`, `MISSING_QUANTITY_RULE`, `MISSING_COMMISSION`
 
 Exact missing facts: authenticated numeric price increment; provider-authoritative quantity step and
 unit rule; account/product commission schedule; financing basis/rates/cut-offs/day count; authoritative
-session/time-zone/holiday evidence; representative native spread distribution for the intended
-decision windows and quantity; validated timestamp semantics and latency distribution. Impact remains
-`UNSUPPORTED` and must not be treated as zero.
+session/time-zone/holiday evidence; representative native spread evidence for the intended decision
+windows and quantity; validated timestamp semantics; and a reviewed/versioned paper latency policy.
 
 ### IG-FX (non-AUD listing currency)
 
@@ -135,9 +173,9 @@ States: `MISSING_PRICE_INCREMENT`, `MISSING_QUANTITY_RULE`, `MISSING_COMMISSION`
 
 Exact missing facts: the exact authenticated B5 numeric tick; provider-authoritative minimum quantity,
 quantity increment and unit semantics (the configured `1` is not enough); multiplier/value per price
-unit; commission; financing; a current authoritative session calendar; local retained representative
-native spreads; validated timestamp semantics and latency distribution. The historical schedule
-canary is partial evidence only. Impact remains `UNSUPPORTED`.
+unit; commission; financing; a current authoritative session calendar; locally retained representative
+native spreads; validated timestamp semantics; and a reviewed/versioned paper latency policy. The
+copied historical schedule canary is planning context only.
 
 ### IB-FX-CANARY (non-AUD listing currency)
 
@@ -146,16 +184,18 @@ same-source evidence contract.
 
 ### IB-FX (non-AUD listing currency)
 
-All `IB-FX-CANARY` states and missing facts. Unlike the canary profile, no retained per-instrument
-SCHEDULE sample was found.
+All `IB-FX-CANARY` states and missing facts. Unlike the canary planning rows, no per-instrument
+SCHEDULE sample was found in the local input.
 
-## IG exact-listing inventory
+## IG selected-listing planning inventory
 
-All rows are from a reviewed `capture-v4` selection. Quantity increment is unavailable for every
-row and tick is explicitly `null`. Minimum quantity, contract/lot, pip meaning and pip value are
-**PM**, not configured assumptions.
+All rows describe the reviewed `capture-v4` selection. Exact selected listing IDs and currencies
+are independently re-checkable in IG-CFG, and IG-R0 independently records the broad null-tick finding.
+The copied per-row minimum quantity, contract/lot and pip/value fields are **PM-S**, not R3 authority,
+except that Australia 200 metadata is also embedded in tracked IG-PROOF. Quantity increment is
+unavailable for every row and tick is explicitly `null`.
 
-| Canonical instrument | Exact listing / product / source | Currency | Minimum quantity | Contract / lot | Pip meaning; value | AUD path | Profile |
+| Canonical instrument | Tracked selected listing / copied product summary / source | Currency | Minimum quantity | Contract / lot | Pip meaning; value | AUD path | Profile |
 |---|---|---:|---:|---:|---|---|---|
 | `commodity:spot-gold` | `ig:demo:CS.D.CFDGOLD.CFDGC.IP`; ROLLING_CFD; mv `00a52575e0793843`; IG-V2 | USD | 0.1 | 100 / 100.0 | 1 $/Troy Ounce; 100.00 USD | USD→AUD | IG-FX |
 | `commodity:spot-silver` | `ig:demo:CS.D.CFDSILVER.CFDSI.IP`; ROLLING_CFD; mv `f309ca61afdd83d2`; IG-V2 | USD | 0.5 | 50 / 50.0 | 1 Cents/Troy Ounce; 50.00 USD | USD→AUD | IG-FX |
@@ -190,23 +230,24 @@ slippage scenarios. These are **CA**. The listing's authenticated `price_increme
 the empty holiday list is not an authoritative session calendar, and no commission or financing
 component exists. The row therefore remains `IG-AUD`, not `ECONOMICS_READY`.
 
-## IBKR exact-contract inventory
+## IBKR historical-contract planning inventory
 
-The contract identity columns below come from IB-P. They are exact for that local historical
-selection. They must not be silently asserted to be the current B5 contract binding: the current B5
-release artefact needed to authenticate that equivalence was not locally consumed. For all rows,
-`contract_month`, `primary_exchange` and `multiplier` are null in IB-P.
+The fingerprint columns below were copied from IB-P during the local inventory. Because IB-P is absent
+from the reviewed Git head, they are **PM-S**: planning summaries that cannot authenticate a current
+or historical product-economics contract. They must not be silently asserted to be the current B5
+contract binding. At inventory time every copied fingerprint had `contract_month`,
+`primary_exchange` and `multiplier` null.
 
-IB-CODE configures canonical native listing IDs as
+Tracked IB-CODE configures canonical native listing IDs as
 `ibkr:IBKR_PAPER:<canonical-name>`, minimum deal size `1`, an empty economics mapping, and requires
-an authenticated non-null minimum tick. Accordingly every row below has:
+an authenticated non-null minimum tick. Accordingly every planning row below has:
 
 - minimum quantity: `1` **CA**, with provider-authoritative minimum/step/unit unavailable;
 - quantity increment: unavailable;
 - multiplier/value per point: unavailable;
-- exact numeric minimum tick: unavailable in the locally consumed artefacts.
+- exact numeric minimum tick: unavailable in retained evidence at this head.
 
-| Canonical instrument / configured native listing | Exact local contract fingerprint: conId; secType/exchange; symbol, local symbol, trading class; underlying conId | Currency | AUD path | Profile |
+| Canonical instrument / configured native listing | Copied local historical fingerprint (**PM-S**): conId; secType/exchange; symbol, local symbol, trading class; underlying conId | Currency | AUD path | Profile |
 |---|---|---:|---|---|
 | `commodity:spot-gold` / `ibkr:IBKR_PAPER:spot-gold` | 457068913; CFD/SMART; XAUUSD, XAUUSD, XAUUSD; 58430358 | USD | USD→AUD | IB-FX-CANARY |
 | `commodity:spot-silver` / `ibkr:IBKR_PAPER:spot-silver` | 457068916; CFD/SMART; XAGUSD, XAGUSD, XAGUSD; 58430361 | USD | USD→AUD | IB-FX |
@@ -231,11 +272,12 @@ an authenticated non-null minimum tick. Accordingly every row below has:
 
 ### IBKR schedule and spread evidence boundaries
 
-IB-C reconciles to twelve successful cases: EUR/USD, Australia 200 and spot gold at each of 1D, 1W,
-2W and 4W. Every case has one successful MIDPOINT request and one successful SCHEDULE request. The 4W
-schedule counts were respectively 20, 40 and 20 sessions. This proves bounded historical request and
-schedule availability for those three exact fingerprints. It does not establish contemporaneous
-spread, current trading hours, execution latency or product costs.
+At inventory time IB-C reconciled to twelve successful cases: EUR/USD, Australia 200 and spot gold
+at each of 1D, 1W, 2W and 4W. Every copied case had one MIDPOINT request and one SCHEDULE request; the
+4W schedule counts were respectively 20, 40 and 20 sessions. Because IB-C is absent from the reviewed
+head, this is non-authoritative planning context. Even with retained source bytes it would prove only
+bounded historical request/schedule availability, not contemporaneous spread, current trading hours,
+native market-data timing, broker execution latency or product costs.
 
 IB-B5 records 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks and fresh
 post-reconnect LIVE bid/ask evidence for 20/20. Because the exact row artefact was not locally
@@ -260,9 +302,9 @@ The first bounded subset is:
 
 | Source | Instrument | Why it can exercise R3 code now | Evidential ceiling |
 |---|---|---|---|
-| IG demo | `index:australia-200` / `ig:demo:IX.D.ASX.IFD.IP` | exact metadata; minimum quantity 1; 25 AUD per index point; AUD identity conversion; native bid/ask availability; existing causal paper-fill and ledger path; explicit configured tick/session/latency/slippage scenarios | implementation evidence only; not source-aligned cost evidence or an effectiveness claim |
+| IG demo | `index:australia-200` / `ig:demo:IX.D.ASX.IFD.IP` | tracked selection; embedded proof metadata; AUD identity conversion; native bid/ask availability; existing causal paper-fill and ledger path; explicit configured tick/session/latency/slippage scenarios | implementation evidence only; not source-aligned cost evidence or an effectiveness claim |
 
-Use that row only with labels preserving **PM**, **NM** and **CA**. In particular,
+Use that row only with labels preserving **PM-R**, **NM** and **CA**. In particular,
 `price_increment=1`, the ASX cash profile and the latency/slippage grid remain configured proof
 inputs. They must not be copied into an R3 product-economics contract as broker facts.
 
@@ -280,10 +322,15 @@ A source-aligned economic conclusion for even this one row additionally requires
    days and any out-of-hours distinction.
 6. Representative source-native bid/ask spread evidence across the intended decision windows and
    tested quantity, with gaps and unhealthy intervals excluded explicitly.
-7. Validated provider-event, receive, decision and fill timestamp semantics plus an observed latency
-   distribution; configured delay scenarios remain sensitivities.
-8. A versioned impact disposition. Without validated volume/fill-response evidence, impact must stay
-   `UNSUPPORTED` and no market-impact claim may be made.
+7. Timestamp semantics sufficient to preserve provider/source, receive and decision ordering and
+   quote health, plus a reviewed/versioned paper latency policy: configured delay, frozen sensitivity
+   or calibration basis, and the first qualifying healthy executable-side observation after that
+   delay. Observed native market-data timing may inform the policy but is not an observed broker-fill
+   distribution. Actual decision-to-broker-fill latency remains unsupported/out of scope and is not
+   required for paper readiness.
+8. One explicit impact disposition: a `SUPPORTED_MODEL` with validity range, or an evidenced
+   `CAPPED_NO_IMPACT_RANGE` with an enforced quantity ceiling. Otherwise
+   `UNSUPPORTED_BLOCKING` remains and no source-aligned economic conclusion may be made.
 9. Immutable binding of those facts to the exact listing metadata version, source, environment and
    evidence interval.
 
@@ -293,20 +340,21 @@ requires a reviewed native HKD-to-AUD path; it cannot borrow one from the other 
 
 ## Reconciliation
 
-The inventory was mechanically reconciled in memory without adding production or durable extraction
-code:
+The following reconciliation was performed in memory at inventory time against the identified ignored
+local inputs. Because those inputs are absent from the reviewed Git head, these checks are planning QA,
+not independently reproducible exact-head validation or retained product-economics authority:
 
-- IG-CFG has 23 instruments. Selection counts are 19 IG-V2 + 1 IG-HS + 3 IG-AP = 23.
-  Every selected listing joins exactly once to its review candidate and exactly matches the
-  `preferred_epic` in IG-CFG. All 23 have non-null minimum quantity, contract/lot and pip/value
-  fields; all 23 have null price increment and no quantity-increment field.
-- The current role count is 22 potentially tradable + 1 VIX context-only = 23. Korea 200 and Bitcoin
-  remain outside the selected release.
-- `config/capture-ibkr-v1-candidates.toml` has 20 canonical offline concepts and no provider
-  mappings. IB-P has 20 unique eligible canonical IDs, 20 unique conIds and 280 request
-  specifications.
-- IB-C has 12/12 successful cases = 3 exact instruments × 4 durations, with exactly one MIDPOINT and
-  one SCHEDULE request per case.
-- Total inventoried selected source rows: 23 IG + 20 IBKR = 43. Ready rows: 0.
-- No `src/` file changed, no extraction code was retained, and no provider or collector call was
-  made.
+- IG-CFG has 23 instruments. The local selection inputs reconciled as 19 IG-V2 + 1 IG-HS + 3 IG-AP =
+  23, with one review candidate per selected listing and exact agreement with IG-CFG
+  `preferred_epic` values. The copied rows had non-null minimum quantity, contract/lot and pip/value
+  fields; IG-R0 independently retains the authoritative broad finding that all 23 ticks were null.
+- The current tracked role count is 22 potentially tradable + 1 VIX context-only = 23. Korea 200 and
+  Bitcoin remain outside the selected release.
+- `config/capture-ibkr-v1-candidates.toml` has 20 canonical offline concepts and no provider mappings.
+  The local IB-P input reconciled to 20 unique eligible IDs, 20 unique conIds and 280 requests.
+- The local IB-C input reconciled to 12/12 successful cases = 3 copied fingerprints × 4 durations,
+  with one MIDPOINT and one SCHEDULE request per case.
+- Total planning rows: 23 IG + 20 IBKR = 43. Ready rows: 0; impact disposition for every row:
+  `UNSUPPORTED_BLOCKING`.
+- No `src/` file changed, no extraction code or retained source extract was added, and no provider,
+  collector or collector-database call was made.
