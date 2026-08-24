@@ -1,9 +1,9 @@
 # Current status
 
-**Updated:** 2026-08-23
+**Updated:** 2026-08-24
 **Current milestone:** R3 — cost and portfolio baseline (NOT STARTED; R2-IBKR-HISTORICAL terminal result complete)
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
-**Decision-grade execution authority:** `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`
+**Completed decision-grade execution record:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`; no separate R3 execution authority exists yet
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `R2-IBKR-HISTORICAL` is complete with `VALID_CONSUMED_RESULT`; R3 is next and not started. `capture-v4` is live with 23/23 channels ready, and paper research remains offline/replay.
 
@@ -224,6 +224,8 @@ This source-specific result does not establish native IG predictability, live IB
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
 - First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`
+- Completed R1/R2 implementation and scientific-execution plans: `docs/archive/r1/` and
+  `docs/archive/r2/`
 - Superseded plans, qualification and incident evidence: `docs/archive/`
 
 Historical records are consulted only to reconstruct an incident or decision, verify retained

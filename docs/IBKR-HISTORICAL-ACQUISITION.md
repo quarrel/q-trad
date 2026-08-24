@@ -1,5 +1,8 @@
 # IBKR Historical Acquisition — Staged Implementation Plan
 
+**Status:** INITIAL ACQUISITION AND `R2-IBKR-HISTORICAL` EXECUTION COMPLETE; retained as the
+normative acquisition and reacquisition procedure
+
 ## 1. Objective
 
 Produce the first independently verified IBKR provider-history foundation without registering or running the `R2-IBKR-HISTORICAL` experiment and without consuming its holdout.
@@ -939,7 +942,13 @@ operator authorisation without semantic replay.
 
 **Form:** foundation integration pull request.
 
-**Software status:** The source-specific builder, corrected per-block coverage policy and readiness verifier are implemented on `main`. The retained Stage 8 attempt was invalidated by H4; its old confirmatory promotion is superseded and no replacement Stage 8 promotion currently exists. No real holdout result, effectiveness claim or downstream R2 result has been created.
+**Software status:** The source-specific builder, corrected per-block coverage policy and readiness
+verifier are implemented on `main`. H4 invalidated the earlier retained Stage 8 attempt and
+superseded its promotion. Replacement Stage 8 promotion
+`1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is authenticated and bound to
+the terminal `R2-IBKR-HISTORICAL` result, which reached `VALID_CONSUMED_RESULT` on 2026-08-23. That
+result remains limited to historical IBKR midpoint research and grants no native-source, executable-
+price, post-cost or portfolio conclusion.
 
 Extend foundation build and verification with mutually exclusive inputs:
 

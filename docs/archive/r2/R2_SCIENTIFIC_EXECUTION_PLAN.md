@@ -1,6 +1,6 @@
 # q-trad R2 decision-grade scientific execution plan
 
-**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification, PR-S0 run enablement and PR #144's pre-F2 scientific-policy amendment are merged and complete
+**Status:** COMPLETE (2026-08-23); `R2-IBKR-HISTORICAL` reached independently verified `VALID_CONSUMED_RESULT` and the source-specific report was independently approved
 **Scope:** first real decision-grade `R2-IBKR-HISTORICAL` run through F2, G1, unopened G2, irreversible reveal and R2.H  
 **Safety boundary:** offline research only; IBKR paper historical market data; no broker orders, production trading endpoint or real-capital operation  
 **Primary scientific question:** do the fixed local or pooled Ridge controls produce stable out-of-sample information about 15-minute future midpoint returns beyond the zero-return control?  

@@ -31,18 +31,22 @@ evidence, safety and authority boundaries are hard constraints.
 
 ## Current phase
 
-The current milestone is **R2 — local and pooled baselines**:
+The current milestone is **R3 — cost and portfolio baseline**:
 
-> current native capture and reviewed historical inputs → aligned causal datasets → multi-horizon
-> forecasts → explicit cost/risk states → constrained offline paper portfolio → later continuous
-> shadow paper.
+> retained source-specific forecasts and outcomes → explicit cost/risk states → horizon positions →
+> global netting and constrained offline paper portfolio → later continuous shadow paper.
 
-R0 and the R1 causal multi-asset research foundation are implementation-complete. R2.A–R2.E and the
-R2.F1 core machinery are implemented. Source-specific IBKR historical representative and R2.H paths,
-confirmatory F2/G1 machinery and capability-gated G2 preparation/reveal mechanics exist as software,
-but no real confirmatory OOF, locked holdout result or effectiveness conclusion exists.
+R0 and R1 are complete. The source-specific `R2-IBKR-HISTORICAL` experiment is also complete with
+`VALID_CONSUMED_RESULT`: local Ridge versus zero return was negative, pooled local Ridge versus local
+Ridge was positive, pooled beyond zero was inconclusive because that question was not frozen, and
+pooled cross-asset Ridge was rejected at OOF. The result is limited to historical IBKR midpoint
+research under the declared provider-history availability policy.
 
-The Stage 6 → Stage 7 → Stage 8 → R1/R2 evidence-handoff simplification programme is complete: each transformation is proved once and that proof is reused cheaply. The immediate engineering priority is executing the first decision-grade R2 run under `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`; no real confirmatory OOF, locked holdout result or effectiveness conclusion exists.
+The Stage 6 → Stage 7 → Stage 8 → R1/R2 evidence-handoff simplification programme and the first
+decision-grade R2 run are complete. Each transformation is proved once and that proof is reused
+cheaply. R3 is next but has not started; begin it only under a new milestone authority that preserves
+the completed R2 evidence and does not reinterpret its small pooled-versus-local improvement as
+executable or post-cost alpha.
 
 The reviewed `capture-v4` IG demo collector and the independent IBKR paper market-data collector are
 operational data sources. Historical IBKR evidence is provenance-distinct from native IG evidence and
@@ -51,10 +55,10 @@ cannot substantiate native IG execution conclusions.
 The old single-instrument strategy-ranking report is retained framework-proof evidence. It is not the
 intended model/portfolio architecture and its negative cost-aware result is not an effectiveness claim.
 
-The phase may implement offline target generation, walk-forward evaluation, local and pooled models,
-a residual structural GNN-LSTM experiment, cost/risk models, horizon positions, portfolio
-optimisation and internal paper accounting. Continuous live shadow integration begins only after the
-offline MVP. It must not add a broker-order port, real-capital path or production trading endpoint.
+R3 may implement explicit cost estimates, shrinkage risk, horizon positions, global netting,
+constrained target portfolios and internal paper accounting. Residual graph experiments and the
+integrated offline MVP remain later milestones. Continuous live shadow integration begins only after
+the offline MVP. It must not add a broker-order port, real-capital path or production trading endpoint.
 
 When experimental learning and operational hardening compete, prefer the shortest trustworthy
 experiment unless missing hardening could make a result materially false, irreproducible, unsafe or

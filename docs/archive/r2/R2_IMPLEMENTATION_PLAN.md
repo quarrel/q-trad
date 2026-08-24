@@ -1,6 +1,6 @@
 # R2 Implementation Plan — Local and Pooled Baselines
 
-**Status:** Proposed  
+**Status:** COMPLETE; archived after the terminal source-specific R2 result
 **Milestone:** R2 — local and pooled baselines  
 **Depends on:** A verified R1 causal foundation implementation  
 **Primary vertical path:** 15-minute midpoint log return  

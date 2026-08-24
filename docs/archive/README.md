@@ -13,7 +13,10 @@ understand a compatibility boundary that still affects current state. Current in
 `trading-plan-inputs/` preserves the source material distilled into the active programme.
 `capture-operations/` preserves historical operational and qualification procedures that no longer
 belong in the concise current runbook.
+`r1/` preserves the completed causal-foundation implementation plan.
+`r2/` preserves the completed baseline implementation, evidence-handoff, locked-holdout and
+decision-grade scientific-execution plans.
 `ibkr-historical/` preserves the completed source-specific R2 integration and Stage 7/8 remediation
-plans; current authority lives in the acquisition, architecture, R2, plan and status documents above.
+plans; current authority lives in the acquisition, architecture, plan and status documents above.
 Versioned `capture-v*/` directories preserve bounded provider-review and release evidence; they are
 not deployment authority or routine task context.

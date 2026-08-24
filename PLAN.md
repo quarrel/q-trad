@@ -8,7 +8,10 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
 orders or production broker connectivity.
 
-`docs/TRADING_RESEARCH.md` defines the stable research programme. `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md` is the active decision-grade execution authority. This file selects the current work and records only the milestone sequence needed to reach the next trustworthy decision.
+`docs/TRADING_RESEARCH.md` defines the stable research programme. The completed R2 decision-grade
+execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. No separate R3
+execution authority exists yet. This file selects the current work and records only the milestone
+sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
@@ -98,7 +101,7 @@ chronology ambiguity before those contracts are fixed.
 
 ## R1 — causal multi-asset research foundation
 
-- R1 implementation plan `docs\R1_IMPLEMENTATION_PLAN.md`
+- Archived R1 implementation plan: `docs/archive/r1/R1_IMPLEMENTATION_PLAN.md`.
 - Use configurable 5, 15, 30 and 60-minute horizons; prove the first end-to-end path at 15 minutes.
 - Define completed-bar log-return targets, target-availability and overlap intervals,
   direction-independent upper and lower excursions, and deterministic handling of gaps and closures.
@@ -114,7 +117,7 @@ chronology ambiguity before those contracts are fixed.
 
 ## R2 — local and pooled baselines
 
-- R2 implementation plan `docs/R2_IMPLEMENTATION_PLAN.md`.
+- Archived R2 implementation plan: `docs/archive/r2/R2_IMPLEMENTATION_PLAN.md`.
 - R2.A through R2.E are software-complete; R2.F1 provides source-bound, independently replayable OOF, selection and software-bundle contracts and CLI operations. The terminal historical execution completed the confirmatory OOF, selection and locked-holdout lifecycle with independent R2.H verification.
 - R2.C supplies authenticated final fold fits, chronological forecasts, explicit expected-opportunity coverage, independent coefficient replay and coefficient stability summaries. R2.E supplies pooled local-feature and fixed non-graph cross-asset controls with exact own/common-support ablations. R2.F1 retains evaluated-model children, pairwise metrics, stability/concentration evidence, deterministic gates and complete dispositions.
 - Keep `R2-IG-NATIVE`, `R2-IBKR-HISTORICAL` and any later `R2-IBKR-NATIVE` experiment source-specific.

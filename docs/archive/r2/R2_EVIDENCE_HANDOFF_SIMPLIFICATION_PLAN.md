@@ -1,5 +1,7 @@
 # q-trad evidence-handoff simplification implementation plan
 
+**Status:** COMPLETE; archived after the terminal source-specific R2 result
+
 **Programme objective:** before the first real confirmatory R2 run, replace recursive/cumulative
 verification and mixed semantic/physical identities from Stage 6 through R2 with the smallest
 trustworthy handoff model: each boundary transforms once, independently verifies its own claims once,
