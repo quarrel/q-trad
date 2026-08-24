@@ -1323,11 +1323,6 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     canonical_predecessors = _canonical_position_predecessors(root_trace, "economic")
     root_decisions = frozenset(item["decision_time"] for item in root_trace)
     configurations = _strict_mapping(economic["configurations"], "economic.configurations")
-    for configuration_name, configuration in configurations.items():
-        configuration_label = f"economic.configurations.{configuration_name}"
-        canonical_predecessors.update(
-            _canonical_position_predecessors(configuration["position_trace"], configuration_label)
-        )
     for dimension, expected_keys in (
         ("asset", expected_assets),
         ("horizon", frozenset({str(config.document["primary_horizon_minutes"])})),
@@ -1397,42 +1392,47 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
             raise FreezeError(
                 f"renderer economic.configurations.{label} position trace cardinality mismatch"
             )
-    for view_label, view in [("economic", economic)]:
-        _reconcile_economic_view(
-            view,
-            view_label,
-            config.document["cost_grid"],
-            canonical_predecessors,
-            "economic",
-        )
-        for dimension in ("asset", "horizon", "period"):
-            for name, child in view[dimension].items():
-                _reconcile_economic_view(
-                    child,
-                    f"{view_label}.{dimension}.{name}",
-                    config.document["cost_grid"],
-                    canonical_predecessors,
-                    "economic",
-                )
-        for name, child in view["configurations"].items():
-            configuration_label = f"{view_label}.configurations.{name}"
+    _reconcile_economic_view(
+        economic,
+        "economic",
+        config.document["cost_grid"],
+        canonical_predecessors,
+        "economic",
+    )
+    for dimension in ("asset", "horizon", "period"):
+        for name, child in economic[dimension].items():
             _reconcile_economic_view(
                 child,
-                configuration_label,
+                f"economic.{dimension}.{name}",
                 config.document["cost_grid"],
                 canonical_predecessors,
-                configuration_label,
+                "economic",
             )
-            for dimension in ("asset", "horizon", "period"):
-                groups = _strict_mapping(child[dimension], f"{configuration_label}.{dimension}")
-                for group_name, subgroup in groups.items():
-                    _reconcile_economic_view(
-                        subgroup,
-                        f"{configuration_label}.{dimension}.{group_name}",
-                        config.document["cost_grid"],
-                        canonical_predecessors,
-                        configuration_label,
-                    )
+    for name, configuration in configurations.items():
+        configuration_label = f"economic.configurations.{name}"
+        configuration_predecessors = _canonical_position_predecessors(
+            _strict_sequence(
+                configuration["position_trace"], f"{configuration_label}.position_trace"
+            ),
+            configuration_label,
+        )
+        _reconcile_economic_view(
+            configuration,
+            configuration_label,
+            config.document["cost_grid"],
+            configuration_predecessors,
+            configuration_label,
+        )
+        for dimension in ("asset", "horizon", "period"):
+            groups = _strict_mapping(configuration[dimension], f"{configuration_label}.{dimension}")
+            for group_name, subgroup in groups.items():
+                _reconcile_economic_view(
+                    subgroup,
+                    f"{configuration_label}.{dimension}.{group_name}",
+                    config.document["cost_grid"],
+                    configuration_predecessors,
+                    configuration_label,
+                )
     statistical = _strict_mapping(
         report["statistical"],
         "statistical",

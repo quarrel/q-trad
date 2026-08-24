@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -901,6 +902,68 @@ def test_renderer_rejects_configuration_subgroup_change_consistent_local_aggrega
     ][0]
     assert entry["target_position_change"] != 0
     entry["target_position_change"] = -entry["target_position_change"]
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_renderer_rejects_configuration_subgroup_own_predecessor() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    economic = report["economic"]
+    configuration = economic["configurations"]["fixed_graph"]
+    subgroup = configuration["period"]["period-1"]
+    entry = next(
+        item for item in subgroup["position_trace"] if item["target_id"] == "commodity:spot-gold"
+    )
+    target_id = entry["target_id"]
+    decision_time = entry["decision_time"]
+    configuration_trace = sorted(
+        configuration["position_trace"], key=lambda item: (item["decision_time"], item["target_id"])
+    )
+    subgroup_trace = sorted(
+        subgroup["position_trace"], key=lambda item: (item["decision_time"], item["target_id"])
+    )
+
+    def predecessor(trace: list[dict[str, Any]]) -> Decimal:
+        prior = Decimal("0")
+        for candidate in trace:
+            if candidate["target_id"] == target_id:
+                if candidate["decision_time"] == decision_time:
+                    return prior
+                prior = Decimal(str(candidate["target_position"]))
+        raise AssertionError("selected configuration subgroup row has no matching parent trace")
+
+    configuration_prior = predecessor(configuration_trace)
+    subgroup_prior = predecessor(subgroup_trace)
+    assert subgroup_prior != configuration_prior
+    position = Decimal(str(entry["target_position"])) + Decimal("0.1")
+    entry["target_position"] = float(position)
+    entry["target_position_change"] = float(position - subgroup_prior)
+
+    quantum = Decimal("0.000000000001")
+
+    def quantize(value: Decimal) -> Decimal:
+        return value.quantize(quantum, rounding=ROUND_HALF_EVEN)
+
+    gross_total = sum(
+        (Decimal(str(item["realised_gross"])) for item in subgroup["position_trace"]), Decimal("0")
+    )
+    turnover = sum(
+        (abs(Decimal(str(item["target_position_change"]))) for item in subgroup["position_trace"]),
+        Decimal("0"),
+    )
+    count = Decimal(len(subgroup["position_trace"]))
+    break_even = quantize(gross_total / turnover) if turnover else None
+    subgroup["gross_total"] = float(quantize(gross_total))
+    subgroup["gross_mean"] = float(quantize(gross_total / count))
+    subgroup["turnover"] = float(quantize(turnover))
+    subgroup["break_even_cost"] = float(break_even) if break_even is not None else None
+    for sensitivity in subgroup["all_in_cost_sensitivity"]:
+        cost = Decimal(str(sensitivity["cost"]))
+        sensitivity["net_mean"] = float(quantize(gross_total / count - cost * turnover / count))
+        sensitivity["break_even_cost"] = float(break_even) if break_even is not None else None
+
     with pytest.raises(FreezeError, match="renderer"):
         render_markdown(MicroRun(report, result.work_count), config)
 
