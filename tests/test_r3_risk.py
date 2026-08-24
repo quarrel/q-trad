@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from sklearn.covariance import LedoitWolf  # type: ignore[reportMissingTypeStubs]
 
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.risk import (
     ExposureMapping,
     FloatMatrix,
@@ -71,6 +72,8 @@ def _estimate(observations: tuple[RiskObservation, ...]) -> RiskState:
         as_of=CUTOFF,
         observation_cutoff=CUTOFF,
         config=CONFIG,
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         exposure_mapping=MAPPING,
         caps=CAPS,
         provenance="test-r3-risk",
@@ -157,7 +160,7 @@ def test_mapping_exposures_and_caps_are_ordered_and_fail_closed() -> None:
 def test_risk_state_is_frozen_and_identity_fields_are_content_bound() -> None:
     state = _estimate(_observations())
     with pytest.raises(FrozenInstanceError):
-        state.covariance = state.covariance  # type: ignore[misc]
+        setattr(state, "covariance", state.covariance)  # noqa: B010
     with pytest.raises(ValueError, match="semantic identity"):
         replace(state, semantic_identity="0" * 64)
     assert len(state.semantic_id) == 64
@@ -220,6 +223,8 @@ def test_maximum_age_enforces_causal_freshness_in_estimator_and_state() -> None:
         as_of=CUTOFF + CONFIG.maximum_age,
         observation_cutoff=CUTOFF,
         config=CONFIG,
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         exposure_mapping=MAPPING,
         caps=CAPS,
         provenance="test-r3-risk-boundary",
@@ -232,6 +237,8 @@ def test_maximum_age_enforces_causal_freshness_in_estimator_and_state() -> None:
             as_of=CUTOFF + CONFIG.maximum_age + timedelta(microseconds=1),
             observation_cutoff=CUTOFF,
             config=CONFIG,
+            source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+            evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
             exposure_mapping=MAPPING,
             caps=CAPS,
             provenance="test-r3-risk-stale",

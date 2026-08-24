@@ -24,6 +24,7 @@ from qtrad.domain.economics import (
     SessionState,
     derive_expected_net,
 )
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 
@@ -40,7 +41,8 @@ def _economics(
 ) -> ProductEconomics:
     return ProductEconomics(
         asset_id="asset:test",
-        source_class="FIXTURE",
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         source_product_id="product:test",
         price_currency="AUD",
         settlement_currency="AUD",

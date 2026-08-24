@@ -15,6 +15,7 @@ from hashlib import sha256
 from math import isfinite, sqrt
 from typing import ClassVar
 
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.time import require_utc
 
 RISK_STATE_CONTRACT = "qtrad-ordered-risk-state-v1"
@@ -267,6 +268,8 @@ class RiskState:
     currency_exposure_matrix: FloatMatrix
     currency_caps: tuple[float, ...]
     caps: RiskCaps
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     provenance: str
     semantic_identity: str | None = None
     closure_identity: str | None = None
@@ -298,6 +301,11 @@ class RiskState:
         ordered = canonical_asset_order(self.asset_order)
         if ordered != self.asset_order:
             raise ValueError("risk asset_order is not canonical")
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("risk source class and evidence purpose must use declared enums")
         require_utc(self.as_of, "risk as_of")
         require_utc(self.observation_cutoff, "risk observation_cutoff")
         if self.observation_cutoff > self.as_of:
@@ -423,6 +431,8 @@ class RiskState:
         return {
             "contract": self.CONTRACT,
             "schema_version": 1,
+            "source_class": self.source_class,
+            "evidence_purpose": self.evidence_purpose,
             "asset_order": self.asset_order,
             "horizon_seconds": self.horizon.total_seconds(),
             "as_of": self.as_of,
@@ -587,6 +597,8 @@ def estimate_ordered_risk_state(
     config: RiskEstimatorConfig,
     exposure_mapping: ExposureMapping,
     caps: RiskCaps,
+    source_class: MarketDataSourceClass,
+    evidence_purpose: EvidencePurpose,
     provenance: str,
 ) -> RiskState:
     """Estimate a causal horizon-specific Ledoit-Wolf covariance state.
@@ -658,6 +670,8 @@ def estimate_ordered_risk_state(
         currency_exposure_matrix=exposure_mapping.currency_exposure_matrix,
         currency_caps=exposure_mapping.currency_caps,
         caps=caps,
+        source_class=source_class,
+        evidence_purpose=evidence_purpose,
         provenance=provenance,
     )
 
