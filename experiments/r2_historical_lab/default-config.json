@@ -1,11 +1,11 @@
 {
-  "job_id": "LAB-0-v2-review-candidate-3",
+  "job_id": "LAB-0-v2-review-candidate-4",
   "base_sha": "f31cf4731fc233726f45f67f54064c40965d01d7",
   "evidence_label": "EXPLORATORY_POST_HOC_ONLY",
   "source_class": "IBKR_HISTORICAL_RESEARCH",
   "stage7_manifest": "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3/provider-history-v3/manifest.json",
   "terminal_run_root": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z",
-  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-3",
+  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-4",
   "feature_lag_seconds": 300,
   "horizons_minutes": [5, 15, 30, 60]
 }

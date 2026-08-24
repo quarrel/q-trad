@@ -442,7 +442,7 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
         result=terminal_result,
         manifest_sha256=manifest_sha,
     )
-    with pytest.raises(ValueError, match="successful development-only"):
+    with pytest.raises(ValueError, match="canonical DEV-block"):
         freeze_finalists(
             register,
             tmp_path / "terminal-tainted-finalists.json",
@@ -451,6 +451,50 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
             manifest_sha256=manifest_sha,
         )
 
+    training_configuration = {"alpha": 1.5}
+    append_attempt(
+        register,
+        workstream="LAB-TEST",
+        configuration=training_configuration,
+        result=dev_result,
+        manifest_sha256=manifest_sha,
+    )
+    training_targets = dev_targets.with_columns(pl.lit("TRAINING_ONLY").alias("block"))
+    training_result = evaluate_against_zero(
+        dev_predictions,
+        training_targets,
+        model_name="TEST_MODEL",
+    )
+    training_configuration_id = append_attempt(
+        register,
+        workstream="LAB-TEST",
+        configuration=training_configuration,
+        result=training_result,
+        manifest_sha256=manifest_sha,
+    )
+    with pytest.raises(ValueError, match="canonical DEV-block"):
+        freeze_finalists(
+            register,
+            tmp_path / "training-tainted-finalists.json",
+            workstream="LAB-TEST",
+            finalist_configuration_ids=[training_configuration_id],
+            manifest_sha256=manifest_sha,
+        )
+
+    unknown_targets = dev_targets.with_columns(pl.lit("UNKNOWN_BLOCK").alias("block"))
+    unknown_result = evaluate_against_zero(
+        dev_predictions,
+        unknown_targets,
+        model_name="TEST_MODEL",
+    )
+    with pytest.raises(ValueError, match="non-canonical block provenance"):
+        append_attempt(
+            register,
+            workstream="LAB-TEST",
+            configuration={"alpha": 1.75},
+            result=unknown_result,
+            manifest_sha256=manifest_sha,
+        )
     failed_configuration = {"alpha": 2.0}
     failed_configuration_id = append_attempt(
         register,
@@ -459,7 +503,7 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
         result={"status": "FAILED", "failure": "fit did not complete"},
         manifest_sha256=manifest_sha,
     )
-    with pytest.raises(ValueError, match="successful development-only"):
+    with pytest.raises(ValueError, match="canonical DEV-block"):
         freeze_finalists(
             register,
             tmp_path / "failed-finalists.json",
