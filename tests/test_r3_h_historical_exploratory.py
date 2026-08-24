@@ -465,6 +465,8 @@ def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path)
                 "sha256": hashlib.sha256(part_bytes).hexdigest(),
                 "contract": "test-part",
                 "identity": "part-1",
+                "byte_size": len(part_bytes),
+                "row_count": len(part_rows),
             }
         ],
     }
@@ -488,3 +490,31 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
     assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_SELECTED_GROUPS"
+
+
+def test_create_only_writer_is_atomic_on_collision_and_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    script_path = Path(__file__).parents[1] / "ops/research/r3_historical_exploratory.py"
+    spec = importlib.util.spec_from_file_location("r3_h_cli", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    destination = tmp_path / "report.json"
+    module._write_create_only(destination, "{}")
+    with pytest.raises(FileExistsError):
+        module._write_create_only(destination, '{"changed":true}')
+    assert destination.read_text(encoding="utf-8") == "{}"
+
+    def fail_link(_temporary: Path, _destination: Path) -> None:
+        raise OSError("injected link failure")
+
+    monkeypatch.setattr(module.os, "link", fail_link)
+    failed = tmp_path / "failed.json"
+    with pytest.raises(OSError, match="injected link failure"):
+        module._write_create_only(failed, "{}")
+    assert not failed.exists()
+    assert not list(tmp_path.glob(".failed.json.*.tmp"))

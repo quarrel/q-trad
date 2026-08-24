@@ -762,6 +762,7 @@ def _json_depth(value: Any) -> int:
 def _read_json_document(
     path: Path, limits: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]], int]:
+    """Read one frozen wrapper, validating bytes before decoding its parts."""
     if not path.is_file():
         raise FreezeError(f"retained child path does not exist: {path}")
     size = path.stat().st_size
@@ -769,111 +770,155 @@ def _read_json_document(
         raise FreezeError("retained child exceeds frozen source-byte bound")
     try:
         raw_bytes = path.read_bytes()
-        payload = json.loads(raw_bytes)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise FreezeError(f"retained child is not valid JSON: {path}") from exc
+    except OSError as exc:
+        raise FreezeError(f"cannot read retained child: {path}") from exc
     wrapper_hash = hashlib.sha256(raw_bytes).hexdigest()
+    expected_wrapper_hash = limits.get("expected_wrapper_sha256")
+    if expected_wrapper_hash is not None and wrapper_hash != expected_wrapper_hash:
+        raise FreezeError(f"retained wrapper byte hash mismatch: {path}")
+    try:
+        payload = json.loads(raw_bytes)
+    except json.JSONDecodeError as exc:
+        raise FreezeError(f"retained child is not valid JSON: {path}") from exc
+    if _json_depth(payload) > int(limits["max_nested_depth"]):
+        raise FreezeError("retained child exceeds decoder nesting bound")
+
+    metadata: dict[str, Any]
     if isinstance(payload, dict):
         payload_object = cast(dict[str, Any], payload)
-        declared_wrapper_hash = payload_object.get("wrapper_sha256")
-        if declared_wrapper_hash is not None and declared_wrapper_hash != wrapper_hash:
-            raise FreezeError(f"retained wrapper byte hash mismatch: {path}")
-        metadata: dict[str, Any] = dict(payload_object)
+        metadata = dict(payload_object)
+        expected_contract = limits.get("expected_wrapper_contract")
+        expected_identity = limits.get("expected_wrapper_identity")
+        if expected_contract is not None and payload_object.get("contract") != expected_contract:
+            raise FreezeError("retained wrapper contract mismatch")
+        if expected_identity is not None and payload_object.get("identity") != expected_identity:
+            raise FreezeError("retained wrapper identity mismatch")
         parts_value = payload_object.get("parts")
         if parts_value is None:
             records_value: Any = payload_object.get("rows", [payload_object])
-            consumed_parts: list[dict[str, Any]] = [{"locator": str(path), "sha256": wrapper_hash}]
+            consumed_parts: list[dict[str, Any]] = [
+                {
+                    "locator": str(path),
+                    "sha256": wrapper_hash,
+                    "rows": len(cast(list[Any], records_value))
+                    if isinstance(records_value, list)
+                    else 0,
+                    "bytes": size,
+                }
+            ]
         else:
             if not isinstance(parts_value, list) or not parts_value:
                 raise FreezeError("retained wrapper must declare non-empty parts")
             records_value = []
             consumed_parts = []
+            required_descriptor_keys = {
+                "locator",
+                "contract",
+                "identity",
+                "sha256",
+                "byte_size",
+                "row_count",
+            }
             for part_raw in cast(list[Any], parts_value):
                 if not isinstance(part_raw, dict):
                     raise FreezeError("retained part descriptor must be an object")
                 descriptor = cast(dict[str, Any], part_raw)
-                allowed_part_keys = {
-                    "locator",
-                    "sha256",
-                    "contract",
-                    "identity",
-                    "rows",
-                    "row_count",
-                    "byte_size",
-                }
-                if set(descriptor) - allowed_part_keys:
-                    raise FreezeError("retained part descriptor has unknown fields")
-                locator_value = descriptor.get("locator")
-                if locator_value is not None:
-                    if not isinstance(locator_value, str):
-                        raise FreezeError("retained part locator is malformed")
-                    part_path = Path(locator_value)
-                    if part_path.is_absolute() or ".." in part_path.parts:
-                        raise FreezeError("retained part locator must be safely relative")
-                    part_path = path.parent / part_path
-                    if not part_path.is_file():
-                        raise FreezeError("retained part locator does not exist")
-                    part_bytes = part_path.read_bytes()
-                    if len(part_bytes) > int(limits["max_source_bytes"]):
-                        raise FreezeError("retained part exceeds source-byte bound")
-                    actual_hash = hashlib.sha256(part_bytes).hexdigest()
-                    part_payload = json.loads(part_bytes)
-                else:
-                    part_payload = descriptor.get("rows")
-                    part_bytes = json.dumps(
-                        part_payload, sort_keys=True, separators=(",", ":")
-                    ).encode()
-                    actual_hash = hashlib.sha256(part_bytes).hexdigest()
-                if descriptor.get("sha256") != actual_hash:
+                if set(descriptor) != required_descriptor_keys:
+                    raise FreezeError("retained part descriptor fields are incomplete")
+                locator_value = descriptor["locator"]
+                if not isinstance(locator_value, str):
+                    raise FreezeError("retained part locator is malformed")
+                part_path = Path(locator_value)
+                if part_path.is_absolute() or ".." in part_path.parts or not locator_value:
+                    raise FreezeError("retained part locator must be safely relative")
+                resolved_part = path.parent / part_path
+                try:
+                    part_bytes = resolved_part.read_bytes()
+                except OSError as exc:
+                    raise FreezeError("retained part locator does not exist") from exc
+                actual_hash = hashlib.sha256(part_bytes).hexdigest()
+                if actual_hash != descriptor["sha256"]:
                     raise FreezeError("retained part byte hash mismatch")
+                part_size = len(part_bytes)
+                if part_size != int(descriptor["byte_size"]):
+                    raise FreezeError("retained part byte-size declaration mismatch")
+                if part_size > int(limits["max_source_bytes"]):
+                    raise FreezeError("retained part exceeds source-byte bound")
+                try:
+                    part_payload = json.loads(part_bytes)
+                except json.JSONDecodeError as exc:
+                    raise FreezeError("retained part is not valid JSON") from exc
+                if _json_depth(part_payload) > int(limits["max_nested_depth"]):
+                    raise FreezeError("retained part exceeds decoder nesting bound")
                 if not isinstance(part_payload, list):
                     raise FreezeError("retained part payload must be an array")
                 part_rows = cast(list[Any], part_payload)
+                if len(part_rows) != int(descriptor["row_count"]):
+                    raise FreezeError("retained part row-count declaration mismatch")
                 if len(part_rows) > int(limits["max_part_rows"]):
                     raise FreezeError("retained part exceeds row bound")
-                if descriptor.get("row_count") is not None and descriptor["row_count"] != len(
-                    part_rows
-                ):
-                    raise FreezeError("retained part row-count declaration mismatch")
-                if descriptor.get("byte_size") is not None and descriptor["byte_size"] != len(
-                    part_bytes
-                ):
-                    raise FreezeError("retained part byte-size declaration mismatch")
+                required_record_keys = limits.get("required_record_keys")
+                for record_raw in part_rows:
+                    if not isinstance(record_raw, dict):
+                        raise FreezeError("retained row must be an object")
+                    record_object = cast(dict[str, Any], record_raw)
+                    if required_record_keys is not None and set(record_object) != set(
+                        cast(Sequence[str], required_record_keys)
+                    ):
+                        raise FreezeError("retained row fields do not match frozen mapping")
+                    if len(json.dumps(record_object, separators=(",", ":")).encode()) > int(
+                        limits["max_row_bytes"]
+                    ):
+                        raise FreezeError("retained row exceeds decoder byte bound")
                 records_value.extend(part_rows)
                 consumed_parts.append(
                     {
-                        "locator": str(locator_value or "<embedded>"),
+                        "locator": locator_value,
                         "sha256": actual_hash,
                         "rows": len(part_rows),
-                        "bytes": len(part_bytes),
+                        "bytes": part_size,
+                        "contract": descriptor["contract"],
+                        "identity": descriptor["identity"],
                     }
                 )
-        metadata["consumed_parts"] = consumed_parts
     elif isinstance(payload, list):
-        metadata = {"consumed_parts": [{"locator": str(path), "sha256": wrapper_hash}]}
+        metadata = {}
         records_value = cast(Any, payload)
+        consumed_parts: list[dict[str, Any]] = [
+            {
+                "locator": str(path),
+                "sha256": wrapper_hash,
+                "rows": len(cast(list[Any], payload)),
+                "bytes": size,
+            }
+        ]
     else:
         raise FreezeError("retained child rows must be an array")
-    if _json_depth(payload) > int(limits["max_nested_depth"]):
-        raise FreezeError("retained child exceeds decoder nesting bound")
     if not isinstance(records_value, list):
         raise FreezeError("retained child object must contain rows")
     records = cast(list[Any], records_value)
     if len(records) > int(limits["max_source_rows"]):
         raise FreezeError("retained child exceeds frozen source-row bound")
+    required_record_keys = limits.get("required_record_keys")
     result: list[Mapping[str, Any]] = []
     for record_raw in records:
         if not isinstance(record_raw, dict):
             raise FreezeError("retained row must be an object")
-        record = cast(Mapping[str, Any], record_raw)
-        if len(json.dumps(record, separators=(",", ":")).encode()) > int(limits["max_row_bytes"]):
+        record_object = cast(dict[str, Any], record_raw)
+        if required_record_keys is not None and set(record_object) != set(
+            cast(Sequence[str], required_record_keys)
+        ):
+            raise FreezeError("retained row fields do not match frozen mapping")
+        record = cast(Mapping[str, Any], record_object)
+        if len(json.dumps(record_object, separators=(",", ":")).encode()) > int(
+            limits["max_row_bytes"]
+        ):
             raise FreezeError("retained row exceeds decoder byte bound")
         result.append(record)
+    metadata["consumed_parts"] = consumed_parts
     metadata["source_scan_rows"] = len(records)
-    metadata["source_scan_bytes"] = size + sum(
-        int(part.get("bytes", 0)) for part in metadata.get("consumed_parts", [])
-    )
-    metadata["source_scan_parts"] = len(metadata.get("consumed_parts", []))
+    metadata["source_scan_bytes"] = size + sum(int(part.get("bytes", 0)) for part in consumed_parts)
+    metadata["source_scan_parts"] = len(consumed_parts)
     return metadata, result, size
 
 
@@ -944,7 +989,6 @@ def load_retained_rows(
     config: FreezeConfig, *, locators: Mapping[str, str] | None = None
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
     """Load exact terminal children after one terminal authentication boundary."""
-
     authority = authenticate_terminal_authority(config)
     loader = cast(Mapping[str, Any], config.document["retained_loader"])
     expected_locators = cast(Mapping[str, str], loader["locators"])
@@ -956,6 +1000,7 @@ def load_retained_rows(
     limits = dict(decoder_limits)
     limits["max_source_rows"] = streaming["max_source_rows"]
     limits["max_source_bytes"] = streaming["max_source_bytes"]
+
     selection_metadata, selection_records, selection_size = _read_json_document(
         Path(actual_locators["selection"]), limits
     )
@@ -970,36 +1015,37 @@ def load_retained_rows(
     consumed = consumed_records[0]
     if consumed.get("state") != "CONSUMED":
         raise FreezeError("retained lifecycle marker is not terminal")
-    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
-    child_data: dict[str, tuple[dict[str, Any], list[Mapping[str, Any]], int]] = {}
-    for name in child_names:
-        child_data[name] = _read_json_document(Path(actual_locators[name]), limits)
-        _validate_child_metadata(name, child_data[name][0], loader)
-    if (
-        selection.get("manifest_id")
-        != cast(Mapping[str, Any], loader["identity_bindings"])["selection_manifest_id"]
-    ):
-        raise FreezeError("selection manifest identity mismatch")
-    if (
-        consumed.get("marker_id")
-        != cast(Mapping[str, Any], loader["identity_bindings"])["consumed_marker_id"]
-    ):
-        raise FreezeError("consumed marker identity mismatch")
     bindings = cast(Mapping[str, Any], loader["identity_bindings"])
+    if selection.get("manifest_id") != bindings["selection_manifest_id"]:
+        raise FreezeError("selection manifest identity mismatch")
+    if consumed.get("marker_id") != bindings["consumed_marker_id"]:
+        raise FreezeError("consumed marker identity mismatch")
     if consumed.get("selection_manifest_id") != bindings["selection_manifest_id"]:
         raise FreezeError("consumed selection identity mismatch")
     if consumed.get("g2_manifest_id", consumed.get("seal_id")) != bindings["g2_manifest_id"]:
         raise FreezeError("consumed G2 manifest identity mismatch")
+
+    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
     mappings = cast(Mapping[str, str], loader["field_mappings"])
-    rows_by_key: dict[tuple[Any, ...], dict[str, Mapping[str, Any]]] = {}
-    for name in child_names:
-        for record in child_data[name][1]:
-            key = _canonical_join_key(record, mappings)
-            if key in rows_by_key and name in rows_by_key[key]:
-                raise FreezeError(f"duplicate canonical identity in {name}")
-            rows_by_key.setdefault(key, {})[name] = record
     required = set(cast(Sequence[str], loader["required_columns"]))
     expected_fields = {mappings[field] for field in required}
+    rows_by_key: dict[tuple[Any, ...], dict[str, Mapping[str, Any]]] = {}
+    child_summaries: dict[str, tuple[dict[str, Any], int, int]] = {}
+    for name in child_names:
+        child_limits = dict(limits)
+        child_limits["required_record_keys"] = expected_fields
+        metadata, records, size = _read_json_document(Path(actual_locators[name]), child_limits)
+        _validate_child_metadata(name, metadata, loader)
+        child_summaries[name] = (metadata, size, len(records))
+        for record in records:
+            key = _canonical_join_key(record, mappings)
+            children = rows_by_key.setdefault(key, {})
+            if name in children:
+                raise FreezeError(f"duplicate canonical identity in {name}")
+            children[name] = record
+            if len(rows_by_key) > int(decoder_limits["max_selected_rows"]):
+                raise FreezeError("bounded join state exceeds max_selected_rows before selection")
+
     rows: list[FixtureRow] = []
     for key, children in rows_by_key.items():
         if set(children) != set(child_names):
@@ -1015,18 +1061,25 @@ def load_retained_rows(
             )
         )
     selected, selection_meta = select_synchronised_rows(rows, config)
-    source_sizes = {name: child_data[name][2] for name in child_names}
-    source_sizes.update(selection=selection_size, consumed=consumed_size)
+    source_rows = sum(summary[2] for summary in child_summaries.values())
+    source_bytes = (
+        selection_size + consumed_size + sum(summary[1] for summary in child_summaries.values())
+    )
+    consumed_parts = {
+        name: list(cast(list[Any], summary[0].get("consumed_parts", [])))
+        for name, summary in child_summaries.items()
+    }
+    source_parts = 2 + sum(len(parts) or 1 for parts in consumed_parts.values())
     return selected, {
         "authority": authority,
         "selection": selection_meta,
-        "source_scan_rows": sum(len(child_data[name][1]) for name in child_names),
-        "source_scan_bytes": sum(source_sizes.values()),
-        "source_scan_parts": 2
-        + sum(
-            len(cast(list[Any], child_data[name][0].get("parts") or [])) or 1
-            for name in child_names
-        ),
+        "source_scan_rows": source_rows,
+        "source_scan_bytes": source_bytes,
+        "source_scan_parts": source_parts,
+        "consumed_parts": consumed_parts,
+        "selected_rows": len(selected),
+        "selected_parts": sum(len(parts) for parts in consumed_parts.values()),
+        "stop_reason": "STOPPED_AFTER_SELECTED_GROUPS",
         "outcome_decode_performed": True,
     }
 
@@ -1034,21 +1087,48 @@ def load_retained_rows(
 def load_fixture_rows(
     rows: Sequence[FixtureRow], config: FreezeConfig
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
-    """Apply the retained loader's bounded selector interface to fixture children."""
-
+    """Route injected child records through the retained join and selector boundary."""
     if len(rows) > int(config.document["compute_limits"]["max_rows"]):
         raise FreezeError("fixture source exceeds frozen row bound")
+    mappings = cast(Mapping[str, str], config.document["retained_loader"]["field_mappings"])
+    expected_fields = set(mappings.values())
+    fixture_fields = set(FixtureRow.__dataclass_fields__)
+    if not expected_fields <= fixture_fields:
+        raise FreezeError("fixture fields do not match frozen retained mapping")
+    child_keys: set[tuple[Any, ...]] = set()
+    for row in rows:
+        record = {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__}
+        key = _canonical_join_key(record, mappings)
+        if key in child_keys:
+            raise FreezeError("duplicate canonical identity in fixture child")
+        child_keys.add(key)
     selected, selection = select_synchronised_rows(rows, config)
-    source_bytes = sum(
-        len(
-            json.dumps(
-                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        )
+    encoded_rows = [
+        json.dumps(
+            {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
         for row in rows
-    )
+    ]
+    source_bytes = sum(len(encoded) for encoded in encoded_rows)
+    child_hashes = {
+        name: hashlib.sha256(b"[" + b",".join(encoded_rows) + b"]").hexdigest()
+        for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
+    }
+    consumed_parts = {
+        name: [
+            {
+                "locator": f"<fixture:{name}:part-0>",
+                "contract": config.document["retained_loader"]["manifest_contract"],
+                "identity": f"fixture-{name}-part-0",
+                "sha256": child_hashes[name],
+                "rows": len(rows),
+                "bytes": source_bytes,
+            }
+        ]
+        for name in child_hashes
+    }
     return selected, {
         "authority": {
             "authentication_performed": False,
@@ -1060,9 +1140,11 @@ def load_fixture_rows(
         "source_scan_rows": len(rows),
         "source_scan_bytes": source_bytes,
         "source_scan_parts": 4,
-        "consumed_parts": 4,
+        "consumed_parts": consumed_parts,
         "selected_rows": len(selected),
         "selected_parts": 4,
+        "selected_bytes": selection["selected_bytes"],
+        "stop_reason": "STOPPED_AFTER_SELECTED_GROUPS",
         "outcome_decode_performed": False,
         "fixture_injected": True,
     }
@@ -1641,6 +1723,7 @@ def _graph_predictions(
     graph_algorithm: Mapping[str, Any],
     fixed_algorithm: Mapping[str, Any],
     shuffled_algorithm: Mapping[str, Any],
+    graph_controls: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, list[float]], int, int]:
     if (
         tiny_graph["layers"] != graph_algorithm["layers"]
@@ -1649,6 +1732,19 @@ def _graph_predictions(
         raise FreezeError("tiny graph and algorithm dimensions differ")
     if fixed_algorithm["construction"] != "same_decision_time_excluding_self":
         raise FreezeError("fixed graph construction is not frozen")
+    control_by_kind: dict[str, Mapping[str, Any]] = {}
+    for descriptor in graph_controls:
+        if not descriptor["enabled"]:
+            raise FreezeError("disabled graph control cannot enter the execution set")
+        kind = str(descriptor["kind"])
+        if kind in control_by_kind:
+            raise FreezeError(f"duplicate graph control kind: {kind}")
+        if kind not in {"non_graph_local", "non_graph_pooled", "fixed_graph", "shuffled_graph"}:
+            raise FreezeError(f"unsupported graph control declaration: {kind}")
+        control_by_kind[kind] = descriptor
+    expected_kinds = {"non_graph_local", "non_graph_pooled", "fixed_graph", "shuffled_graph"}
+    if set(control_by_kind) != expected_kinds:
+        raise FreezeError("frozen graph controls are incomplete")
     neighbours = _graph_neighbours(rows, graph_algorithm)
     shuffled = _shuffled_graph_predictions(rows, shuffled_algorithm)
     learned = [0.0] * len(rows)
@@ -1666,11 +1762,11 @@ def _graph_predictions(
     graph_fit_executions = 1 if training_indices else 0
     return (
         {
-            "local_non_graph": [row.prediction for row in rows],
-            "pooled_non_graph": list(pooled_predictions),
-            "fixed_graph": neighbours,
-            "shuffled_graph": shuffled,
-            "tiny_learned_graph": learned,
+            str(control_by_kind["non_graph_local"]["id"]): [row.prediction for row in rows],
+            str(control_by_kind["non_graph_pooled"]["id"]): list(pooled_predictions),
+            str(control_by_kind["fixed_graph"]["id"]): neighbours,
+            str(control_by_kind["shuffled_graph"]["id"]): shuffled,
+            str(tiny_graph["id"]): learned,
         },
         graph_fit_executions,
         graph_fit_executions,
@@ -1711,20 +1807,32 @@ def analyse_fixture(
     oof["first_fit_evaluation_time"] = first_evaluation_time
     oof["first_fit_prediction_mask"] = evaluation_mask
     candidate_descriptors = cast(list[Mapping[str, Any]], config.document["nonlinear_candidates"])
-    candidate_ids = [str(descriptor["id"]) for descriptor in candidate_descriptors]
-    if len(candidate_ids) > limits["max_candidates"]:
+    if len(candidate_descriptors) > limits["max_candidates"]:
         raise FreezeError("fixture analysis exceeded frozen candidate limits")
+    candidate_by_family: dict[str, Mapping[str, Any]] = {}
+    for descriptor in candidate_descriptors:
+        if not descriptor["enabled"]:
+            raise FreezeError("disabled candidate cannot enter the frozen execution set")
+        family = str(descriptor["family"])
+        if family in candidate_by_family:
+            raise FreezeError(f"duplicate candidate family: {family}")
+        if family not in {"ridge", "constant_zero", "bounded_huber"} or descriptor[
+            "degree"
+        ] not in {0, 1}:
+            raise FreezeError(f"unsupported candidate declaration: {family}")
+        candidate_by_family[family] = descriptor
+    if set(candidate_by_family) != {"ridge", "constant_zero", "bounded_huber"}:
+        raise FreezeError("frozen candidate declarations are incomplete")
+    candidate_ids = [str(descriptor["id"]) for descriptor in candidate_descriptors]
 
     zero_predictions = [0.0] * row_count
     local_predictions = [row.prediction for row in ordered]
-
     algorithms = cast(Mapping[str, Any], config.document["algorithms"])
     pooled_coefficients = _fit_ridge(
         ordered, training_indices, cast(Mapping[str, Any], algorithms["ridge"])
     )
     pooled_predictions = _apply_causal_linear(ordered, training_indices, pooled_coefficients)
     pooled_fit_executions = 1 if training_indices else 0
-
     huber_coefficients = _fit_huber(
         ordered,
         training_indices,
@@ -1734,40 +1842,49 @@ def analyse_fixture(
     huber_predictions = _apply_causal_linear(ordered, training_indices, huber_coefficients)
     huber_fit_executions = 1 if training_indices else 0
 
-    candidate_predictions = dict(
-        zip(candidate_ids, (local_predictions, zero_predictions, huber_predictions), strict=True)
-    )
-    candidate_masks = dict(zip(candidate_ids, (all_mask, all_mask, evaluation_mask), strict=True))
-    zero_metrics = _metrics(
-        ordered,
-        zero_predictions,
-        baseline_mse=None,
-        prediction_mask=all_mask,
-    )
+    candidate_predictions: dict[str, list[float]] = {}
+    candidate_masks: dict[str, list[bool]] = {}
+    candidate_fit_executions: dict[str, int] = {}
+    for descriptor in candidate_descriptors:
+        candidate_id = str(descriptor["id"])
+        family = str(descriptor["family"])
+        if family == "ridge":
+            candidate_predictions[candidate_id] = local_predictions
+            candidate_masks[candidate_id] = all_mask
+            candidate_fit_executions[candidate_id] = 0
+        elif family == "constant_zero":
+            candidate_predictions[candidate_id] = zero_predictions
+            candidate_masks[candidate_id] = all_mask
+            candidate_fit_executions[candidate_id] = 0
+        else:
+            candidate_predictions[candidate_id] = huber_predictions
+            candidate_masks[candidate_id] = evaluation_mask
+            candidate_fit_executions[candidate_id] = huber_fit_executions
+
+    zero_id = str(candidate_by_family["constant_zero"]["id"])
+    huber_id = str(candidate_by_family["bounded_huber"]["id"])
+    zero_metrics = _metrics(ordered, zero_predictions, baseline_mse=None, prediction_mask=all_mask)
     baseline_mse = float(zero_metrics["mse"])
     local_reference_mse = float(
         _metrics(ordered, local_predictions, baseline_mse=None, prediction_mask=all_mask)["mse"]
     )
-    candidate_fit_executions = dict(zip(candidate_ids, (0, 0, huber_fit_executions), strict=True))
-    candidate_zero_id = candidate_ids[1]
-    candidate_huber_id = candidate_ids[2]
-    candidate_metrics = {
-        candidate_id: {
+    candidate_metrics: dict[str, dict[str, Any]] = {}
+    for descriptor in candidate_descriptors:
+        candidate_id = str(descriptor["id"])
+        fit_count = candidate_fit_executions[candidate_id]
+        candidate_metrics[candidate_id] = {
             **_metrics(
                 ordered,
                 candidate_predictions[candidate_id],
-                baseline_mse=baseline_mse if candidate_id != candidate_zero_id else None,
-                minimum_support=19 if candidate_id == candidate_huber_id else 1,
+                baseline_mse=baseline_mse if candidate_id != zero_id else None,
+                minimum_support=19 if candidate_id == huber_id else 1,
                 prediction_mask=candidate_masks[candidate_id],
             ),
-            "fit_executions": candidate_fit_executions[candidate_id],
-            "training_rows": len(training_indices) if candidate_fit_executions[candidate_id] else 0,
-            "fit_evaluation_time": (
-                first_evaluation_time if candidate_fit_executions[candidate_id] else None
-            ),
+            "fit_executions": fit_count,
+            "training_rows": len(training_indices) if fit_count else 0,
+            "fit_evaluation_time": first_evaluation_time if fit_count else None,
+            "execution_receipt": dict(descriptor),
         }
-        for candidate_id in candidate_ids
-    }
 
     control_ids = [
         str(control_id)
@@ -1781,7 +1898,7 @@ def analyse_fixture(
     )
     control_masks = dict(zip(control_ids, (all_mask, all_mask, evaluation_mask), strict=True))
     control_fit_executions = dict(zip(control_ids, (0, 0, pooled_fit_executions), strict=True))
-    control_metrics = {
+    control_metrics: dict[str, dict[str, Any]] = {
         control_id: {
             **_metrics(
                 ordered,
@@ -1800,7 +1917,7 @@ def analyse_fixture(
         for control_id, predictions in control_predictions.items()
     }
     oof_metrics = control_metrics[local_control_id]
-    statistical = {
+    statistical: dict[str, Any] = {
         "oof": {
             **oof,
             "rank_correlation": oof_metrics["rank_correlation"],
@@ -1816,7 +1933,8 @@ def analyse_fixture(
             {"id": control_id, **control_metrics[control_id]} for control_id in control_ids
         ],
         "negative_failed_inconclusive_rendered": {
-            metric["status"] for metric in (*candidate_metrics.values(), *control_metrics.values())
+            cast(Mapping[str, Any], metric)["status"]
+            for metric in (*candidate_metrics.values(), *control_metrics.values())
         }
         >= {"NEGATIVE", "FAILED", "INCONCLUSIVE"},
         "post_result_selection": False,
@@ -1825,6 +1943,7 @@ def analyse_fixture(
     tiny_graph = cast(Mapping[str, Any], config.document["tiny_graph_candidate"])
     if not tiny_graph["enabled"]:
         raise FreezeError("tiny learned graph is required and enabled")
+    graph_controls = cast(list[Mapping[str, Any]], config.document["graph_controls"])
     graph_predictions, graph_fit_count, graph_fit_executions = _graph_predictions(
         ordered,
         pooled_predictions,
@@ -1833,17 +1952,16 @@ def analyse_fixture(
         cast(Mapping[str, Any], algorithms["graph"]),
         cast(Mapping[str, Any], algorithms["fixed_graph"]),
         cast(Mapping[str, Any], algorithms["shuffled_graph"]),
+        graph_controls,
     )
     fits = sum(candidate_fit_executions.values()) + pooled_fit_executions + graph_fit_count
     if fits > limits["max_fits"]:
         raise FreezeError("fixture analysis exceeded frozen fit limits")
-    graph_control_ids = [
-        str(control["id"])
-        for control in cast(list[Mapping[str, Any]], config.document["graph_controls"])
-    ]
-    tiny_graph_id = str(cast(Mapping[str, Any], config.document["tiny_graph_candidate"])["id"])
+    graph_control_ids = [str(control["id"]) for control in graph_controls]
+    tiny_graph_id = str(tiny_graph["id"])
     graph_masks = {control_id: all_mask for control_id in graph_control_ids}
-    graph_masks["pooled_non_graph"] = evaluation_mask
+    control_by_kind = {str(control["kind"]): control for control in graph_controls}
+    graph_masks[str(control_by_kind["non_graph_pooled"]["id"])] = evaluation_mask
     graph_masks[tiny_graph_id] = evaluation_mask
     graph_metrics = {
         control_id: _metrics(
@@ -1855,8 +1973,11 @@ def analyse_fixture(
         for control_id, predictions in graph_predictions.items()
     }
     graph_metrics[tiny_graph_id]["fit_executions"] = graph_fit_executions
-    for control_id in graph_control_ids:
+    graph_metrics[tiny_graph_id]["execution_receipt"] = dict(tiny_graph)
+    for control in graph_controls:
+        control_id = str(control["id"])
         graph_metrics[control_id]["fit_executions"] = 0
+        graph_metrics[control_id]["execution_receipt"] = dict(control)
     graph = {
         tiny_graph_id: {
             "id": tiny_graph_id,
@@ -1896,13 +2017,16 @@ def analyse_fixture(
     }
     measured = measurement or _runtime_measurement(started)
     _check_hard_limits(limits, measured)
-    statuses = {
-        candidate_id: metric["status"] for candidate_id, metric in candidate_metrics.items()
+    statuses: dict[str, str] = {
+        str(candidate_id): str(metric["status"])
+        for candidate_id, metric in candidate_metrics.items()
     }
     statuses.update(
-        {control_id: metric["status"] for control_id, metric in control_metrics.items()}
+        {str(control_id): str(metric["status"]) for control_id, metric in control_metrics.items()}
     )
-    statuses.update({control_id: metric["status"] for control_id, metric in graph_metrics.items()})
+    statuses.update(
+        {str(control_id): str(metric["status"]) for control_id, metric in graph_metrics.items()}
+    )
     retained = cast(Mapping[str, Any], config.document["retained_parents"])
     parent_identities = {key: retained[key] for key in _RETAINED_IDENTITY_KEYS}
     report: dict[str, Any] = {
