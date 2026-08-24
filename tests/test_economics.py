@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from importlib.metadata import version as package_version
+from typing import cast
 
 import cvxpy as cp
 import numpy as np
@@ -406,3 +407,70 @@ def test_solver_capability_exact_convex_form() -> None:
         max(0.0, risk_value - 0.04),
     )
     assert residual <= 1e-8
+
+
+def test_product_economics_rejects_invalid_enums_before_eligibility() -> None:
+    with pytest.raises(ValueError, match="impact disposition"):
+        replace(
+            _economics(),
+            impact_disposition=cast(ImpactDisposition, "SUPPORTED_MODEL"),
+        )
+    with pytest.raises(ValueError, match="impact disposition"):
+        replace(
+            _economics(),
+            session_state=cast(SessionState, "ELIGIBLE"),
+        )
+
+
+def test_economic_values_reject_invalid_enum_types() -> None:
+    with pytest.raises(ValueError, match="status and basis"):
+        CostSchedule(
+            status=cast(InputStatus, "AVAILABLE"),
+            currency="AUD",
+            per_quantity=Decimal("1"),
+            minimum=Decimal("0"),
+            basis=CostBasis.PHYSICAL_DELTA,
+            version="schedule-v1",
+            provenance="fixture",
+        )
+    with pytest.raises(ValueError, match="FX status"):
+        replace(
+            FXRate.identity(
+                currency="AUD",
+                observed_at=NOW,
+                max_age=timedelta(hours=1),
+                source="fixture",
+                version="fx-v1",
+            ),
+            status=cast(InputStatus, "AVAILABLE"),
+        )
+    with pytest.raises(ValueError, match="component, status and basis"):
+        replace(
+            _cost_state().components[0],
+            component=cast(CostComponentKind, "SPREAD"),
+        )
+
+
+def test_round_quantity_preserves_signed_conservative_symmetry() -> None:
+    economics = _economics()
+    assert economics.round_quantity(Decimal("2.9")) == Decimal("2")
+    assert economics.round_quantity(Decimal("-2.9")) == Decimal("-2")
+    assert economics.round_quantity(Decimal("0.9")) == Decimal("0")
+    assert economics.round_quantity(Decimal("-0.9")) == Decimal("0")
+    assert economics.round_quantity(Decimal("0")) == Decimal("0")
+    assert economics.round_quantity(Decimal("2.9")) == -economics.round_quantity(Decimal("-2.9"))
+
+
+def test_cost_schedule_amount_for_zero_and_minimum() -> None:
+    schedule = CostSchedule.available(
+        currency="AUD",
+        per_quantity=Decimal("2"),
+        minimum=Decimal("5"),
+        basis=CostBasis.PHYSICAL_DELTA,
+        version="schedule-v1",
+        provenance="fixture",
+    )
+    assert schedule.amount_for(Decimal("0")) == Decimal("0")
+    assert schedule.amount_for(Decimal("1")) == Decimal("5")
+    with pytest.raises(ValueError, match="non-negative"):
+        schedule.amount_for(Decimal("-1"))

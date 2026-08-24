@@ -86,14 +86,12 @@ class CostSchedule:
     reason: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not InputStatus or type(self.basis) is not CostBasis:
+            raise ValueError("cost schedule status and basis must use declared enums")
         if self.currency is not None:
             _require_currency(self.currency, "cost schedule currency")
-        if (
-            type(self.basis) is not CostBasis
-            or not self.version
-            or not self.provenance
-        ):
-            raise ValueError("cost schedule basis, version and provenance are required")
+        if not self.version or not self.provenance:
+            raise ValueError("cost schedule version and provenance are required")
         if self.status in {InputStatus.MISSING, InputStatus.UNSUPPORTED}:
             if self.per_quantity is not None or self.minimum is not None:
                 raise ValueError("missing or unsupported schedule cannot carry an amount")
@@ -187,11 +185,13 @@ class CostSchedule:
         return self.status in {InputStatus.AVAILABLE, InputStatus.DOCUMENTED_ZERO}
 
     def amount_for(self, quantity: Decimal) -> Decimal | None:
-        """Return the charge for a positive physical quantity, if supported."""
+        """Return the charge for a non-negative physical quantity, if supported."""
 
-        _require_positive(quantity, "cost schedule quantity")
+        _require_nonnegative(quantity, "cost schedule quantity")
         if not self.is_available:
             return None
+        if quantity == 0:
+            return Decimal("0")
         assert self.per_quantity is not None
         assert self.minimum is not None
         return max(self.minimum, quantity * self.per_quantity)
@@ -217,6 +217,8 @@ class FXRate:
     reason: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not InputStatus:
+            raise ValueError("FX status must use the declared InputStatus enum")
         _require_currency(self.base_currency, "FX base currency")
         _require_currency(self.quote_currency, "FX quote currency")
         require_utc(self.observed_at, "FX observed_at")
@@ -402,6 +404,11 @@ class ProductEconomics:
     impact_reason: str | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.impact_disposition) is not ImpactDisposition
+            or type(self.session_state) is not SessionState
+        ):
+            raise ValueError("impact disposition and session state must use declared enums")
         for value, field_name in (
             (self.price_currency, "price currency"),
             (self.settlement_currency, "settlement currency"),
@@ -530,14 +537,17 @@ class ProductEconomics:
         return Eligibility(not reasons, tuple(reasons))
 
     def round_quantity(self, quantity: Decimal) -> Decimal:
-        """Conservatively round a continuous quantity to valid product increments."""
+        """Conservatively round a signed quantity to valid product increments."""
 
-        _require_nonnegative(quantity, "quantity")
-        increments = floor(quantity / self.quantity_increment)
+        _require_finite(quantity, "quantity")
+        if quantity == 0:
+            return Decimal("0")
+        magnitude = abs(quantity)
+        increments = floor(magnitude / self.quantity_increment)
         rounded = self.quantity_increment * increments
         if rounded < self.minimum_quantity:
             return Decimal("0")
-        return rounded
+        return rounded if quantity > 0 else -rounded
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +571,12 @@ class ComponentCost:
     conversion_version: str | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.component) is not CostComponentKind
+            or type(self.status) is not InputStatus
+            or type(self.basis) is not CostBasis
+        ):
+            raise ValueError("component, status and basis must use declared enums")
         if not self.reporting_currency or not self.version or not self.provenance:
             raise ValueError(
                 "component cost reporting currency, version and provenance are required"
@@ -604,9 +620,8 @@ class ComponentCost:
                     "available component requires conversion-bound native and reporting amounts"
                 )
             _require_positive(self.conversion_rate, "component conversion rate")
-            if (
-                self.native_currency == self.reporting_currency
-                and self.conversion_rate != Decimal("1")
+            if self.native_currency == self.reporting_currency and self.conversion_rate != Decimal(
+                "1"
             ):
                 raise ValueError("identity component conversion rate must equal one")
             if self.native_amount * self.conversion_rate != self.reporting_amount:
