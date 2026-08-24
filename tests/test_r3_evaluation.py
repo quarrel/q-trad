@@ -89,3 +89,29 @@ def test_stale_closed_and_incomplete_quotes_fail_closed():
         asset = report.assets[0]
         assert asset.disposition is EvaluationDisposition.UNAVAILABLE
         assert reason in asset.reason_codes
+
+
+def test_exit_quote_at_exact_target_time_is_valid():
+    decision, quotes = build_fixture_inputs()
+    target = decision.expiry_time
+    candidates = tuple(
+        replace(quote, received_time=target) if quote.received_time > target else quote
+        for quote in quotes
+    )
+    report = evaluate_independently(decision, candidates, latency=timedelta(seconds=1))
+    assert report.assets[0].disposition is EvaluationDisposition.ACCEPTED
+
+
+def test_latency_movement_is_diagnostic_not_double_charged():
+    decision, quotes = build_fixture_inputs()
+    candidates = tuple(
+        replace(quote, bid=Decimal("100.9"), ask=Decimal("101.1"))
+        if quote.received_time == decision.decision_time + timedelta(seconds=2)
+        else quote
+        for quote in quotes
+    )
+    report = evaluate_independently(decision, candidates, latency=timedelta(seconds=1))
+    pnl = report.assets[0].realised
+    assert pnl is not None
+    assert pnl.latency_movement == Decimal("0.5")
+    assert pnl.net_pnl == pnl.gross_midpoint_pnl - pnl.total_cost

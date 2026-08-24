@@ -34,6 +34,7 @@ DECISION_CONTRACT = "qtrad-r3-decision-closure-v1"
 OUTCOME_CONTRACT = "qtrad-r3-outcome-closure-v1"
 REPORT_CONTRACT = "qtrad-r3-independent-report-v1"
 RECEIPT_CONTRACT = "qtrad-r3-verification-receipt-v1"
+PNL_BASIS_REFERENCE_TO_EXIT = "REFERENCE_TO_EXIT_MIDPOINT"
 
 
 class EvaluationDisposition(StrEnum):
@@ -179,6 +180,7 @@ class DecisionClosure:
     holding_interval: timedelta
     gross_forecast_return: Mapping[str, Decimal]
     gross_contribution: Mapping[str, Decimal]
+    physical_notional: Mapping[str, Decimal]
     expected_costs: Mapping[str, ExpectedCostState]
     cost_models: Mapping[str, ContinuousCostModel]
     attributions: tuple[SleeveAttribution, ...]
@@ -268,16 +270,33 @@ class DecisionClosure:
         object.__setattr__(
             self, "gross_contribution", MappingProxyType(dict(self.gross_contribution))
         )
+        object.__setattr__(
+            self, "physical_notional", MappingProxyType(dict(self.physical_notional))
+        )
         object.__setattr__(self, "expected_costs", MappingProxyType(dict(self.expected_costs)))
         object.__setattr__(self, "cost_models", MappingProxyType(dict(self.cost_models)))
-        if set(self.gross_forecast_return) != set(assets) or set(self.gross_contribution) != set(
-            assets
+        if (
+            set(self.gross_forecast_return) != set(assets)
+            or set(self.gross_contribution) != set(assets)
+            or set(self.physical_notional) != set(assets)
         ):
             raise ValueError("gross fields must cover every asset")
         if set(self.expected_costs) != set(assets) or set(self.cost_models) != set(assets):
             raise ValueError("cost fields must cover every asset")
-        for value in (*self.gross_forecast_return.values(), *self.gross_contribution.values()):
+        for value in (
+            *self.gross_forecast_return.values(),
+            *self.gross_contribution.values(),
+            *self.physical_notional.values(),
+        ):
             _decimal(value, "gross value")
+        if any(value <= 0 for value in self.physical_notional.values()):
+            raise ValueError("physical notional must be finite and non-zero")
+        if any(
+            self.gross_contribution[asset]
+            != self.gross_forecast_return[asset] * self.physical_notional[asset]
+            for asset in assets
+        ):
+            raise ValueError("gross contribution must equal gross return times physical notional")
         if (
             tuple(sorted(self.attributions, key=lambda item: item.canonical_key))
             != self.attributions
@@ -304,6 +323,9 @@ class DecisionClosure:
             ),
             "gross_contribution": tuple(
                 (asset, self.gross_contribution[asset]) for asset in self.asset_order
+            ),
+            "physical_notional": tuple(
+                (asset, self.physical_notional[asset]) for asset in self.asset_order
             ),
             "expected_cost_identities": tuple(
                 (asset, identity(_cost_state_payload(self.expected_costs[asset])))
@@ -456,7 +478,7 @@ class OutcomeClosure:
             or self.entry.received_time >= self.target_time
         ):
             raise ValueError("entry quote is outside the causal decision boundary")
-        if self.exit is not None and self.exit.received_time <= self.target_time:
+        if self.exit is not None and self.exit.received_time < self.target_time:
             raise ValueError("exit quote must be strictly after target time")
         if self.entry is not None and self.exit is not None:
             if self.entry.received_time >= self.exit.received_time:
@@ -514,6 +536,7 @@ class PnlBreakdown:
     impact: Decimal
     fx_translation: Decimal
     net_pnl: Decimal
+    basis: str = PNL_BASIS_REFERENCE_TO_EXIT
 
     def __post_init__(self) -> None:
         values = (
@@ -529,9 +552,10 @@ class PnlBreakdown:
         )
         for value in values:
             _decimal(value, "P&L value")
+        if self.basis != PNL_BASIS_REFERENCE_TO_EXIT:
+            raise ValueError("unsupported P&L basis")
         expected = self.gross_midpoint_pnl - (
             self.spread
-            + self.latency_movement
             + self.adverse_slippage
             + self.commission
             + self.financing
@@ -543,13 +567,7 @@ class PnlBreakdown:
 
     @property
     def transaction_cost(self) -> Decimal:
-        return (
-            self.spread
-            + self.latency_movement
-            + self.adverse_slippage
-            + self.commission
-            + self.impact
-        )
+        return self.spread + self.adverse_slippage + self.commission + self.impact
 
     @property
     def total_cost(self) -> Decimal:
@@ -559,6 +577,7 @@ class PnlBreakdown:
     def canonical_payload(self) -> dict[str, object]:
         return {
             "gross_midpoint_pnl": self.gross_midpoint_pnl,
+            "basis": self.basis,
             "spread": self.spread,
             "latency_movement": self.latency_movement,
             "adverse_slippage": self.adverse_slippage,
@@ -607,6 +626,51 @@ class AssetReconciliation:
 
 
 @dataclass(frozen=True, slots=True)
+class SleeveReconciliation:
+    """Canonical Decimal cost and realised P&L allocation for one final sleeve movement."""
+
+    sleeve_id: str
+    asset_id: str
+    physical_delta: Decimal
+    repair_delta: Decimal
+    expected_cost_components: Mapping[str, Decimal]
+    expected_cost: Decimal
+    realised: PnlBreakdown | None
+
+    def __post_init__(self) -> None:
+        if not self.sleeve_id or not self.asset_id:
+            raise ValueError("sleeve allocation identity is required")
+        _decimal(self.physical_delta, "sleeve physical delta")
+        _decimal(self.repair_delta, "sleeve repair delta")
+        _decimal(self.expected_cost, "sleeve expected cost")
+        components = MappingProxyType(dict(self.expected_cost_components))
+        expected_kinds = tuple(kind.value for kind in CostComponentKind)
+        if tuple(components) != expected_kinds:
+            raise ValueError("sleeve cost components must use canonical cost order")
+        for value in components.values():
+            _decimal(value, "sleeve expected component")
+        if sum(components.values(), Decimal("0")) != self.expected_cost:
+            raise ValueError("sleeve expected cost does not reconcile components")
+        object.__setattr__(self, "expected_cost_components", components)
+
+    @property
+    def canonical_key(self) -> tuple[str, str]:
+        return (self.asset_id, self.sleeve_id)
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "sleeve_id": self.sleeve_id,
+            "asset_id": self.asset_id,
+            "physical_delta": self.physical_delta,
+            "repair_delta": self.repair_delta,
+            "expected_cost_components": tuple(self.expected_cost_components.items()),
+            "expected_cost": self.expected_cost,
+            "realised": self.realised.canonical_payload if self.realised else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     """Immutable report closure; all values are independently recomputed."""
 
@@ -617,7 +681,9 @@ class EvaluationReport:
     outcome_identities: tuple[str, ...]
     unavailable_outcome_identities: tuple[str, ...]
     assets: tuple[AssetReconciliation, ...]
+    sleeve_allocations: tuple[SleeveReconciliation, ...]
     gross_forecast: Mapping[str, Decimal]
+    physical_notional: Mapping[str, Decimal]
     expected_cost: Mapping[str, Decimal]
     expected_net_contribution: Mapping[str, Decimal]
     blocked_outcome_identities: tuple[str, ...] = ()
@@ -636,6 +702,8 @@ class EvaluationReport:
     portfolio_risk_after: Decimal = Decimal("0")
     risk_residual: Decimal = Decimal("0")
     risk_tolerance: Decimal = Decimal("0")
+    allocation_cost_residuals: tuple[tuple[str, Decimal], ...] = ()
+    allocation_pnl_residuals: tuple[tuple[str, Decimal], ...] = ()
     report_contract: str = REPORT_CONTRACT
 
     def __post_init__(self) -> None:
@@ -692,8 +760,48 @@ class EvaluationReport:
         ):
             raise ValueError("report outcome identities do not match asset dispositions")
         object.__setattr__(self, "assets", assets)
+        sleeves = tuple(self.sleeve_allocations)
+        if tuple(sorted(sleeves, key=lambda item: item.canonical_key)) != sleeves:
+            raise ValueError("sleeve allocations must use canonical order")
+        expected_sleeves = tuple((item.asset_id, item.sleeve_id) for item in sleeves)
+        if any(item.asset_id not in asset_ids for item in sleeves) or len(
+            set(expected_sleeves)
+        ) != len(sleeves):
+            raise ValueError("sleeve allocations must bind known unique sleeves")
+        object.__setattr__(self, "sleeve_allocations", sleeves)
+        cost_residuals = tuple(
+            (
+                asset,
+                self.expected_cost[asset]
+                - sum(
+                    (item.expected_cost for item in sleeves if item.asset_id == asset),
+                    Decimal("0"),
+                ),
+            )
+            for asset in asset_ids
+        )
+        pnl_residuals_list: list[tuple[str, Decimal]] = []
+        for asset in asset_ids:
+            realised = next(item.realised for item in assets if item.asset_id == asset)
+            residual = Decimal("0")
+            if realised is not None:
+                residual = realised.net_pnl - sum(
+                    (
+                        item.realised.net_pnl
+                        for item in sleeves
+                        if item.asset_id == asset and item.realised is not None
+                    ),
+                    Decimal("0"),
+                )
+            pnl_residuals_list.append((asset, residual))
+        pnl_residuals = tuple(pnl_residuals_list)
+        if any(value != 0 for _, value in cost_residuals + pnl_residuals):
+            raise ValueError("sleeve allocation residuals must reconcile exactly")
+        object.__setattr__(self, "allocation_cost_residuals", cost_residuals)
+        object.__setattr__(self, "allocation_pnl_residuals", pnl_residuals)
         mappings = {
             "gross forecast": MappingProxyType(dict(self.gross_forecast)),
+            "physical notional": MappingProxyType(dict(self.physical_notional)),
             "expected cost": MappingProxyType(dict(self.expected_cost)),
             "expected net contribution": MappingProxyType(dict(self.expected_net_contribution)),
             "gross expected contribution": MappingProxyType(dict(self.gross_expected_contribution)),
@@ -705,6 +813,7 @@ class EvaluationReport:
             for value in mapping.values():
                 _decimal(value, f"report {name} value")
         object.__setattr__(self, "gross_forecast", mappings["gross forecast"])
+        object.__setattr__(self, "physical_notional", mappings["physical notional"])
         object.__setattr__(self, "expected_cost", mappings["expected cost"])
         object.__setattr__(self, "expected_net_contribution", mappings["expected net contribution"])
         object.__setattr__(
@@ -719,7 +828,8 @@ class EvaluationReport:
             raise ValueError("expected net contribution does not reconcile gross and cost")
         if any(
             self.expected_net_return[asset]
-            != self.gross_forecast[asset] - self.expected_cost[asset]
+            != self.gross_forecast[asset]
+            - self.expected_cost[asset] / self.physical_notional[asset]
             for asset in asset_ids
         ):
             raise ValueError("expected net return does not reconcile gross forecast and cost")
@@ -799,7 +909,9 @@ class EvaluationReport:
             "unavailable_outcome_identities": self.unavailable_outcome_identities,
             "blocked_outcome_identities": self.blocked_outcome_identities,
             "assets": tuple(item.canonical_payload for item in self.assets),
+            "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
             "gross_forecast": tuple(self.gross_forecast.items()),
+            "physical_notional": tuple(self.physical_notional.items()),
             "gross_expected_contribution": tuple(self.gross_expected_contribution.items()),
             "expected_cost": tuple(self.expected_cost.items()),
             "expected_cost_components": tuple(
@@ -820,6 +932,8 @@ class EvaluationReport:
             "portfolio_risk_after": self.portfolio_risk_after,
             "risk_residual": self.risk_residual,
             "risk_tolerance": self.risk_tolerance,
+            "allocation_cost_residuals": self.allocation_cost_residuals,
+            "allocation_pnl_residuals": self.allocation_pnl_residuals,
         }
 
     @property
@@ -1092,6 +1206,7 @@ def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
     risk_state = risk
     before = tuple(float(value) for value in decision.current_position)
     after = tuple(float(value) for value in decision.target_position)
+    risk_state.validate_position(before)
     risk_state.validate_position(after)
 
     def decimal(value: float) -> Decimal:
@@ -1153,6 +1268,62 @@ def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
         max(Decimal("0"), portfolio_after - tolerance),
         tolerance,
     )
+
+
+def _allocate_sleeve_reconciliations(
+    decision: DecisionClosure,
+    assets: Sequence[AssetReconciliation],
+    computed_components: Mapping[str, Mapping[CostComponentKind, Decimal]],
+) -> tuple[SleeveReconciliation, ...]:
+    """Allocate canonical physical costs and P&L to final R3.D sleeve movements."""
+    result: list[SleeveReconciliation] = []
+    for attribution in decision.attributions:
+        index = decision.asset_order.index(attribution.asset_id)
+        asset = decision.asset_order[index]
+        siblings = tuple(item for item in decision.attributions if item.asset_id == asset)
+        denominator = sum((abs(item.external_delta_share) for item in siblings), Decimal("0"))
+        weight = (
+            abs(attribution.external_delta_share) / denominator if denominator else Decimal("0")
+        )
+        components = {
+            kind.value: computed_components[asset][kind] * weight for kind in CostComponentKind
+        }
+        realised = assets[index].realised
+        allocated = None
+        if realised is not None:
+            delta = decision.physical_delta[index]
+            gross = (
+                realised.gross_midpoint_pnl * attribution.external_delta_share / delta
+                if delta
+                else Decimal("0")
+            )
+            latency = (
+                realised.latency_movement * attribution.external_delta_share / delta
+                if delta
+                else Decimal("0")
+            )
+            spread = realised.spread * weight
+            slippage = realised.adverse_slippage * weight
+            commission = realised.commission * weight
+            financing = realised.financing * weight
+            impact = realised.impact * weight
+            fx = realised.fx_translation * weight
+            net = gross - spread - slippage - commission - financing - impact - fx
+            allocated = PnlBreakdown(
+                gross, spread, latency, slippage, commission, financing, impact, fx, net
+            )
+        result.append(
+            SleeveReconciliation(
+                attribution.sleeve_id,
+                asset,
+                attribution.external_delta_share,
+                attribution.repair_delta,
+                components,
+                sum(components.values(), Decimal("0")),
+                allocated,
+            )
+        )
+    return tuple(sorted(result, key=lambda item: item.canonical_key))
 
 
 def evaluate_independently(
@@ -1294,13 +1465,18 @@ def evaluate_independently(
         ):
             raise ValueError("complete quote lost bid/ask during evaluation")
         quantity = abs(decision.physical_delta[index])
-        gross_mid = (exit_quote.midpoint - entry.midpoint) * quantity * Decimal(direction)
         reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
         latency_movement = (
             (entry.midpoint - reference.midpoint) * quantity * Decimal(direction)
             if reference is not None and reference.midpoint is not None
             else Decimal("0")
         )
+        basis_midpoint = (
+            reference.midpoint
+            if reference is not None and reference.midpoint is not None
+            else entry.midpoint
+        )
+        gross_mid = (exit_quote.midpoint - basis_midpoint) * quantity * Decimal(direction)
         spread = abs(entry.ask - entry.bid) * quantity / Decimal("2") + abs(
             exit_quote.ask - exit_quote.bid
         ) * quantity / Decimal("2")
@@ -1311,9 +1487,7 @@ def evaluate_independently(
         impact = by_component[CostComponentKind.IMPACT]
         fx_cost = fx.get(asset, Decimal("0"))
         _decimal(fx_cost, f"FX translation for {asset}")
-        net = (
-            gross_mid - spread - latency_movement - slip - commission - financing - impact - fx_cost
-        )
+        net = gross_mid - spread - slip - commission - financing - impact - fx_cost
         pnl = PnlBreakdown(
             gross_mid, spread, latency_movement, slip, commission, financing, impact, fx_cost, net
         )
@@ -1338,6 +1512,7 @@ def evaluate_independently(
                 outcome_identity=outcome.semantic_identity,
             )
         )
+    sleeve_allocations = _allocate_sleeve_reconciliations(decision, assets, computed_components)
     risk = _risk_projection(decision)
     return EvaluationReport(
         source_class=decision.source_class,
@@ -1348,11 +1523,14 @@ def evaluate_independently(
         unavailable_outcome_identities=tuple(unavailable_outcome_ids),
         blocked_outcome_identities=tuple(blocked_outcome_ids),
         assets=tuple(assets),
+        sleeve_allocations=sleeve_allocations,
         gross_forecast=decision.gross_forecast_return,
+        physical_notional=decision.physical_notional,
         expected_cost=expected,
         gross_expected_contribution=decision.gross_contribution,
         expected_net_return={
-            asset: decision.gross_forecast_return[asset] - expected[asset]
+            asset: decision.gross_forecast_return[asset]
+            - expected[asset] / decision.physical_notional[asset]
             for asset in decision.asset_order
         },
         expected_cost_components={
