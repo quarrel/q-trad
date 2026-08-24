@@ -24,7 +24,10 @@ context, and target read to `DEV_1` through `DEV_3`. Request `TRAINING_ONLY` exp
 chronological fitting. Evaluate every completed candidate directly against `ZERO_RETURN` with
 `evaluate_against_zero`, then register that exact provenance-bearing result with `append_attempt`.
 An explicit `{"status": "FAILED", ...}` result remains registerable but is never finalist-eligible.
-Freeze a small finalist set with `freeze_finalists`, and supply the exact freeze SHA-256 and
-configuration ID for the single `TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt
-failed or evaluated the terminal block, that configuration is permanently ineligible for a later
+Only results evaluated exclusively on canonical `DEV_1` through `DEV_3` blocks are finalist-eligible;
+`TRAINING_ONLY` results may be registered for diagnostics but cannot authorise or coexist with a later
+freeze for the same configuration. Unknown block labels are rejected. Freeze a small finalist set
+with `freeze_finalists`, and supply the exact freeze SHA-256 and configuration ID for the single
+`TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt failed, evaluated training-only
+rows, or evaluated the terminal block, that configuration is permanently ineligible for a later
 freeze in the same workstream and manifest.

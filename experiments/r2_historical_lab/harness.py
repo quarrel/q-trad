@@ -17,6 +17,8 @@ from experiments.r2_historical_lab.features import positive_contribution_share
 MANIFEST_CONTRACT = "qtrad-r2-historical-lab-manifest-v2"
 EVALUATION_CONTRACT = "qtrad-r2-historical-lab-evaluation-v1"
 TERMINAL_BLOCK = "TERMINAL_FORMER_HOLDOUT"
+DEVELOPMENT_BLOCKS = frozenset({"DEV_1", "DEV_2", "DEV_3"})
+EVALUATION_BLOCKS = DEVELOPMENT_BLOCKS | {"TRAINING_ONLY", TERMINAL_BLOCK}
 
 
 def _sha256(path: Path) -> str:
@@ -312,19 +314,23 @@ def append_attempt(
     manifest_sha256: str,
 ) -> str:
     identifier = configuration_id(configuration)
+    evaluated_blocks: list[str] | None = None
     if result.get("contract") == EVALUATION_CONTRACT:
         if result["evidence_label"] != LABEL or result["source_class"] != SOURCE_CLASS:
             raise ValueError("evaluation result crosses the exploratory source boundary")
-        evaluated_blocks = result["evaluated_blocks"]
+        result_blocks = result["evaluated_blocks"]
         terminal_block_accessed = result["terminal_block_accessed"]
         if (
-            not isinstance(evaluated_blocks, list)
-            or not evaluated_blocks
-            or not all(isinstance(block, str) for block in evaluated_blocks)
+            not isinstance(result_blocks, list)
+            or not result_blocks
+            or not all(isinstance(block, str) for block in result_blocks)
+            or result_blocks != sorted(set(result_blocks))
+            or not set(result_blocks).issubset(EVALUATION_BLOCKS)
             or not isinstance(terminal_block_accessed, bool)
-            or terminal_block_accessed != (TERMINAL_BLOCK in evaluated_blocks)
+            or terminal_block_accessed != (TERMINAL_BLOCK in result_blocks)
         ):
-            raise ValueError("evaluation result has inconsistent block provenance")
+            raise ValueError("evaluation result has inconsistent or non-canonical block provenance")
+        evaluated_blocks = cast(list[str], result_blocks)
         attempt_status = "SUCCEEDED"
     elif result.get("status") == "FAILED":
         attempt_status = "FAILED"
@@ -339,6 +345,7 @@ def append_attempt(
         "result": result,
         "manifest_sha256": manifest_sha256,
         "attempt_status": attempt_status,
+        "evaluated_blocks": evaluated_blocks,
         "terminal_block_accessed": terminal_block_accessed,
         "evidence_label": LABEL,
     }
@@ -371,18 +378,22 @@ def freeze_finalists(
     successful_development = {
         entry["configuration_id"]
         for entry in matching_entries
-        if entry["attempt_status"] == "SUCCEEDED" and entry["terminal_block_accessed"] is False
+        if entry["attempt_status"] == "SUCCEEDED"
+        and entry["evaluated_blocks"]
+        and set(entry["evaluated_blocks"]).issubset(DEVELOPMENT_BLOCKS)
     }
     disqualified = {
         entry["configuration_id"]
         for entry in matching_entries
-        if entry["attempt_status"] != "SUCCEEDED" or entry["terminal_block_accessed"] is not False
+        if entry["attempt_status"] != "SUCCEEDED"
+        or not entry["evaluated_blocks"]
+        or not set(entry["evaluated_blocks"]).issubset(DEVELOPMENT_BLOCKS)
     }
     eligible = successful_development - disqualified
     finalists = tuple(finalist_configuration_ids)
     if not finalists or not set(finalists).issubset(eligible):
         raise ValueError(
-            "every finalist must have only successful development-only registered attempts"
+            "every finalist must have only successful canonical DEV-block registered attempts"
         )
     value = {
         "contract": "qtrad-r2-historical-lab-finalist-freeze-v1",
