@@ -157,6 +157,11 @@ chronology ambiguity before those contracts are fixed.
   physical paper target with stable reason codes.
 - Select solver and numerical dependencies at milestone entry. Preserve `Decimal` at price,
   quantity, conversion and money boundaries.
+- Run a mandatory lightweight historical-exploratory lane over authenticated R2 evidence: break-even
+  cost/turnover sensitivity, a small pre-declared statistical/nonlinear comparison and one tiny
+  graph/GNN feasibility configuration with controls. It is not decision-grade and does not replace R4.
+- Freeze the precise future native decision-grade experiment protocol before R3 completes, without
+  provider acquisition, qualification execution, holdout opening or outcome access.
 
 ## R4 — residual structural graph experiment
 

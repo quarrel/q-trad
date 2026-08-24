@@ -17,8 +17,14 @@ boundaries prevail.
 
 R3 asks whether retained forecasts can be converted into deterministic offline paper positions under
 explicit physical costs, ordered joint risk and global constraints, with independently reconciling
-position, cost and P&L arithmetic. It establishes contracts and implementation evidence for that
-question. It may also produce clearly labelled historical exploratory sensitivity evidence.
+position, cost and P&L arithmetic. It has three mandatory completion lanes:
+
+- R3.A–R3.G implement and prove the portfolio mechanics;
+- R3.H performs deliberately lightweight historical exploration over authenticated R2 evidence; and
+- R3.I freezes the precise future native experiment protocol without executing or revealing it.
+
+R3.H does not block the R3.A–R3.G implementation sequence, but both R3.H and R3.I are required before
+the R3 milestone can be marked complete.
 
 R3 does not establish forecast effectiveness, executable alpha, post-cost profitability, portfolio
 effectiveness, native-source validity, continuous paper readiness or production readiness. Those
@@ -47,8 +53,8 @@ purposes are not interchangeable.
 
 Historical MIDPOINT bars cannot instantiate observed native spread, latency movement, fill or slippage.
 Historical exploratory reports must show unsupported components and assumption sensitivities rather
-than manufacture executable observations. Future native execution is input-gated and is not required
-to call R3 implementation complete.
+than manufacture executable observations. A future native decision-grade execution is not required to
+complete R3, but the reviewed and frozen R3.I protocol governing that future execution is required.
 
 ## 3. Architectural decision: sleeves first, one physical cost boundary
 
@@ -172,17 +178,24 @@ versioned and independently checked.
 
 ### 5.1 Decision identity and chronology
 
-Every R3 decision binds:
+The authoritative R3 decision-input bundle owns and authenticates the upstream bindings. Its semantic
+identity binds:
 
 - source class and evidence purpose;
-- dataset/foundation and immediate-parent verification or promotion authority;
-- forecast artefact, experiment, model, fold and configuration identities;
-- asset order and horizon order;
+- dataset/foundation semantic identity and immediate-parent verification or promotion authority;
+- forecast artefact, experiment, model, fold and configuration semantic identities;
 - feature, training, risk and cost cut-offs;
-- decision time and target review/expiry times;
-- economics, FX, cost, risk, constraint and solver-policy versions;
-- current physical and virtual-position state identity; and
-- reporting currency, which remains AUD under retained ADR 0007.
+- economics, FX, cost and ordered-risk state identities and versions; and
+- current physical and virtual-position state identity.
+
+A target or decision closure binds only the decision-input bundle’s semantic, closure and verification
+identity plus semantics introduced or consumed locally: asset/horizon order, decision and review/expiry
+times, constraint and solver-policy versions, reporting currency and the resulting target/delta state.
+AUD remains the reporting currency under retained ADR 0007.
+
+Ancestor identifiers may be repeated in a target or report only as explicitly non-authoritative
+provenance. They are excluded from downstream semantic identity, verifier authority, authentication and
+invalidation decisions; descendants must not authenticate them directly.
 
 No holdout outcome may influence cost calibration, risk estimation, solver selection, constraints,
 rounding or repair for a future decision-grade run.
@@ -439,10 +452,10 @@ Do not build a generic evidence framework.
 
 The durable handoff is stage-specific:
 
-1. R3 decision-input bundle authenticates the exact retained forecast authority, source/evidence
-   class, current position state, economics/cost receipt and risk receipt.
-2. Target construction authenticates that immediate-parent bundle, consumes only required children,
-   transforms once and publishes an immutable target closure.
+1. The R3 decision-input bundle is the sole boundary that authenticates the exact retained forecast
+   authority, source/evidence class, current position state, economics/cost receipt and risk receipt.
+2. Target construction authenticates the immediate-parent bundle’s semantic, closure and verification
+   identity, consumes only required children, transforms once and publishes an immutable target closure.
 3. Independent target verification replays the R3 transformation once and creates a create-only
    target-verification receipt.
 4. Paper evaluation authenticates the target receipt plus exact subsequent outcome evidence, consumes
@@ -453,9 +466,11 @@ The durable handoff is stage-specific:
    explicit operator authority without replaying ancestry.
 
 Each child binds its immediate parent’s semantic, closure and verification or promotion identities.
-Ordinary descendants authenticate the receipt and hash/decode only children they consume. They do not
-replay R2, cost, risk or target ancestry. Deep audit is exceptional after a relevant defect, verifier
-revocation or explicit operator request.
+A target or report must not make decision-input ancestors authoritative by copying their identities.
+Any denormalised ancestor fields are provenance-only and cannot widen semantic invalidation or verifier
+requirements. Ordinary descendants authenticate the receipt and hash/decode only children they consume.
+They do not replay R2, cost, risk or target ancestry. Deep audit is exceptional after a relevant defect,
+verifier revocation or explicit operator request.
 
 The terminal historical R2 report and approval remain immutable predecessor evidence. R3 creates new
 artefacts; it never edits R2 evidence in place. A historical exploratory R3 report binds that exact
@@ -564,27 +579,87 @@ Scope:
 - make MIDPOINT-only historical limitations machine-visible in reports;
 - implement native bid/ask pairing, latency/slippage stress and unavailable-outcome semantics without
   performing a provider acquisition or holdout reveal; and
-- define the separate authority/input gate for any later native decision-grade execution.
+- provide the source-aligned evaluator and readiness inputs consumed by the separately frozen R3.I
+  native protocol.
 
 Exit gate: a source cannot borrow another source’s spreads, fills, FX, product economics or conclusion;
 MIDPOINT-only input cannot emit an executable result; the exact CLI path passes with source-aligned
-fixtures; any real native run remains blocked until its separately reviewed inputs and authority exist.
+fixtures; any real native run remains blocked until the R3.I protocol has been instantiated and its
+separate input, review and authority gates pass.
+
+### R3.H — mandatory bounded historical exploratory lane
+
+R3.H is mandatory for milestone completion but deliberately lighter than a confirmatory experiment.
+It must not create a new locked holdout, `OPENED`/`CONSUMED` lifecycle, promotion, deep ancestry replay
+or claim-scoped effectiveness verifier.
+
+Scope:
+
+- authenticate the retained R2-IBKR-HISTORICAL forecasts/outcomes and terminal conclusion once, without
+  provider access, reacquisition or evidence mutation;
+- freeze before computation one small analysis configuration containing the assumed cost grid, turnover
+  definition, candidate statistical formulations, bounded nonlinear candidates, one tiny graph/GNN
+  configuration and controls, metrics and hard compute/work-count limit;
+- report break-even all-in cost per unit of physical turnover and cost/turnover sensitivity by available
+  asset, horizon and period, explicitly labelling every unsupported MIDPOINT-derived assumption;
+- give the pre-declared statistical formulations and nonlinear candidates only a quick chronological OOF
+  diagnostic comparison, with no post-result grid expansion, selection or promotion;
+- run exactly one tiny learned graph/GNN configuration with local/pooled non-graph and fixed/shuffled-graph
+  controls as feasibility evidence only; do not implement the full R4 residual graph programme or use
+  this result to cancel, retain or promote an R4 model; and
+- publish `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md`, including negative, failed and
+  inconclusive results, exact input/receipt identities, configuration, code identity and work count.
+
+Exit gate: the report contains all three research components—economic break-even/turnover sensitivity,
+the bounded statistical/nonlinear comparison and the tiny graph/GNN feasibility check—and remains
+machine-readably labelled historical exploratory evidence. The analysis is reproducible from the named
+retained parents and frozen configuration, but no R2-style confirmatory or irreversible protocol is
+introduced.
+
+### R3.I — frozen future native experiment protocol
+
+Scope:
+
+- add `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md` as the reviewed authority for the later native run;
+- freeze the exact scientific questions, directionality, comparator set, outcomes, metrics and decision
+  rules;
+- freeze one native source/environment and the exact product set, or an outcome-blind deterministic
+  product-resolution rule when future qualifying identities are genuinely unknowable;
+- freeze data qualification, minimum duration/support/coverage, causal availability, exclusion and
+  readiness rules;
+- freeze chronological training/validation/holdout construction, dependency-derived purge/embargo and
+  the deterministic rule for resolving future calendar boundaries;
+- freeze pre-holdout economics, spread/latency/slippage/commission/financing/impact, FX, risk, constraint,
+  solver and eligibility policy;
+- freeze the parameter-instantiation record, independent readiness review, marker-first holdout opening,
+  outcome access, evaluation, `CONSUMED` terminal state, invalidation and operator-authority sequence; and
+- prohibit provider acquisition, qualification execution, protocol instantiation, holdout opening,
+  outcome access or a native scientific run in R3.I itself.
+
+Exit gate: the exact-head protocol has independent review and contains no unresolved scientific choice.
+Only future calendar values, qualifying product identities/counts and exact retained input/receipt
+identities may remain parameters. Each has a deterministic outcome-blind resolution rule and stop
+condition. A later operator may instantiate those values from qualified pre-holdout metadata; they may
+not choose new questions, comparators, split policy, economics or reveal rules at execution time.
 
 ### DAG
 
-    R3-P0
-      ├── R3.A ──┐
-      └── R3.B ──┴── R3.C ── R3.D ── R3.E ── R3.F ── R3.G
+    R3-P0 ──┬── R3.A ──┬── R3.H ───────────────────────────────────────────┐
+             │          └── joins R3.B at R3.C                              │
+             └── R3.B ─────── R3.C ── R3.D ── R3.E ── R3.F ── R3.G ── R3.I ─┴── R3 COMPLETE
 
-R3.F is blocked until the complete one-horizon vertical slice in R3.E passes. R3.G may prepare
-source-aligned contracts, but no real native decision-grade execution is authorised by this DAG.
+R3.A and R3.B remain the first parallel implementation wave. R3.H may start once R3.A freezes the cost
+language and proceeds in parallel with R3.C–R3.G. R3.F is blocked until the complete one-horizon slice
+in R3.E passes. R3.I may be drafted earlier but cannot pass review until R3.A, R3.B and R3.G freeze the
+policies and source-aligned evaluator it cites. No real native decision-grade execution is authorised
+by this DAG.
 
 ## 9. Validation and review gates
 
 For this R3-P0 documentation job only:
 
 - git diff --check;
-- consistency review against PLAN.md, docs/STATUS.md, docs/TRADING_RESEARCH.md and
+- consistency review against AGENTS.md, PLAN.md, docs/STATUS.md, docs/TRADING_RESEARCH.md and
   docs/ARCHITECTURE.md; and
 - no complete test gate.
 
@@ -599,6 +674,11 @@ For implementation PRs:
   and
 - GitHub static workflow reported as static evidence only, never as a test pass.
 
+For R3.H, review the exact pre-run configuration and bounded work count before execution, retain the
+exact command/result and report all attempted candidates; do not import the R2 holdout protocol. For
+R3.I, validate active-authority consistency and the absence of unresolved scientific choices without
+provider access or holdout state changes.
+
 No validation authorises provider access, promotion, a native holdout, external orders or any other
 special-state action.
 
@@ -606,8 +686,8 @@ special-state action.
 
 R3 may be marked complete only when all of the following are true:
 
-1. R3.A through R3.G implementation contracts are merged and the exact heads passed their required
-   review/validation.
+1. R3.A through R3.G implementation contracts, the mandatory R3.H historical report and the R3.I
+   native protocol are merged and their exact heads passed the required review/validation.
 2. ADR 0030 is accepted and code conforms to the two-stage, one-physical-cost boundary.
 3. The complete 15-minute production-CLI vertical slice passed before multi-horizon code was
    generalised.
@@ -627,36 +707,51 @@ R3 may be marked complete only when all of the following are true:
     immutable inputs, with exact Decimal reconciliation and frozen numerical tolerances.
 12. Durable target and report boundaries have create-only independent verification receipts and
     ordinary descendants authenticate immediate-parent proof without ancestry replay.
-13. The fixture implementation report, any historical exploratory report and the future native
-    decision-grade gate are visibly and machine-readably distinct.
-14. Historical MIDPOINT evidence cannot produce an executable/native conclusion and no source inherits
+13. The decision-input bundle is the sole authority for upstream forecast/foundation/economics/risk/state
+    bindings; targets and reports bind only their immediate parent plus locally consumed semantics.
+14. `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md` completes the required break-even/turnover,
+    bounded statistical/nonlinear and tiny graph/GNN work without an executable or effectiveness claim.
+15. `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md` is independently reviewed and freezes every future scientific,
+    eligibility, chronological, economics and reveal/consume rule; only deterministically resolved future
+    values remain uninstantiated.
+16. Fixture implementation, historical exploratory and future native decision-grade evidence are visibly
+    and machine-readably distinct.
+17. Historical MIDPOINT evidence cannot produce an executable/native conclusion and no source inherits
     another source’s economics or evidence.
-15. The full 5/15/30/60-minute configuration passes conflict, expiry, netting, repair and attribution
+18. The full 5/15/30/60-minute configuration passes conflict, expiry, netting, repair and attribution
     tests without changing the equivalent 15-minute-only result.
-16. No broker-order port, external submission, live-account/production endpoint or real-capital path
+19. No broker-order port, external submission, live-account/production endpoint or real-capital path
     exists.
-17. The final active documents state the actual result, including negative or blocked outcomes, and
+20. The final active documents state the actual result, including negative or blocked outcomes, and
     continue to identify pooled Ridge as a retained baseline rather than established alpha.
 
-A positive portfolio or P&L metric is not an exit criterion. A future native decision-grade result is
-not an R3 implementation exit criterion.
+A positive portfolio, P&L or exploratory model metric is not an exit criterion. A future native
+decision-grade result is not an R3 exit criterion; its reviewed and frozen R3.I protocol is.
 
 ## 11. Unresolved input dependencies and stop conditions
 
-These inputs are deliberately not guessed by R3-P0:
+These implementation inputs are deliberately not guessed by R3-P0:
 
-- exact paper-eligible source/product set for each later evidence run;
-- effective contract, quantity/tick, commission and financing schedules for those products;
+- effective contract, quantity/tick, commission and financing schedules for the eventual eligible
+  products;
 - causal FX paths and staleness limits, although AUD remains the reporting currency;
 - supported impact validity range or an explicit size cap where impact is unavailable;
-- spread, latency and adverse-slippage calibration data/policy for each source;
-- shrinkage estimator parameters, lookback, group/currency mappings and numerical cap values;
-- exact solver library/backend/version and tolerances, to be resolved by the R3.A selection gate; and
-- a qualified native evidence interval, frozen native experiment questions and untouched holdout
-  authority for any future decision-grade run.
+- spread, latency and adverse-slippage calibration inputs for each source;
+- shrinkage estimator parameters, lookback, group/currency mappings and numerical cap values; and
+- exact solver library/backend/version and tolerances, to be resolved by the R3.A selection gate.
+
+R3.H must freeze its exact cost grid, turnover definition, candidate list, metrics and compute bound
+before computation; those bounded choices cannot expand after results are seen.
+
+The future native calendar endpoints, exact qualifying product identities/counts and exact retained
+input/receipt identities may not exist when R3.I is written. They may remain parameters only. R3.I must
+freeze the outcome-blind resolution rules, thresholds and stop conditions for each, along with all
+questions, comparators, chronology, economics and reveal/consume authority. Their absence later blocks
+protocol instantiation and execution; it does not permit scientific redesign at execution time.
 
 Missing product economics, FX, required cost or risk stops new exposure for the affected asset.
 Ambiguous product identity, price basis, currency conversion or source equivalence stops the evidence
-run. Lack of native inputs does not block fixture implementation or clearly labelled historical
-exploration, but it blocks every native executable or decision-grade conclusion. No item above grants
-provider access, reacquisition, holdout access, promotion or external trading authority.
+run. Failure to complete R3.H or freeze R3.I blocks R3 milestone completion. Lack of qualified native
+inputs does not block fixture implementation, historical exploration or the protocol freeze, but it
+blocks protocol instantiation and every native executable or decision-grade conclusion. No item above
+grants provider access, reacquisition, holdout access, promotion or external trading authority.

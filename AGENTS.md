@@ -56,9 +56,12 @@ The old single-instrument strategy-ranking report is retained framework-proof ev
 intended model/portfolio architecture and its negative cost-aware result is not an effectiveness claim.
 
 R3 may implement explicit cost estimates, shrinkage risk, horizon positions, global netting,
-constrained target portfolios and internal paper accounting. Residual graph experiments and the
-integrated offline MVP remain later milestones. Continuous live shadow integration begins only after
-the offline MVP. It must not add a broker-order port, real-capital path or production trading endpoint.
+constrained target portfolios and internal paper accounting. It also runs the active R3 plan’s
+mandatory lightweight historical-exploratory lane, including one bounded tiny-configuration graph/GNN
+feasibility check. That check is non-decision-grade and does not replace the full residual structural
+graph experiment in R4. The integrated offline MVP remains a later milestone. Continuous live shadow
+integration begins only after the offline MVP. It must not add a broker-order port, real-capital path
+or production trading endpoint.
 
 When experimental learning and operational hardening compete, prefer the shortest trustworthy
 experiment unless missing hardening could make a result materially false, irreproducible, unsafe or
