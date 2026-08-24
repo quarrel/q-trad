@@ -32,7 +32,7 @@ STAGE8_AUTHENTICATION_COMMAND: Final = (
     "--foundation-promotion <stage8-promotion> --experiment <experiment> --output <new-json>"
 )
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "f0c13c149f0fcddafa55d462d5f67583b5d1e8c38d1e20dc1a07b4736a0ec60a"
+    "bf5661eb4881e63f33d8c86d109e27d39f05a535c0b50e63228c10799ff9aeee"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
@@ -193,12 +193,13 @@ class FixtureRow:
     period: str
     prediction: float
     realised_return: float
-    target_position_change: float
     available_at: str
     target_available_at: str
     dependency_start: str
     dependency_end: str
     feature_value: float
+    # Retained for input compatibility only; economic code always derives the delta.
+    target_position_change: float | None = None
 
     def __post_init__(self) -> None:
         if self.horizon_minutes <= 0:
@@ -213,15 +214,14 @@ class FixtureRow:
             raise ValueError("causal maturity and dependency interval fields are required")
         if self.dependency_start > self.dependency_end:
             raise ValueError("dependency interval start must precede its end")
-        if not all(
-            math.isfinite(value)
-            for value in (
-                self.prediction,
-                self.realised_return,
-                self.target_position_change,
-                self.feature_value,
-            )
-        ):
+        numeric_values = (
+            self.prediction,
+            self.realised_return,
+            self.feature_value,
+        )
+        if self.target_position_change is not None:
+            numeric_values += (self.target_position_change,)
+        if not all(math.isfinite(value) for value in numeric_values):
             raise ValueError("fixture numeric values must be finite")
 
 
@@ -253,8 +253,9 @@ class FreezeConfig:
         _validate_cost_grid(raw["cost_grid"])
         _validate_limits(raw["compute_limits"])
         if raw["turnover_definition"] != (
-            "physical_turnover=sum(abs(target_position-change)); "
-            "one unit is one notional unit traded"
+            "physical_turnover=sum(abs(target_position_change)); "
+            "target_position=prediction; change=target_position-prior_target_position; "
+            "initial prior=0; one unit is one notional unit traded"
         ):
             raise FreezeError("turnover definition is not the frozen physical definition")
         if raw["output_contract"] != {
@@ -684,47 +685,113 @@ def _chronological_oof(rows: Sequence[FixtureRow]) -> tuple[dict[str, Any], int,
     )
 
 
-def _economic_views(rows: Sequence[FixtureRow], config: FreezeConfig) -> dict[str, Any]:
-    turnover = sum(abs(row.target_position_change) for row in rows)
-    gross = sum(row.prediction * row.realised_return for row in rows) / len(rows)
-    periods: dict[str, list[FixtureRow]] = defaultdict(list)
-    assets: dict[str, list[FixtureRow]] = defaultdict(list)
-    horizons: dict[str, list[FixtureRow]] = defaultdict(list)
-    for row in rows:
-        periods[row.period].append(row)
-        assets[row.asset].append(row)
-        horizons[str(row.horizon_minutes)].append(row)
+def _position_trace(rows: Sequence[FixtureRow], predictions: Sequence[float]) -> dict[str, Any]:
+    if len(rows) != len(predictions):
+        raise FreezeError("economic prediction trace length mismatch")
+    order = sorted(
+        range(len(rows)),
+        key=lambda index: (
+            rows[index].decision_time,
+            rows[index].period,
+            rows[index].target_id,
+            rows[index].asset,
+            rows[index].horizon_minutes,
+        ),
+    )
+    prior: dict[tuple[str, str, int], float] = {}
+    positions = [0.0] * len(rows)
+    changes = [0.0] * len(rows)
+    gross_values = [0.0] * len(rows)
+    for index in order:
+        row = rows[index]
+        position = float(predictions[index])
+        if not math.isfinite(position):
+            raise FreezeError("economic prediction must be finite")
+        key = (row.target_id, row.asset, row.horizon_minutes)
+        previous = prior.get(key, 0.0)
+        positions[index] = position
+        changes[index] = position - previous
+        gross_values[index] = position * row.realised_return
+        prior[key] = position
+    return {
+        "positions": positions,
+        "changes": changes,
+        "gross_values": gross_values,
+    }
 
-    def view(groups: Mapping[str, Sequence[FixtureRow]]) -> dict[str, Any]:
-        values: dict[str, Any] = {}
-        for name, group in sorted(groups.items()):
-            group_turnover = sum(abs(item.target_position_change) for item in group)
-            group_gross = sum(item.prediction * item.realised_return for item in group) / len(group)
-            values[name] = {
-                "gross_mean": round(group_gross, 12),
-                "turnover": round(group_turnover, 12),
-                "break_even_cost": round(group_gross * len(group) / group_turnover, 12)
-                if group_turnover
-                else None,
-            }
-        return values
 
+def _economic_views(
+    rows: Sequence[FixtureRow],
+    config: FreezeConfig,
+    predictions: Sequence[float],
+    *,
+    trace_id: str,
+) -> dict[str, Any]:
+    trace = _position_trace(rows, predictions)
+    positions = cast(list[float], trace["positions"])
+    changes = cast(list[float], trace["changes"])
+    gross_values = cast(list[float], trace["gross_values"])
+    indices_by_group: dict[str, dict[str, list[int]]] = {
+        "period": defaultdict(list),
+        "asset": defaultdict(list),
+        "horizon": defaultdict(list),
+    }
+    for index, row in enumerate(rows):
+        indices_by_group["period"][row.period].append(index)
+        indices_by_group["asset"][row.asset].append(index)
+        indices_by_group["horizon"][str(row.horizon_minutes)].append(index)
+
+    def view(indices: Sequence[int]) -> dict[str, Any]:
+        gross_total = sum(gross_values[index] for index in indices)
+        turnover = sum(abs(changes[index]) for index in indices)
+        count = len(indices)
+        gross_mean = gross_total / count if count else 0.0
+        return {
+            "gross_total": round(gross_total, 12),
+            "gross_mean": round(gross_mean, 12),
+            "turnover": round(turnover, 12),
+            "break_even_cost": round(gross_total / turnover, 12) if turnover else None,
+            "position_trace": [
+                {
+                    "target_id": rows[index].target_id,
+                    "decision_time": rows[index].decision_time,
+                    "target_position": round(positions[index], 12),
+                    "target_position_change": round(changes[index], 12),
+                    "realised_gross": round(gross_values[index], 12),
+                }
+                for index in indices
+            ],
+        }
+
+    all_indices = tuple(range(len(rows)))
     sensitivities = [
         {
             "cost": float(point["value"]),
             "unit": point["unit"],
-            "net_mean": round(gross - float(point["value"]) * turnover / len(rows), 12),
-            "break_even_cost": round(gross * len(rows) / turnover, 12) if turnover else None,
+            "net_mean": round(
+                view(all_indices)["gross_mean"]
+                - float(point["value"]) * view(all_indices)["turnover"] / len(rows),
+                12,
+            ),
+            "break_even_cost": view(all_indices)["break_even_cost"],
             "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
         }
         for point in config.document["cost_grid"]
     ]
     return {
+        "trace_id": trace_id,
         "physical_turnover_definition": config.document["turnover_definition"],
         "all_in_cost_sensitivity": sensitivities,
-        "asset": view(assets),
-        "horizon": view(horizons),
-        "period": view(periods),
+        "asset": {
+            name: view(indices) for name, indices in sorted(indices_by_group["asset"].items())
+        },
+        "horizon": {
+            name: view(indices) for name, indices in sorted(indices_by_group["horizon"].items())
+        },
+        "period": {
+            name: view(indices) for name, indices in sorted(indices_by_group["period"].items())
+        },
+        **view(all_indices),
     }
 
 
@@ -980,7 +1047,6 @@ def analyse_fixture(
 
     oof, row_count, ordered = _chronological_oof(rows)
     training_indices, _ = _first_training_fold(ordered)
-    economic = _economic_views(ordered, config)
     candidate_ids = list(_CANDIDATE_IDS)
     if len(candidate_ids) > limits["max_candidates"]:
         raise FreezeError("fixture analysis exceeded frozen candidate limits")
@@ -1103,6 +1169,21 @@ def analyse_fixture(
         ],
         "r4_replacement_required": True,
     }
+    economic_predictions = {
+        **candidate_predictions,
+        **control_predictions,
+        **graph_predictions,
+    }
+    economic = _economic_views(
+        ordered,
+        config,
+        local_predictions,
+        trace_id="linear_ridge",
+    )
+    economic["configurations"] = {
+        trace_id: _economic_views(ordered, config, trace, trace_id=trace_id)
+        for trace_id, trace in economic_predictions.items()
+    }
     measured = measurement or _runtime_measurement(started)
     _check_hard_limits(limits, measured)
     statuses = {
@@ -1204,7 +1285,6 @@ def synthetic_fixture() -> tuple[FixtureRow, ...]:
                     period=f"period-{cycle}",
                     prediction=feature_value * (0.8 + 0.05 * cycle),
                     realised_return=feature_value * (0.5 + 0.1 * cycle),
-                    target_position_change=(-1 if cycle % 2 else 1) * 0.01 * (target_index + 1),
                     available_at=(
                         f"2025-12-31T{available_minute}:00Z"
                         if cycle == 0

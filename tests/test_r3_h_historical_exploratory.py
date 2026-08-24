@@ -83,8 +83,8 @@ def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> Non
     assert {"economic", "statistical", "graph"} <= report.keys()
     assert len(report["economic"]["all_in_cost_sensitivity"]) == 4
     assert {"asset", "horizon", "period"} <= report["economic"].keys()
-    assert report["economic"]["asset"]["fx:aud-usd"]["turnover"] == 0.03
-    assert report["economic"]["asset"]["fx:eur-usd"]["turnover"] == 0.06
+    assert report["economic"]["asset"]["fx:aud-usd"]["turnover"] == 0.0126
+    assert report["economic"]["asset"]["fx:eur-usd"]["turnover"] == 0.0216
     assert report["economic"]["all_in_cost_sensitivity"][0]["break_even_cost"] is not None
     assert report["statistical"]["oof"]["causal"] is True
     assert report["statistical"]["oof"]["support"] == 18
@@ -263,3 +263,57 @@ def test_micro_fixture_shape_is_exact_and_fit_counts_are_executions() -> None:
         "pooled_local_ridge": 1,
         "tiny_learned_graph": 1,
     }
+
+
+def test_economic_positions_derive_signed_deltas_and_costs() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    rows = list(synthetic_fixture())
+    base = analyse_fixture(tuple(rows), config).report
+    assert "target_position_change" not in config.document["retained_loader"]["required_columns"]
+    linear = base["economic"]["configurations"]["linear_ridge"]
+    aud_trace = [item for item in linear["position_trace"] if item["target_id"] == "fx:aud-usd"]
+    assert aud_trace[0]["target_position"] == rows[0].prediction
+    assert aud_trace[0]["target_position_change"] == rows[0].prediction
+    assert aud_trace[1]["target_position_change"] == pytest.approx(
+        rows[6].prediction - rows[0].prediction
+    )
+    assert aud_trace[0]["realised_gross"] == pytest.approx(
+        rows[0].prediction * rows[0].realised_return
+    )
+
+    ignored_delta = list(rows)
+    ignored_delta[0] = replace(rows[0], target_position_change=999.0)
+    ignored = analyse_fixture(tuple(ignored_delta), config).report
+    assert ignored["economic"]["configurations"]["linear_ridge"] == linear
+
+    signed = list(rows)
+    aud_rows = [index for index, row in enumerate(signed) if row.target_id == "fx:aud-usd"]
+    for index, prediction in zip(aud_rows, (-0.2, 0.0, 0.2), strict=True):
+        signed[index] = replace(signed[index], prediction=prediction)
+    signed_report = analyse_fixture(tuple(signed), config).report
+    signed_linear = signed_report["economic"]["configurations"]["linear_ridge"]
+    signed_trace = [
+        item for item in signed_linear["position_trace"] if item["target_id"] == "fx:aud-usd"
+    ]
+    assert [item["target_position_change"] for item in signed_trace] == [
+        pytest.approx(-0.2),
+        pytest.approx(0.2),
+        pytest.approx(0.2),
+    ]
+    signed_asset = signed_linear["asset"]["fx:aud-usd"]
+    assert signed_asset["turnover"] == pytest.approx(0.6)
+    signed_gross = sum(item["realised_gross"] for item in signed_trace)
+    assert signed_asset["gross_total"] == pytest.approx(signed_gross)
+    assert signed_asset["break_even_cost"] == pytest.approx(signed_gross / 0.6)
+    first_cost = signed_linear["all_in_cost_sensitivity"][0]
+    assert first_cost["net_mean"] == pytest.approx(
+        signed_linear["gross_mean"] - first_cost["cost"] * signed_linear["turnover"] / len(signed)
+    )
+
+    flat = list(rows)
+    for index in aud_rows:
+        flat[index] = replace(flat[index], prediction=0.0)
+    flat_report = analyse_fixture(tuple(flat), config).report
+    flat_asset = flat_report["economic"]["configurations"]["linear_ridge"]["asset"]["fx:aud-usd"]
+    assert flat_asset["turnover"] == 0.0
+    assert flat_asset["break_even_cost"] is None

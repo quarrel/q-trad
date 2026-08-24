@@ -93,7 +93,6 @@
       "period",
       "prediction",
       "realised_return",
-      "target_position_change",
       "available_at",
       "target_available_at",
       "dependency_start",
@@ -140,7 +139,7 @@
     {"name": "ten_bp", "value": 0.001, "unit": "fraction_of_notional"},
     {"name": "twenty_bp", "value": 0.002, "unit": "fraction_of_notional"}
   ],
-  "turnover_definition": "physical_turnover=sum(abs(target_position-change)); one unit is one notional unit traded",
+  "turnover_definition": "physical_turnover=sum(abs(target_position_change)); target_position=prediction; change=target_position-prior_target_position; initial prior=0; one unit is one notional unit traded",
   "statistical_formulations": {
     "oof": "chronological folds with dependency-derived purge and embargo; no outcome-blind selection after scoring",
     "controls": ["zero_return", "local_ridge", "pooled_local_ridge"],
@@ -171,5 +170,5 @@
     "create_only": true,
     "post_result_expansion": false
   },
-  "semantic_identity": "f0c13c149f0fcddafa55d462d5f67583b5d1e8c38d1e20dc1a07b4736a0ec60a"
+  "semantic_identity": "bf5661eb4881e63f33d8c86d109e27d39f05a535c0b50e63228c10799ff9aeee"
 }
