@@ -803,6 +803,8 @@ class ContinuousTargetInputs:
             for economics in self.economics.values()
         ):
             raise ValueError("target economics source or evidence purpose mismatch")
+        if type(self.netting) is not NettingResult:
+            raise ValueError("target netting must be a NettingResult")
         if (
             self.netting.source_class is not self.source_class
             or self.netting.evidence_purpose is not self.evidence_purpose
@@ -830,6 +832,8 @@ class ContinuousTargetInputs:
             ):
                 if schedule.status is InputStatus.AVAILABLE and schedule.minimum != Decimal("0"):
                     raise ValueError(f"{asset} {label} minimum charge is unsupported for R3.C")
+            if economics.asset_id != asset:
+                raise ValueError(f"asset {asset} economics identity mismatch")
             if model.asset_id != asset:
                 raise ValueError(f"asset {asset} continuous model identity mismatch")
             if model.reporting_currency != economics.reporting_currency:
@@ -1018,6 +1022,23 @@ class ContinuousTarget:
             raise ValueError("target reporting currencies must be non-empty strings")
         if any(type(reason) is not str or not reason for reason in self.reason_codes):
             raise ValueError("target reason codes must be non-empty strings")
+        if type(self.netting) is not NettingResult:
+            raise ValueError("target netting must be a NettingResult")
+        if (
+            self.netting.source_class is not self.source_class
+            or self.netting.evidence_purpose is not self.evidence_purpose
+        ):
+            raise ValueError("target netting source or evidence purpose mismatch")
+        if self.netting.asset_order != self.asset_order:
+            raise ValueError("target netting order does not match asset order")
+        expected_external = tuple(
+            requested - current
+            for requested, current in zip(
+                self.requested_position, self.current_position, strict=True
+            )
+        )
+        if self.netting.external_deltas != expected_external:
+            raise ValueError("target netting external deltas do not match request")
         if self.disposition is DecisionDisposition.ACCEPTED:
             if self.solver_status != SolverResultStatus.OPTIMAL.value:
                 raise ValueError("accepted target requires exact optimal status")

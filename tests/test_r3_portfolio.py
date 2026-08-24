@@ -732,3 +732,25 @@ def test_continuous_model_rejects_schedule_basis_mismatch(
     )
     with pytest.raises(ValueError, match="basis"):
         replace(model, components=components)
+
+
+def test_target_common_netting_source_binding_applies_to_accepted_and_blocked() -> None:
+    accepted = solve_continuous_target(
+        _target_inputs(), runner=lambda inputs: ("optimal", (1.0, 0.0))
+    )
+    with pytest.raises(ValueError, match="source"):
+        replace(accepted, source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE)
+
+    blocked = solve_continuous_target(
+        _target_inputs(), runner=lambda inputs: ("infeasible", (1.0, 0.0))
+    )
+    with pytest.raises(ValueError, match="source"):
+        replace(blocked, source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE)
+
+
+def test_continuous_inputs_reject_foreign_product_economics() -> None:
+    inputs = _target_inputs()
+    economics = dict(inputs.economics)
+    economics["asset:a"] = _economics("asset:b")
+    with pytest.raises(ValueError, match="economics identity"):
+        replace(inputs, economics=economics)
