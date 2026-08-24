@@ -5,5 +5,5 @@
   "source_class": "IBKR_HISTORICAL_RESEARCH",
   "manifest_path": "/workspace/tmp/qtrad-r2-lab/LAB-0/lab-manifest.json",
   "manifest_sha256": "462e40fa84038156b16c68bde4b68d574ab7862c680657ebd1a0035b39bf0072",
-  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-U"
+  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2"
 }

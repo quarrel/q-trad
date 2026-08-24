@@ -4,6 +4,7 @@ import polars as pl
 
 from experiments.r2_historical_lab.universe import (
     _choose_finalists,
+    _target_maturity_expression,
     _training_and_validation,
 )
 
@@ -39,6 +40,28 @@ def test_outer_training_is_chronological_and_horizon_mature() -> None:
 
     assert training["decision_time"].to_list() == [start]
     assert validation.height == 2
+
+
+
+def test_development_targets_must_mature_before_terminal_start() -> None:
+    terminal_start = datetime(2026, 6, 26, 14, 6, tzinfo=UTC)
+    targets = pl.DataFrame(
+        {
+            "target_id": ["before", "equal", "after", "terminal"],
+            "target_valid": [True, True, True, True],
+            "block": ["DEV_3", "DEV_3", "DEV_3", "TERMINAL_FORMER_HOLDOUT"],
+            "target_available_at": [
+                terminal_start - timedelta(minutes=1),
+                terminal_start,
+                terminal_start + timedelta(minutes=1),
+                terminal_start + timedelta(minutes=20),
+            ],
+        }
+    )
+
+    filtered = targets.filter(_target_maturity_expression(terminal_start))
+
+    assert filtered["target_id"].to_list() == ["before", "terminal"]
 
 
 def test_finalist_selection_is_bounded_and_uses_declared_metrics() -> None:

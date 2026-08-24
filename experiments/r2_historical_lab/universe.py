@@ -23,6 +23,7 @@ from experiments.r2_historical_lab.baseline import (
 from experiments.r2_historical_lab.harness import (
     TERMINAL_BLOCK,
     append_attempt,
+    authenticate_manifest,
     configuration_id,
     evaluate_against_zero,
     freeze_finalists,
@@ -141,6 +142,13 @@ def _configuration(train_universe: str, evaluation_universe: str, model: str) ->
     }
 
 
+def _target_maturity_expression(terminal_start: datetime) -> pl.Expr:
+    return pl.col("target_valid") & (
+        (pl.col("block") == TERMINAL_BLOCK)
+        | (pl.col("target_available_at") < pl.lit(terminal_start))
+    )
+
+
 def _load(
     manifest_path: Path,
     manifest_sha256: str,
@@ -151,6 +159,10 @@ def _load(
     finalist_configuration_id: str | None = None,
     instruments: Sequence[str] = ALL_20,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    manifest = authenticate_manifest(manifest_path, manifest_sha256)
+    terminal_start = datetime.fromisoformat(
+        next(item for item in manifest["fold_blocks"] if item["name"] == TERMINAL_BLOCK)["start"]
+    )
     common = {
         "manifest_path": manifest_path,
         "expected_manifest_sha256": manifest_sha256,
@@ -164,7 +176,7 @@ def _load(
     context = load_parts(**common, kind="context").collect()
     targets = (
         load_parts(**common, kind="target", horizons=(15,))
-        .filter(pl.col("target_valid"))
+        .filter(_target_maturity_expression(terminal_start))
         .collect()
     )
     return features, context, targets

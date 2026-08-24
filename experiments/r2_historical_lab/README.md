@@ -40,6 +40,8 @@ Run the authenticated smoke and the complete universe matrix from the LAB-U work
     uv run -m experiments.r2_historical_lab.universe run --config experiments/r2_historical_lab/universe-config.json
 
 LAB-U recomputes the original cross-market availability count for each declared training universe,
-fits only chronological and horizon-mature rows, freezes no more than three finalists from DEV_1
-through DEV_3, and only then loads the former consumed holdout as a terminal post-hoc development
-block. Outputs remain non-authoritative under /workspace/tmp/qtrad-r2-lab/LAB-U.
+fits only chronological and horizon-mature rows, and excludes every non-terminal target whose outcome
+is not available strictly before the former-holdout start. It freezes no more than three finalists
+from DEV_1 through DEV_3, and only then loads the former consumed holdout as a terminal post-hoc
+development block. Outputs remain non-authoritative under the create-only path configured in
+`universe-config.json`.
