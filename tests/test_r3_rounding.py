@@ -9,7 +9,7 @@ import pytest
 from test_r3_portfolio import _key, _netting_for, _target_inputs
 
 from qtrad.application.r3_portfolio import solve_continuous_target
-from qtrad.application.r3_rounding import round_and_repair_target
+from qtrad.application.r3_rounding import _repaired_attributions, round_and_repair_target
 from qtrad.domain.economics import ImpactDisposition, SessionState
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.portfolio import AssetNetting, NettingResult, SleeveAttribution
@@ -385,3 +385,89 @@ def test_cost_mapping_order_does_not_change_identity() -> None:
     replay = replace(result, expected_costs=reversed_costs)
     assert replay.canonical_bytes == result.canonical_bytes
     assert replay.semantic_identity == result.semantic_identity
+
+
+def _multi_sleeve_netting(weights: tuple[Decimal, ...]) -> NettingResult:
+    asset_attributions = tuple(
+        SleeveAttribution(
+            _key("asset:a", experiment=f"sleeve-{index}"),
+            weight,
+            Decimal("0"),
+            weight,
+        )
+        for index, weight in enumerate(weights)
+    )
+    first = AssetNetting(
+        "asset:a",
+        sum(weights, Decimal("0")),
+        sum(weights, Decimal("0")),
+        Decimal("0"),
+        asset_attributions,
+    )
+    second = AssetNetting("asset:b", Decimal("0"), Decimal("0"), Decimal("0"), ())
+    return NettingResult(
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
+        assets=(first, second),
+        sleeves=asset_attributions,
+    )
+
+
+def test_repaired_attribution_uses_largest_remainder_and_canonical_tie() -> None:
+    inputs = _target_inputs()
+    netting = _multi_sleeve_netting((Decimal("1"), Decimal("1"), Decimal("1")))
+    reasons: set[str] = set()
+    attributions, residual = _repaired_attributions(
+        netting, (Decimal("1"), Decimal("0")), inputs.economics, reasons
+    )
+    asset_a = [item for item in attributions if item.key.asset_id == "asset:a"]
+    assert [item.external_delta_share for item in asset_a] == [
+        Decimal("1"),
+        Decimal("0"),
+        Decimal("0"),
+    ]
+    assert residual == Decimal("0")
+    assert sum((item.external_delta_share for item in asset_a), Decimal("0")) == Decimal("1")
+    object.__setattr__(
+        netting.assets[0], "attributions", tuple(reversed(netting.assets[0].attributions))
+    )
+    object.__setattr__(netting, "sleeves", tuple(reversed(netting.sleeves)))
+    replay, replay_residual = _repaired_attributions(
+        netting, (Decimal("1"), Decimal("0")), inputs.economics, set()
+    )
+    assert {
+        item.key: item.external_delta_share for item in replay if item.key.asset_id == "asset:a"
+    } == {
+        item.key: item.external_delta_share
+        for item in attributions
+        if item.key.asset_id == "asset:a"
+    }
+    assert replay_residual == Decimal("0")
+
+
+def test_repaired_attribution_allocates_unequal_and_signed_movement() -> None:
+    inputs = _target_inputs()
+    positive = _multi_sleeve_netting((Decimal("2"), Decimal("1"), Decimal("1")))
+    negative = _multi_sleeve_netting((Decimal("-2"), Decimal("-1"), Decimal("-1")))
+    positive_result, positive_residual = _repaired_attributions(
+        positive, (Decimal("2"), Decimal("0")), inputs.economics, set()
+    )
+    negative_result, negative_residual = _repaired_attributions(
+        negative, (Decimal("-2"), Decimal("0")), inputs.economics, set()
+    )
+    assert [
+        item.external_delta_share for item in positive_result if item.key.asset_id == "asset:a"
+    ] == [
+        Decimal("1"),
+        Decimal("1"),
+        Decimal("0"),
+    ]
+    assert [
+        item.external_delta_share for item in negative_result if item.key.asset_id == "asset:a"
+    ] == [
+        Decimal("-1"),
+        Decimal("-1"),
+        Decimal("0"),
+    ]
+    assert positive_residual == Decimal("0")
+    assert negative_residual == Decimal("0")

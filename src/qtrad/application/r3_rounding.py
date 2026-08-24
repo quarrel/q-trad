@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Final
 
@@ -199,6 +199,7 @@ def _repair(
 def _repaired_attributions(
     netting: NettingResult,
     final_delta: Sequence[Decimal],
+    economics: Mapping[str, ProductEconomics],
     reasons: set[str],
 ) -> tuple[tuple[RepairedSleeveAttribution, ...], Decimal]:
     attributions: list[RepairedSleeveAttribution] = []
@@ -210,26 +211,40 @@ def _repaired_attributions(
             residual += abs(final)
             continue
         parent_external = sum((item.external_delta_share for item in original), Decimal("0"))
-        if parent_external == 0:
-            if final != 0:
-                residual += abs(final)
-            for item in original:
-                attributions.append(
-                    RepairedSleeveAttribution(
-                        item.key,
-                        item.requested_delta,
-                        item.internal_cross_quantity,
-                        item.external_delta_share,
-                        repair_delta=Decimal("0"),
-                    )
-                )
-            continue
-        factor = final / parent_external
         changed = final != parent_external
+        allocated: dict[object, Decimal] = {}
         if changed:
             reasons.add(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value)
+            increment = economics[asset_item.asset_id].quantity_increment
+            direction = Decimal("1") if final > 0 else Decimal("-1")
+            candidates = [item for item in original if item.external_delta_share * direction > 0]
+            if final != 0 and candidates:
+                total_weight = sum(
+                    (abs(item.external_delta_share) for item in candidates), Decimal("0")
+                )
+                units = int(abs(final) / increment)
+                base_units: dict[object, int] = {}
+                remainders: dict[object, Decimal] = {}
+                for item in candidates:
+                    exact = Decimal(units) * abs(item.external_delta_share) / total_weight
+                    base = int(exact)
+                    base_units[item.key] = base
+                    remainders[item.key] = exact - Decimal(base)
+                remaining = units - sum(base_units.values())
+                ranked = sorted(
+                    candidates,
+                    key=lambda item: (-remainders[item.key], item.key.canonical_tuple),
+                )
+                for item in ranked[:remaining]:
+                    base_units[item.key] += 1
+                for item in candidates:
+                    allocated[item.key] = direction * increment * Decimal(base_units[item.key])
+            elif final != 0:
+                residual += abs(final)
         for item in original:
-            external = item.external_delta_share * factor
+            external = (
+                item.external_delta_share if not changed else allocated.get(item.key, Decimal("0"))
+            )
             attributions.append(
                 RepairedSleeveAttribution(
                     item.key,
@@ -237,9 +252,9 @@ def _repaired_attributions(
                     item.internal_cross_quantity,
                     external,
                     repair_delta=external - item.external_delta_share,
-                    reason_codes=(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value,)
-                    if changed
-                    else (),
+                    reason_codes=(
+                        (RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value,) if changed else ()
+                    ),
                 )
             )
     ordered = tuple(sorted(attributions, key=lambda item: item.key.canonical_tuple))
@@ -398,6 +413,7 @@ def round_and_repair_target(
             attributions, residual = _repaired_attributions(
                 inputs.netting,
                 tuple(values[i] - current[i] for i in range(len(values))),
+                inputs.economics,
                 reasons,
             )
         except (ArithmeticError, KeyError, TypeError, ValueError, AttributeError):
