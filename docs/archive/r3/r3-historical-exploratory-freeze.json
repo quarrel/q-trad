@@ -6,8 +6,36 @@
   "source_class": "IBKR_HISTORICAL_RESEARCH",
   "price_basis": "MIDPOINT_OHLC",
   "primary_horizon_minutes": 15,
-  "targets": ["target_1", "target_2", "target_3", "target_4", "target_5", "target_6"],
-  "groups": ["group_1", "group_2", "group_3"],
+  "targets": [
+    "fx:aud-usd",
+    "fx:eur-usd",
+    "index:australia-200",
+    "index:us-500",
+    "commodity:spot-gold",
+    "commodity:us-crude"
+  ],
+  "groups": ["FX", "indices", "commodities"],
+  "target_group_resolution": {
+    "metadata_source": "stage8_run_descriptor.target_roles",
+    "target_ids": [
+      "fx:aud-usd",
+      "fx:eur-usd",
+      "index:australia-200",
+      "index:us-500",
+      "commodity:spot-gold",
+      "commodity:us-crude"
+    ],
+    "group_ids": ["FX", "indices", "commodities"],
+    "mapping": {
+      "fx:aud-usd": "FX",
+      "fx:eur-usd": "FX",
+      "index:australia-200": "indices",
+      "index:us-500": "indices",
+      "commodity:spot-gold": "commodities",
+      "commodity:us-crude": "commodities"
+    },
+    "expected_identity": "b386aaab0d75025d88a95d83fe3db89cb309e6c0a39658159d01bbdc7c7aa180"
+  },
   "retained_parents": {
     "stage7_manifest": "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3/provider-history-v3/manifest.json",
     "stage7_receipt": "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3/provider-history-v3-verification-receipt.json",
@@ -15,9 +43,95 @@
     "stage7_dataset_id": "b77a0f9a7192ed756b7958666f89baa6ce16a741056fd32a3a710cdb1ba65bd3",
     "stage7_closure_id": "11bae2bee78227d0d5b66e2553da5e8515f1b12b53a5ebd9332ace2fd65e8ac",
     "stage7_verification_id": "766ed962331e37cb2e2fdd275a39a03905a83f879ebe025bbe7e3a895234bbfd",
+    "stage8_foundation": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/foundation",
+    "stage8_receipt": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/foundation-verification-receipt.json",
+    "stage8_promotion": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/foundation-confirmatory-promotion.json",
+    "stage8_foundation_id": "2ab99971f63efdb55e9652cde49ffd8e0aded5f9f6201e0bfe713dbc5edbbc8c",
+    "stage8_closure_id": "47967f94d3645b6fdf89f4862940b687a2b4a3f5e618421fd485cbdfe7c0e98f",
+    "stage8_verification_id": "f6275cf23f429531e73b26176d49ae4defd0f6ae1dc1ecb8c0f2e75ef740b38f",
+    "stage8_manifest_sha256": "be5c38189d8f597322f8134934a03b04d08e135777f1efe4a6a701962bdf4d95",
+    "stage8_verification_receipt_sha256": "3d282a46dec9f54c26060f0bc518db921fbdd2c2ef3f4b6d21d145dede8824d4",
     "terminal_report_sha256": "4fdc08e2e37135200f974f14ba28669e73aa4f57f51860731741f6a2ddea2b30",
     "terminal_approval_sha256": "278830aed74a28c9d8ca79b3695b652137e131609e40b530e019f048063bcaa6",
     "stage8_promotion_id": "1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5"
+  },
+  "authentication_chain": {
+    "stage7": {
+      "command": "qtrad research observations authenticate-provider-history --manifest <stage7-v3-manifest> --receipt <stage7-v3-receipt>",
+      "receipt_required": true,
+      "promotion_required": false
+    },
+    "stage8": {
+      "command": "qtrad research baselines holdout-target-source --foundation-bundle <stage8> --foundation-receipt <stage8-receipt> --foundation-promotion <stage8-promotion> --experiment <experiment> --output <new-json>",
+      "receipt_required": true,
+      "promotion_required": true
+    },
+    "terminal": {
+      "command": "authenticate terminal report and independent approval authority by exact SHA-256",
+      "receipt_required": true,
+      "promotion_required": true
+    }
+  },
+  "temporal_contract": {
+    "decision_time_field": "decision_time",
+    "feature_availability_field": "available_at",
+    "target_maturity_field": "target_available_at",
+    "dependency_interval_fields": ["dependency_start", "dependency_end"],
+    "purge_rule": "exclude training rows whose dependency_end overlaps evaluation decision time",
+    "embargo_rule": "exclude training rows whose target_available_at is after evaluation decision time",
+    "fold_rule": "chronological synchronized decision-time groups; first mature fold only trains later evaluation groups"
+  },
+  "retained_loader": {
+    "manifest_contract": "provider-history-v3 plus stage8-foundation-v3",
+    "required_children": ["target_metadata", "forecast_oof", "outcomes"],
+    "required_columns": [
+      "decision_time",
+      "asset",
+      "target_id",
+      "group",
+      "horizon_minutes",
+      "period",
+      "prediction",
+      "realised_return",
+      "target_position_change",
+      "available_at",
+      "target_available_at",
+      "dependency_start",
+      "dependency_end"
+    ],
+    "identity_bindings": {
+      "target_dataset": "2a09e6146e6feaa1e707f245c8585949fdc15a3a92828f37e1a9e93866de8e5f",
+      "panel_dataset": "bb757d25b4e922740905dbab929f7a50492f61f3d60537e023d6a8143040918f",
+      "observation_dataset": "ae6a07f5a7201a184e7d506f2d8f4fd2a27d77045fdf00d383daabe904e9ef41",
+      "fold_dataset": "a3f1ef79d3c195952d85eb7b5f8bd46a5c6dd36534192a8562505530fb684b01"
+    },
+    "decode_policy": "future authenticated child selection only; no parent replay and no outcome decode during freeze"
+  },
+  "scale_projection": {
+    "retained_row_count": 3376258,
+    "target_count": 6,
+    "group_count": 3,
+    "fixture_row_count": 18,
+    "projected_peak_memory_mb": 256,
+    "projected_elapsed_seconds": 30,
+    "stop_conditions": [
+      "stop before retained execution if any child shape exceeds frozen row/column contract",
+      "stop if measured memory or elapsed time reaches its frozen cap",
+      "stop on missing maturity/dependency metadata or identity mismatch"
+    ]
+  },
+  "observation_contract": {
+    "event_aware": true,
+    "durable_output": "create-only operator-selected R3.H report path",
+    "resource_limits": {
+      "max_elapsed_seconds": 60,
+      "max_memory_mb": 512
+    },
+    "stop_conditions": [
+      "no silent retry after identity, chronology, purge, embargo or decoder failure",
+      "no provider/authentication call from fixture runner",
+      "preserve failed checkpoint and report exact exit state"
+    ]
   },
   "cost_grid": [
     {"name": "zero", "value": 0.0, "unit": "fraction_of_notional"},
@@ -56,5 +170,5 @@
     "create_only": true,
     "post_result_expansion": false
   },
-  "semantic_identity": "482e941019fbeffc9396bff5b8a947bcef9b8fba71e30ef854722a96cab5c4d8"
+  "semantic_identity": "8359cd82ed5a20fa7f104fe05586efa9277241445edd0d2b14f92dc8d60f545c"
 }

@@ -83,11 +83,11 @@ def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> Non
     assert {"economic", "statistical", "graph"} <= report.keys()
     assert len(report["economic"]["all_in_cost_sensitivity"]) == 4
     assert {"asset", "horizon", "period"} <= report["economic"].keys()
-    assert report["economic"]["asset"]["A"]["turnover"] == 0.25
-    assert report["economic"]["asset"]["B"]["turnover"] == 0.25
+    assert report["economic"]["asset"]["fx:aud-usd"]["turnover"] == 0.03
+    assert report["economic"]["asset"]["fx:eur-usd"]["turnover"] == 0.06
     assert report["economic"]["all_in_cost_sensitivity"][0]["break_even_cost"] is not None
     assert report["statistical"]["oof"]["causal"] is True
-    assert report["statistical"]["oof"]["support"] == 4
+    assert report["statistical"]["oof"]["support"] == 18
     assert report["statistical"]["oof"]["coverage"] == 1.0
     assert report["statistical"]["negative_failed_inconclusive_rendered"] is True
     assert report["graph"]["tiny_learned_graph"]["feasibility_only"] is True
@@ -114,11 +114,23 @@ def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> Non
 def test_synchronised_timestamps_are_allowed_but_duplicate_identity_fails() -> None:
     config = FreezeConfig.from_path(CONFIG)
     rows = list(synthetic_fixture())
-    rows[1] = replace(rows[1], timestamp=rows[0].timestamp, asset=rows[0].asset, horizon_minutes=30)
+    rows[1] = replace(
+        rows[1],
+        timestamp=rows[0].timestamp,
+        asset=rows[0].asset,
+        horizon_minutes=30,
+    )
     result = analyse_fixture(rows, config)
-    assert result.report["statistical"]["oof"]["rows"] == 4
+    assert result.report["statistical"]["oof"]["rows"] == 18
 
-    rows[1] = replace(rows[1], horizon_minutes=rows[0].horizon_minutes, period=rows[0].period)
+    rows[1] = replace(
+        rows[1],
+        target_id=rows[0].target_id,
+        group=rows[0].group,
+        horizon_minutes=rows[0].horizon_minutes,
+        period=rows[0].period,
+        asset=rows[0].asset,
+    )
     with pytest.raises(FreezeError, match="duplicate decision identity"):
         analyse_fixture(rows, config)
 
@@ -130,6 +142,7 @@ def test_work_and_resource_limits_fail_closed() -> None:
         replace(
             base,
             timestamp=f"2026-02-01T00:{index:02}:00Z",
+            decision_time=f"2026-02-01T00:{index:02}:00Z",
             period=f"period-{index}",
         )
         for index in range(65)
@@ -170,7 +183,8 @@ def test_pooled_and_graph_controls_are_causal_and_use_frozen_graph() -> None:
     baseline = analyse_fixture(tuple(rows), config).report
     future = replace(
         rows[-1],
-        timestamp="2026-02-01T00:10:00Z",
+        timestamp="2026-01-01T00:15:00Z",
+        decision_time="2026-01-01T00:15:00Z",
         period="period-future",
         prediction=9.0,
         realised_return=0.9,
@@ -191,8 +205,8 @@ def test_pooled_and_graph_controls_are_causal_and_use_frozen_graph() -> None:
 
     fixed = _control(baseline, "fixed_graph")["prediction_trace"]
     shuffled = _control(baseline, "shuffled_graph")["prediction_trace"]
-    assert fixed[0] == rows[1].prediction
-    assert shuffled[0] == rows[1].prediction
+    assert fixed[0] == pytest.approx(0.032)
+    assert shuffled[0] == pytest.approx(0.04)
 
 
 def test_report_carries_frozen_parent_identities_and_code_provenance() -> None:
@@ -205,6 +219,11 @@ def test_report_carries_frozen_parent_identities_and_code_provenance() -> None:
         "stage7_dataset_id",
         "stage7_closure_id",
         "stage7_verification_id",
+        "stage8_foundation_id",
+        "stage8_closure_id",
+        "stage8_verification_id",
+        "stage8_manifest_sha256",
+        "stage8_verification_receipt_sha256",
         "terminal_report_sha256",
         "terminal_approval_sha256",
         "stage8_promotion_id",
@@ -214,3 +233,33 @@ def test_report_carries_frozen_parent_identities_and_code_provenance() -> None:
     assert provenance["application_contract"] == "qtrad-r3-historical-exploratory-implementation-v2"
     assert len(provenance["module_sha256"]) == 64
     assert len(provenance["python_version"].split(".")) == 3
+
+
+def test_dependency_maturity_and_overlap_are_purged_causally() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    rows = list(synthetic_fixture())
+    late_outcome = replace(rows[0], target_available_at="2026-01-01T00:20:00Z")
+    late_report = analyse_fixture(tuple([late_outcome, *rows[1:]]), config).report
+    assert late_report["statistical"]["oof"]["folds"][0]["embargoed_rows"] >= 1
+
+    overlap = replace(rows[0], dependency_end="2026-01-01T00:06:00Z")
+    overlap_report = analyse_fixture(tuple([overlap, *rows[1:]]), config).report
+    assert overlap_report["statistical"]["oof"]["folds"][0]["purged_rows"] >= 1
+
+
+def test_micro_fixture_shape_is_exact_and_fit_counts_are_executions() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    rows = synthetic_fixture()
+    assert len(rows) == 18
+    assert len({row.target_id for row in rows}) == 6
+    assert len({row.group for row in rows}) == 3
+    assert len({row.decision_time for row in rows}) == 3
+    report = analyse_fixture(rows, config).report
+    assert report["work"]["fit_count"] == 3
+    assert report["work"]["fit_executions"] == {
+        "linear_ridge": 0,
+        "linear_zero_return": 0,
+        "nonlinear_huber": 1,
+        "pooled_local_ridge": 1,
+        "tiny_learned_graph": 1,
+    }
