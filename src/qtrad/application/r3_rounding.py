@@ -19,6 +19,7 @@ from qtrad.domain.r3_rounding import (
     RoundingDisposition,
     RoundingPolicy,
     RoundingReasonCode,
+    cost_states_identity,
     order_reason_codes,
 )
 
@@ -291,6 +292,17 @@ def round_and_repair_target(
     """Convert one continuous target to a valid Decimal target or fail closed."""
     selected_policy = policy or RoundingPolicy()
     reasons: set[str] = {_normalise_reason(reason) for reason in target.reason_codes}
+    try:
+        if target.decision_input_identity != inputs.decision_input_identity:
+            reasons.add(RoundingReasonCode.DECISION_BLOCKED.value)
+            return _blocked(target, inputs, selected_policy, reasons)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        reasons.add(
+            RoundingReasonCode.INPUT_RISK_INVALID.value
+            if getattr(inputs, "risk", None) is None
+            else RoundingReasonCode.INPUT_ECONOMICS_MISSING.value
+        )
+        return _blocked(target, inputs, selected_policy, reasons)
     if RoundingReasonCode.DECISION_BLOCKED.value in reasons:
         return _blocked(target, inputs, selected_policy, reasons)
     try:
@@ -436,6 +448,7 @@ def round_and_repair_target(
             policy_identity=selected_policy.semantic_identity,
             decision_input_identity=inputs.decision_input_identity,
             continuous_target_identity=target.semantic_identity,
+            cost_state_identity=cost_states_identity(expected_costs),
             attribution_residual=Decimal("0"),
         )
     except KeyError:

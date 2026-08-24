@@ -103,6 +103,50 @@ def _identity(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _cost_state_payload(state: ExpectedCostState) -> object:
+    return {
+        "decision_time": state.decision_time.isoformat(),
+        "current_quantity": state.current_quantity,
+        "target_quantity": state.target_quantity,
+        "holding_interval": state.holding_interval.total_seconds(),
+        "reporting_currency": state.reporting_currency,
+        "version": state.version,
+        "provenance": state.provenance,
+        "internal_cross_quantity": state.internal_cross_quantity,
+        "components": tuple(
+            (
+                component.component,
+                component.status,
+                component.basis,
+                component.native_amount,
+                component.native_currency,
+                component.reporting_amount,
+                component.reporting_currency,
+                component.quantity_basis,
+                component.holding_interval.total_seconds()
+                if component.holding_interval is not None
+                else None,
+                component.version,
+                component.provenance,
+                component.reason,
+                component.conversion_rate,
+                component.conversion_source,
+                component.conversion_version,
+            )
+            for component in state.components
+        ),
+    }
+
+
+def cost_states_identity(costs: Mapping[str, ExpectedCostState]) -> str:
+    return _identity(
+        tuple(
+            (asset, _cost_state_payload(state))
+            for asset, state in sorted(costs.items(), key=lambda item: item[0])
+        )
+    )
+
+
 def _finite_decimal(value: object, name: str) -> Decimal:
     if type(value) is Decimal and value.is_finite():
         return value
@@ -183,6 +227,7 @@ class RoundedTarget:
     policy_identity: str
     decision_input_identity: str
     continuous_target_identity: str
+    cost_state_identity: str = ""
     attribution_residual: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
@@ -293,6 +338,11 @@ class RoundedTarget:
         _finite_decimal(self.attribution_residual, "rounded target attribution residual")
         if self.attribution_residual < 0:
             raise ValueError("rounded target attribution residual must be non-negative")
+        if (
+            self.disposition is not RoundingDisposition.BLOCKED
+            and self.attribution_residual != Decimal("0")
+        ):
+            raise ValueError("accepted rounded target attribution residual must be zero")
         for identity, label in (
             (self.policy_identity, "policy identity"),
             (self.decision_input_identity, "decision input identity"),
@@ -325,6 +375,8 @@ class RoundedTarget:
                 if (
                     state.current_quantity != self.current_position[self.asset_order.index(asset)]
                     or state.target_quantity != self.target_position[self.asset_order.index(asset)]
+                    or state.internal_cross_quantity
+                    != self.netting.assets[self.asset_order.index(asset)].internal_cross_quantity
                 ):
                     raise ValueError("rounded target cost state binding mismatch")
                 total = state.require_total_reporting()
@@ -342,6 +394,8 @@ class RoundedTarget:
                 or financing != self.expected_financing_reporting
             ):
                 raise ValueError("rounded target costs do not reconcile")
+            if self.cost_state_identity != cost_states_identity(self.expected_costs):
+                raise ValueError("rounded target cost state identity mismatch")
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -379,6 +433,8 @@ class RoundedTarget:
                     "policy_identity": self.policy_identity,
                     "decision_input_identity": self.decision_input_identity,
                     "continuous_target_identity": self.continuous_target_identity,
+                    "cost_state_identity": self.cost_state_identity,
+                    "attribution_residual": self.attribution_residual,
                 }
             ),
             sort_keys=True,

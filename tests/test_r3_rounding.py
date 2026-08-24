@@ -302,6 +302,7 @@ def test_repair_rejects_below_minimum_quantity() -> None:
         inputs,
         caps=RiskCaps((2.0, 10.0), 20.0, 20.0, 1.0, 20.0),
     )
+    target = replace(target, decision_input_identity=capped.decision_input_identity)
     result = round_and_repair_target(target, capped)
     assert result.disposition is RoundingDisposition.BLOCKED
     assert not result.target_position
@@ -347,3 +348,30 @@ def test_impact_quantity_cap_fails_closed_without_partial_target() -> None:
     assert result.disposition is RoundingDisposition.BLOCKED
     assert not result.target_position
     assert RoundingReasonCode.ASSET_PAPER_INELIGIBLE.value in result.reason_codes
+
+
+def test_stale_input_identity_fails_closed() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    target = _target(inputs, (1.0, 0.0))
+    object.__setattr__(inputs, "alpha_return", (Decimal("9"), Decimal("0")))
+    result = round_and_repair_target(target, inputs)
+    assert result.disposition is RoundingDisposition.BLOCKED
+    assert not result.target_position
+    assert RoundingReasonCode.DECISION_BLOCKED.value in result.reason_codes
+
+
+def test_forged_cost_state_with_same_total_is_rejected() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    result = round_and_repair_target(_target(inputs, (1.0, 0.0)), inputs)
+    assert result.disposition is RoundingDisposition.ACCEPTED
+    forged = replace(result.expected_costs["asset:a"], provenance="forged-cost")
+    with pytest.raises(ValueError, match="cost state identity"):
+        replace(result, expected_costs={**result.expected_costs, "asset:a": forged})
+
+
+def test_nonzero_attribution_residual_is_rejected() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    result = round_and_repair_target(_target(inputs, (1.0, 0.0)), inputs)
+    assert result.disposition is RoundingDisposition.ACCEPTED
+    with pytest.raises(ValueError, match="attribution residual"):
+        replace(result, attribution_residual=Decimal("0.01"))
