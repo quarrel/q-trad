@@ -13,16 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from math import isfinite, sqrt
-from typing import Any, ClassVar
-
-import numpy as np
-from sklearn.covariance import LedoitWolf  # type: ignore[reportMissingTypeStubs]
+from typing import ClassVar
 
 from qtrad.domain.time import require_utc
 
 RISK_STATE_CONTRACT = "qtrad-ordered-risk-state-v1"
 RISK_ESTIMATOR_CONTRACT = "qtrad-ledoit-wolf-risk-v1"
-DEFAULT_ESTIMATOR_VERSION = "scikit-learn-1.7.1"
+SUPPORTED_ESTIMATOR = "LEDOIT_WOLF"
+DEFAULT_ESTIMATOR_VERSION = "qtrad-ledoit-wolf-pure-python-v1"
 DEFAULT_SYMMETRY_TOLERANCE = 1e-12
 DEFAULT_PSD_TOLERANCE = 1e-12
 DEFAULT_FINITE_TOLERANCE = 0.0
@@ -99,7 +97,7 @@ class RiskEstimatorConfig:
 
     horizon: timedelta
     lookback: timedelta
-    estimator: str = "LEDOIT_WOLF"
+    estimator: str = SUPPORTED_ESTIMATOR
     estimator_version: str = DEFAULT_ESTIMATOR_VERSION
     return_unit: str = "LOG_RETURN"
     availability_policy: str = "AVAILABLE_BY_CUTOFF"
@@ -113,7 +111,7 @@ class RiskEstimatorConfig:
             raise ValueError("risk horizon must be positive")
         if self.lookback <= timedelta(0):
             raise ValueError("risk lookback must be positive")
-        if self.estimator != "LEDOIT_WOLF":
+        if self.estimator != SUPPORTED_ESTIMATOR:
             raise ValueError("unsupported risk estimator")
         if not self.estimator_version:
             raise ValueError("risk estimator_version must be non-empty")
@@ -153,6 +151,9 @@ class RiskCaps:
     currency_caps: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "asset_caps", tuple(self.asset_caps))
+        object.__setattr__(self, "group_caps", tuple(self.group_caps))
+        object.__setattr__(self, "currency_caps", tuple(self.currency_caps))
         if not self.asset_caps:
             raise ValueError("risk asset caps must be explicit and non-empty")
         for value, name in (
@@ -193,6 +194,20 @@ class ExposureMapping:
     currency_caps: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "group_keys", tuple(self.group_keys))
+        object.__setattr__(
+            self,
+            "group_exposure_matrix",
+            tuple(tuple(row) for row in self.group_exposure_matrix),
+        )
+        object.__setattr__(self, "group_caps", tuple(self.group_caps))
+        object.__setattr__(self, "currency_keys", tuple(self.currency_keys))
+        object.__setattr__(
+            self,
+            "currency_exposure_matrix",
+            tuple(tuple(row) for row in self.currency_exposure_matrix),
+        )
+        object.__setattr__(self, "currency_caps", tuple(self.currency_caps))
         _validate_mapping(self.group_keys, self.group_exposure_matrix, self.group_caps, "group")
         _validate_mapping(
             self.currency_keys,
@@ -255,6 +270,26 @@ class RiskState:
     CONTRACT: ClassVar[str] = RISK_STATE_CONTRACT
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "asset_order", tuple(self.asset_order))
+        object.__setattr__(
+            self,
+            "covariance",
+            tuple(tuple(row) for row in self.covariance),
+        )
+        object.__setattr__(self, "group_keys", tuple(self.group_keys))
+        object.__setattr__(
+            self,
+            "group_exposure_matrix",
+            tuple(tuple(row) for row in self.group_exposure_matrix),
+        )
+        object.__setattr__(self, "group_caps", tuple(self.group_caps))
+        object.__setattr__(self, "currency_keys", tuple(self.currency_keys))
+        object.__setattr__(
+            self,
+            "currency_exposure_matrix",
+            tuple(tuple(row) for row in self.currency_exposure_matrix),
+        )
+        object.__setattr__(self, "currency_caps", tuple(self.currency_caps))
         ordered = canonical_asset_order(self.asset_order)
         if ordered != self.asset_order:
             raise ValueError("risk asset_order is not canonical")
@@ -272,7 +307,9 @@ class RiskState:
         ):
             if not isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
-        if not self.estimator or not self.estimator_version or not self.availability_policy:
+        if self.estimator != SUPPORTED_ESTIMATOR:
+            raise ValueError("unsupported risk estimator")
+        if not self.estimator_version or not self.availability_policy:
             raise ValueError("risk estimator, version and availability policy are required")
         if self.return_unit != "LOG_RETURN":
             raise ValueError("risk return_unit must be LOG_RETURN")
@@ -547,19 +584,12 @@ def estimate_ordered_risk_state(
     selected.sort(key=lambda item: (item.availability_time, item.observed_at, item.values))
     if len(selected) < config.minimum_observations:
         raise ValueError("risk state has insufficient complete observations at the causal cutoff")
-    matrix = np.asarray(
-        [_complete_values(item.values) for item in selected],
-        dtype=np.float64,
-    )
-    if matrix.shape != (len(selected), n) or not np.isfinite(matrix).all():
+    matrix = tuple(_complete_values(item.values) for item in selected)
+    if len(matrix) != len(selected) or any(
+        len(row) != n or any(not isfinite(value) for value in row) for row in matrix
+    ):
         raise ValueError("risk observations produce a non-finite numerical matrix")
-    estimator = LedoitWolf()
-    fitted: Any = estimator.fit(matrix)  # type: ignore[reportUnknownMemberType]
-    covariance_array: Any = np.asarray(fitted.covariance_, dtype=np.float64)
-    if covariance_array.shape != (n, n) or not np.isfinite(covariance_array).all():
-        raise ValueError("risk estimator produced an invalid covariance")
-    covariance = tuple(tuple(float(value) for value in row) for row in covariance_array)
-    shrinkage = float(fitted.shrinkage_)
+    covariance, shrinkage = _ledoit_wolf(matrix)
     excluded_count = len(observations) - len(selected)
     return RiskState(
         asset_order=ordered,
@@ -595,6 +625,108 @@ def estimate_ordered_risk_state(
 estimate_risk_state = estimate_ordered_risk_state
 OrderedRiskState = RiskState
 
+
+
+def _ledoit_wolf(matrix: FloatMatrix) -> tuple[FloatMatrix, float]:
+    """Calculate a centered Ledoit-Wolf covariance without model libraries."""
+    sample_count = len(matrix)
+    if sample_count < 2:
+        raise ValueError("risk estimator requires at least two observations")
+    feature_count = len(matrix[0])
+    if feature_count == 0 or any(len(row) != feature_count for row in matrix):
+        raise ValueError("risk estimator matrix has invalid shape")
+    means = tuple(
+        sum(row[index] for row in matrix) / sample_count
+        for index in range(feature_count)
+    )
+    centered = tuple(
+        tuple(row[index] - means[index] for index in range(feature_count))
+        for row in matrix
+    )
+    empirical = tuple(
+        tuple(
+            sum(row[row_index] * row[column_index] for row in centered)
+            / sample_count
+            for column_index in range(feature_count)
+        )
+        for row_index in range(feature_count)
+    )
+    if feature_count == 1:
+        return empirical, 0.0
+    squared = tuple(tuple(value * value for value in row) for row in centered)
+    trace_by_feature = tuple(
+        sum(row[index] for row in squared) / sample_count
+        for index in range(feature_count)
+    )
+    mu = sum(trace_by_feature) / feature_count
+    beta_sum = sum(
+        squared[row_index][feature_index] * squared[row_index][column_index]
+        for row_index in range(sample_count)
+        for feature_index in range(feature_count)
+        for column_index in range(feature_count)
+    )
+    gram_square_sum = sum(
+        (
+            sum(
+                row[feature_index] * row[column_index]
+                for row in centered
+            )
+        )
+        ** 2
+        for feature_index in range(feature_count)
+        for column_index in range(feature_count)
+    )
+    delta_estimate = gram_square_sum / (sample_count**2)
+    beta = (
+        beta_sum / sample_count - delta_estimate
+    ) / (feature_count * sample_count)
+    beta = min(beta, delta_estimate)
+    delta = (
+        delta_estimate
+        - 2.0 * mu * sum(trace_by_feature)
+        + feature_count * mu * mu
+    ) / feature_count
+    shrinkage = 0.0 if beta <= 0.0 or delta <= 0.0 else min(1.0, beta / delta)
+    covariance = tuple(
+        tuple(
+            (1.0 - shrinkage) * empirical[row_index][column_index]
+            + (
+                shrinkage * mu
+                if row_index == column_index
+                else 0.0
+            )
+            for column_index in range(feature_count)
+        )
+        for row_index in range(feature_count)
+    )
+    if any(
+        not isfinite(value)
+        for row in covariance
+        for value in row
+    ) or not isfinite(shrinkage):
+        raise ValueError("risk estimator produced an invalid covariance")
+    return covariance, shrinkage
+
+
+def _is_positive_semidefinite(matrix: FloatMatrix, tolerance: float) -> bool:
+    """Check PSD with a tolerance using a dependency-free Cholesky factor."""
+    size = len(matrix)
+    factor = [[0.0 for _ in range(size)] for _ in range(size)]
+    for row in range(size):
+        for column in range(row + 1):
+            residual = matrix[row][column] - sum(
+                factor[row][index] * factor[column][index]
+                for index in range(column)
+            )
+            if row == column:
+                if residual < -tolerance:
+                    return False
+                factor[row][column] = sqrt(max(residual, 0.0))
+            elif factor[column][column] > tolerance:
+                factor[row][column] = residual / factor[column][column]
+            elif abs(residual) > tolerance:
+                return False
+    return True
 
 def _validate_mapping(
     keys: tuple[str, ...],
@@ -636,8 +768,7 @@ def _validate_square_matrix(
         for column in range(size)
     ):
         raise ValueError(f"{label} is not symmetric within tolerance")
-    eigenvalues = np.linalg.eigvalsh(np.asarray(matrix, dtype=np.float64))
-    if float(np.min(eigenvalues)) < -psd_tolerance:
+    if not _is_positive_semidefinite(matrix, psd_tolerance):
         raise ValueError(f"{label} is not positive semidefinite within tolerance")
 
 

@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ from sklearn.covariance import LedoitWolf  # type: ignore[reportMissingTypeStubs
 
 from qtrad.domain.risk import (
     ExposureMapping,
+    FloatMatrix,
     RiskCaps,
     RiskEstimatorConfig,
     RiskObservation,
@@ -131,7 +133,7 @@ def test_covariance_matches_independent_pinned_ledoit_wolf_calculation() -> None
         atol=1e-18,
     )
     assert state.shrinkage >= 0.0
-    assert state.estimator_version == "scikit-learn-1.7.1"
+    assert state.estimator_version == "qtrad-ledoit-wolf-pure-python-v1"
 
 
 def test_mapping_exposures_and_caps_are_ordered_and_fail_closed() -> None:
@@ -159,3 +161,49 @@ def test_risk_state_is_frozen_and_identity_fields_are_content_bound() -> None:
     assert len(state.semantic_id) == 64
     assert len(state.closure_id) == 64
     assert len(state.provenance_id) == 64
+
+
+def test_nested_contracts_normalise_mutable_inputs_before_identity() -> None:
+    mutable_caps = RiskCaps(
+        asset_caps=cast(tuple[float, ...], [1.0, 1.0, 1.0]),
+        gross_cap=2.0,
+        net_cap=1.0,
+        concentration_cap=0.7,
+        portfolio_risk_cap=1.0,
+        group_caps=cast(tuple[float, ...], [1.0, 1.0]),
+        currency_caps=cast(tuple[float, ...], [1.0, 1.0]),
+    )
+    assert isinstance(mutable_caps.asset_caps, tuple)
+    mutable_mapping = ExposureMapping(
+        group_keys=cast(tuple[str, ...], ["macro", "style"]),
+        group_exposure_matrix=cast(FloatMatrix, [[1.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        group_caps=cast(tuple[float, ...], [1.0, 1.0]),
+        currency_keys=cast(tuple[str, ...], ["aud", "usd"]),
+        currency_exposure_matrix=cast(FloatMatrix, [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0]]),
+        currency_caps=cast(tuple[float, ...], [1.0, 1.0]),
+    )
+    assert mutable_mapping.group_exposure_matrix == MAPPING.group_exposure_matrix
+    state = _estimate(_observations())
+    replay = replace(
+        state,
+        covariance=[list(row) for row in state.covariance],
+        group_exposure_matrix=[list(row) for row in state.group_exposure_matrix],
+        currency_exposure_matrix=[list(row) for row in state.currency_exposure_matrix],
+        semantic_identity=None,
+        closure_identity=None,
+        provenance_identity=None,
+    )
+    assert replay.covariance == state.covariance
+    assert replay.semantic_id == state.semantic_id
+
+
+def test_direct_state_rejects_unsupported_estimator() -> None:
+    state = _estimate(_observations())
+    with pytest.raises(ValueError, match="unsupported risk estimator"):
+        replace(
+            state,
+            estimator="UNSUPPORTED",
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+        )
