@@ -415,6 +415,7 @@ class RoundedTarget:
                     "expected_costs": tuple(
                         (asset, self.expected_costs[asset].require_total_reporting())
                         for asset in self.asset_order
+                        if asset in self.expected_costs
                     ),
                     "expected_cost_reporting": self.expected_cost_reporting,
                     "expected_financing_reporting": self.expected_financing_reporting,
