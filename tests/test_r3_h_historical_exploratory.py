@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -661,13 +661,13 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
     changed_parents = provenance_changed["retained_parents"]
     changed_parents["paths"]["terminal_report"] = "/relocated/report.md"
     changed_candidate = provenance_changed["statistical"]["candidates"][0]
-    changed_candidate["execution_receipt"]["wrapper_sha256"] = "changed-wrapper"
+    changed_candidate["execution_receipt"]["wrapper_sha256"] = "f" * 64
     changed_candidate["execution_receipt"]["path"] = "/relocated/wrapper.py"
     assert canonical_report_semantic_identity(result.report) == canonical_report_semantic_identity(
         provenance_changed
     )
     changed_rendered = render_markdown(MicroRun(provenance_changed, result.work_count), config)
-    assert "changed-wrapper" in changed_rendered
+    assert ("f" * 64) in changed_rendered
     assert "/relocated/wrapper.py" in changed_rendered
 
     semantic_changed = json.loads(result.canonical_json())
@@ -760,3 +760,29 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
 
     with pytest.raises(FreezeError, match="schema mismatch"):
         render_markdown(MicroRun({}, {}), config)
+
+
+def test_renderer_rejects_nested_schema_mutations() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    mutations: list[Callable[[dict[str, Any]], None]] = [
+        lambda report: report["loader_contract"].__setitem__("unexpected", True),
+        lambda report: report["target_group_resolution"].__setitem__("unexpected", True),
+        lambda report: report["scale_projection"]["decoder_limits"].__setitem__("unexpected", True),
+        lambda report: report["observation_contract"].__setitem__("unexpected", True),
+        lambda report: report["retained_parents"]["paths"].__setitem__("unexpected", "x"),
+        lambda report: report["selection"].__setitem__("selected_rows", "18"),
+        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", "slow"),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "unexpected", True
+        ),
+        lambda report: report["graph"]["controls"][0].__setitem__("unexpected", True),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ].pop(),
+    ]
+    for mutate in mutations:
+        malformed = json.loads(result.canonical_json())
+        mutate(malformed)
+        with pytest.raises(FreezeError, match="renderer"):
+            render_markdown(MicroRun(malformed, result.work_count), config)
