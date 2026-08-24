@@ -17,6 +17,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, cast
@@ -915,6 +916,114 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
     return view
 
 
+_DECIMAL_QUANTUM = Decimal("0.000000000001")
+
+
+def _report_decimal(value: Any, label: str, *, nullable: bool = False) -> Decimal | None:
+    if value is None:
+        if nullable:
+            return None
+        raise FreezeError(f"{label} must be a finite number")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise FreezeError(f"{label} must be a numeric scalar")
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError) as exc:
+        raise FreezeError(f"{label} must be a finite number") from exc
+    if not parsed.is_finite():
+        raise FreezeError(f"{label} must be a finite number")
+    return parsed
+
+
+def _decimal_matches(actual: Decimal | None, expected: Decimal | None) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return abs(actual - expected) <= Decimal("0.00000000002")
+
+
+def _qdecimal(value: Decimal) -> Decimal:
+    return value.quantize(_DECIMAL_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+
+def _reconcile_economic_view(view: Mapping[str, Any], label: str) -> None:
+    trace = _strict_sequence(view["position_trace"], f"{label}.position_trace")
+    if not trace:
+        raise FreezeError(f"{label}.position_trace must not be empty")
+    gross_total = Decimal("0")
+    turnover = Decimal("0")
+    for index, item in enumerate(trace):
+        entry = _strict_mapping(item, f"{label}.position_trace[{index}]")
+        realised = _report_decimal(
+            entry["realised_gross"], f"{label}.position_trace[{index}].realised_gross"
+        )
+        change = _report_decimal(
+            entry["target_position_change"],
+            f"{label}.position_trace[{index}].target_position_change",
+        )
+        assert realised is not None and change is not None
+        gross_total += realised
+        turnover += abs(change)
+    count = Decimal(len(trace))
+    expected_total = _qdecimal(gross_total)
+    expected_mean = _qdecimal(gross_total / count)
+    expected_turnover = _qdecimal(turnover)
+    expected_break_even = _qdecimal(gross_total / turnover) if turnover else None
+    actual_total = _report_decimal(view["gross_total"], f"{label}.gross_total")
+    actual_mean = _report_decimal(view["gross_mean"], f"{label}.gross_mean")
+    actual_turnover = _report_decimal(view["turnover"], f"{label}.turnover")
+    actual_break_even = _report_decimal(
+        view["break_even_cost"], f"{label}.break_even_cost", nullable=True
+    )
+    if not (
+        _decimal_matches(actual_total, expected_total)
+        and _decimal_matches(actual_mean, expected_mean)
+        and _decimal_matches(actual_turnover, expected_turnover)
+    ):
+        raise FreezeError(f"renderer {label} economic totals do not reconcile with position trace")
+    if actual_turnover is not None and actual_turnover < 0:
+        raise FreezeError(f"renderer {label}.turnover must be non-negative")
+    if actual_break_even is not None and actual_break_even < 0:
+        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
+    if not _decimal_matches(actual_break_even, expected_break_even):
+        raise FreezeError(
+            f"renderer {label}.break_even_cost does not reconcile with position trace"
+        )
+    sensitivity = _strict_sequence(
+        view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
+    )
+    for index, item in enumerate(sensitivity):
+        entry = _strict_mapping(item, f"{label}.all_in_cost_sensitivity[{index}]")
+        cost = _report_decimal(entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost")
+        net_mean = _report_decimal(
+            entry["net_mean"], f"{label}.all_in_cost_sensitivity[{index}].net_mean", nullable=True
+        )
+        entry_break_even = _report_decimal(
+            entry["break_even_cost"],
+            f"{label}.all_in_cost_sensitivity[{index}].break_even_cost",
+            nullable=True,
+        )
+        assert cost is not None
+        if cost < 0 or (
+            net_mean is not None
+            and not _decimal_matches(
+                net_mean, _qdecimal(gross_total / count - cost * turnover / count)
+            )
+        ):
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}] does not reconcile"
+            )
+        if entry_break_even is not None and entry_break_even < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "must be non-negative"
+            )
+        if not _decimal_matches(entry_break_even, expected_break_even):
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "does not reconcile"
+            )
+
+
 def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
     config_sections = {
         "target_group_resolution": "target_group_resolution",
@@ -1021,9 +1130,14 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
             binding = _strict_role_binding(
                 role_bindings[role], f"retained_parents.role_bindings.{role}"
             )
+            expected_wrappers = identity_bindings.get("wrapper_sha256s", {})
             if (
                 binding["dataset_id"] != expected_datasets[role]
                 or binding["config_id"] != expected_configs[role]
+                or (
+                    role in expected_wrappers
+                    and binding["wrapper_sha256"] != expected_wrappers[role]
+                )
             ):
                 raise FreezeError(
                     f"renderer retained role binding {role} differs from frozen identity"
@@ -1067,20 +1181,11 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     if "stop_reason" in selection:
         _strict_text(selection["stop_reason"], "selection.stop_reason")
     economic = _strict_economic_view(report["economic"], "economic", root=True)
-    expected_assets = frozenset(
-        {
-            "commodity:spot-gold",
-            "commodity:us-crude",
-            "fx:aud-usd",
-            "fx:eur-usd",
-            "index:australia-200",
-            "index:us-500",
-        }
-    )
+    expected_assets = frozenset(config.document["target_group_resolution"]["target_ids"])
     expected_periods = frozenset({"period-0", "period-1", "period-2"})
     for dimension, expected_keys in (
         ("asset", expected_assets),
-        ("horizon", frozenset({"15"})),
+        ("horizon", frozenset({str(config.document["primary_horizon_minutes"])})),
         ("period", expected_periods),
     ):
         groups = _strict_mapping(economic[dimension], f"economic.{dimension}")
@@ -1115,6 +1220,13 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
             raise FreezeError(
                 f"renderer economic.configurations.{label} position trace cardinality mismatch"
             )
+    for view_label, view in [("economic", economic)]:
+        _reconcile_economic_view(view, view_label)
+        for dimension in ("asset", "horizon", "period"):
+            for name, child in view[dimension].items():
+                _reconcile_economic_view(child, f"{view_label}.{dimension}.{name}")
+        for name, child in view["configurations"].items():
+            _reconcile_economic_view(child, f"{view_label}.configurations.{name}")
     statistical = _strict_mapping(
         report["statistical"],
         "statistical",
@@ -1175,6 +1287,8 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         _strict_text(item["evaluation_time"], f"statistical.oof.folds[{index}].evaluation_time")
         for key in ("training_rows", "evaluation_rows", "purged_rows", "embargoed_rows"):
             _strict_integer(item[key], f"statistical.oof.folds[{index}].{key}", minimum=0)
+    if sum(item["evaluation_rows"] for item in folds) != sum(first_fit_mask):
+        raise FreezeError("renderer OOF fold evaluation rows do not reconcile with first-fit mask")
     purge = _strict_mapping(
         oof["purge_embargo"],
         "statistical.oof.purge_embargo",
@@ -1265,6 +1379,49 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     expected_graph_control_ids = frozenset(item["id"] for item in config.document["graph_controls"])
     if graph_control_ids != expected_graph_control_ids:
         raise FreezeError("renderer graph control IDs differ from frozen controls")
+
+    def descriptor_projection(
+        receipt: Mapping[str, Any], expected: Mapping[str, Any], label: str
+    ) -> None:
+        receipt_map = _strict_mapping(receipt, label)
+        expected_keys = frozenset(expected)
+        if not expected_keys.issubset(frozenset(receipt_map)):
+            raise FreezeError(f"{label} is missing frozen descriptor fields")
+        actual = {key: receipt_map[key] for key in expected_keys}
+        if json.dumps(_thaw_value(actual), sort_keys=True, separators=(",", ":")) != json.dumps(
+            _thaw_value(expected), sort_keys=True, separators=(",", ":")
+        ):
+            raise FreezeError(f"renderer {label} differs from frozen descriptor")
+
+    expected_candidates = {item["id"]: item for item in config.document["nonlinear_candidates"]}
+    for item in candidates:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_candidates[item["id"]],
+            f"statistical.candidates.{item['id']}.execution_receipt",
+        )
+    expected_controls = {
+        item["id"]: item
+        for item in config.document["statistical_formulations"]["control_descriptors"]
+    }
+    for item in controls:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_controls[item["id"]],
+            f"statistical.simple_controls.{item['id']}.execution_receipt",
+        )
+    descriptor_projection(
+        tiny["execution_receipt"],
+        config.document["tiny_graph_candidate"],
+        "graph.tiny_learned_graph.execution_receipt",
+    )
+    expected_graph_controls = {item["id"]: item for item in config.document["graph_controls"]}
+    for item in graph_controls:
+        descriptor_projection(
+            item["execution_receipt"],
+            expected_graph_controls[item["id"]],
+            f"graph.controls.{item['id']}.execution_receipt",
+        )
     metric_outputs = [*candidates, *controls, tiny, *graph_controls]
     for metric in metric_outputs:
         if len(metric["prediction_trace"]) != rows:
@@ -1314,6 +1471,23 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         _strict_integer(value, f"work.fit_executions.{key}", minimum=0)
     if sum(fit_executions.values()) != work["fit_count"]:
         raise FreezeError("renderer work.fit_executions does not reconcile fit_count")
+    if work["rows"] != rows or work["rows"] != selection["selected_rows"]:
+        raise FreezeError("renderer work rows do not reconcile with selected/OOF rows")
+    if work["candidate_count"] != len(candidates):
+        raise FreezeError(
+            "renderer work candidate_count does not reconcile with emitted candidates"
+        )
+    limits_document = config.document["compute_limits"]
+    if work["candidate_count"] > limits_document["max_candidates"]:
+        raise FreezeError("renderer candidate count exceeds frozen compute cap")
+    if work["fit_count"] > limits_document["max_fits"]:
+        raise FreezeError("renderer fit count exceeds frozen compute cap")
+    if work["rows"] > limits_document["max_rows"]:
+        raise FreezeError("renderer row count exceeds frozen compute cap")
+    if work["graph_fit_count"] != tiny["fits"]:
+        raise FreezeError("renderer graph fit count does not reconcile with tiny graph fits")
+    if work["graph_control_count"] != len(graph_controls):
+        raise FreezeError("renderer graph control count does not reconcile with controls")
     _strict_bool(work["within_hard_limits"], "work.within_hard_limits")
     limits = _strict_mapping(work["limits"], "work.limits")
     if json.dumps(_thaw_value(limits), sort_keys=True, separators=(",", ":")) != json.dumps(
@@ -1357,6 +1531,12 @@ def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig)
         unknown = sorted(report_keys - _REPORT_TOP_LEVEL_KEYS)
         details = [*(f"missing {key}" for key in missing), *(f"unknown {key}" for key in unknown)]
         raise FreezeError("renderer report schema mismatch: " + ", ".join(details))
+    _strict_text(report["contract"], "contract")
+    _strict_integer(report["schema_version"], "schema_version", minimum=1)
+    _strict_hash(report["config_semantic_identity"], "config_semantic_identity")
+    for key in ("source_class", "price_basis", "evidence_class"):
+        _strict_text(report[key], key)
+    _strict_sequence(report["claims"], "claims")
     if report["contract"] != REPORT_CONTRACT or report["schema_version"] != 1:
         raise FreezeError("renderer received an unsupported report contract")
     if report["config_semantic_identity"] != config.semantic_identity:

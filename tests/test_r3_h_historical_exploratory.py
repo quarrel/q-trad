@@ -796,9 +796,62 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
         lambda report: report["economic"]["configurations"]["linear_ridge"][
             "all_in_cost_sensitivity"
         ][0].__setitem__("cost", -1.0),
+        lambda report: report["economic"]["configurations"]["linear_ridge"].__setitem__(
+            "gross_total",
+            report["economic"]["configurations"]["linear_ridge"]["gross_total"] + 1.0,
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"]["position_trace"][
+            0
+        ].__setitem__(
+            "realised_gross",
+            report["economic"]["configurations"]["linear_ridge"]["position_trace"][0][
+                "realised_gross"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__(
+            "net_mean",
+            report["economic"]["configurations"]["linear_ridge"]["all_in_cost_sensitivity"][0][
+                "net_mean"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["work"].__setitem__("rows", report["work"]["rows"] + 1),
+        lambda report: report["work"]["fit_executions"].__setitem__(
+            "linear_ridge", report["work"]["fit_executions"]["linear_ridge"] + 1
+        ),
+        lambda report: report["statistical"]["oof"]["folds"][0].__setitem__(
+            "evaluation_rows", report["statistical"]["oof"]["folds"][0]["evaluation_rows"] + 1
+        ),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "family", "corrupted-family"
+        ),
+        lambda report: report["graph"]["tiny_learned_graph"]["execution_receipt"].__setitem__(
+            "layers", 99
+        ),
     ]
     for mutate in mutations:
         malformed = json.loads(result.canonical_json())
         mutate(malformed)
         with pytest.raises(FreezeError, match="renderer"):
             render_markdown(MicroRun(malformed, result.work_count), config)
+
+
+def test_renderer_rejects_frozen_role_wrapper_mutation() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    report = json.loads(result.canonical_json())
+    bindings = config.document["retained_loader"]["identity_bindings"]
+    report["retained_parents"]["role_bindings"] = {
+        role: {
+            "dataset_id": bindings["dataset_ids"][role],
+            "config_id": bindings["config_ids"][role],
+            "wrapper_sha256": bindings.get("wrapper_sha256s", {}).get(role, "f" * 64),
+        }
+        for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+    }
+    report["retained_parents"]["role_bindings"]["POOLED_LOCAL_RIDGE"]["wrapper_sha256"] = "0" * 64
+    with pytest.raises(FreezeError, match="renderer"):
+        render_markdown(MicroRun(report, result.work_count), config)
