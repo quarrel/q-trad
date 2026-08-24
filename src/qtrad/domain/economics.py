@@ -20,6 +20,7 @@ from qtrad.domain.time import require_utc
 
 ECONOMICS_CONTRACT: Final = "qtrad-r3-economics-v1"
 SOLVER_POLICY_CONTRACT: Final = "qtrad-r3-solver-policy-v1"
+COST_ADJUSTED_RETURN_UNIT: Final = "REPORTING_RETURN"
 
 
 class InputStatus(StrEnum):
@@ -79,7 +80,7 @@ class CostSchedule:
     currency: str | None
     per_quantity: Decimal | None
     minimum: Decimal | None
-    basis: str
+    basis: CostBasis
     version: str
     provenance: str
     reason: str | None = None
@@ -87,7 +88,11 @@ class CostSchedule:
     def __post_init__(self) -> None:
         if self.currency is not None:
             _require_currency(self.currency, "cost schedule currency")
-        if not self.basis or not self.version or not self.provenance:
+        if (
+            type(self.basis) is not CostBasis
+            or not self.version
+            or not self.provenance
+        ):
             raise ValueError("cost schedule basis, version and provenance are required")
         if self.status in {InputStatus.MISSING, InputStatus.UNSUPPORTED}:
             if self.per_quantity is not None or self.minimum is not None:
@@ -111,7 +116,7 @@ class CostSchedule:
         currency: str,
         per_quantity: Decimal,
         minimum: Decimal,
-        basis: str,
+        basis: CostBasis,
         version: str,
         provenance: str,
     ) -> CostSchedule:
@@ -130,7 +135,7 @@ class CostSchedule:
         cls,
         *,
         currency: str,
-        basis: str,
+        basis: CostBasis,
         version: str,
         provenance: str,
     ) -> CostSchedule:
@@ -148,7 +153,7 @@ class CostSchedule:
     def missing(
         cls,
         *,
-        basis: str,
+        basis: CostBasis,
         version: str,
         provenance: str,
         reason: str,
@@ -160,7 +165,7 @@ class CostSchedule:
     def unsupported(
         cls,
         *,
-        basis: str,
+        basis: CostBasis,
         version: str,
         provenance: str,
         reason: str,
@@ -305,6 +310,17 @@ class FXRate:
             and self.observed_at <= at <= self.observed_at + self.max_age
         )
 
+    def covers(self, from_currency: str, to_currency: str, *, at: datetime) -> bool:
+        """Return whether this causal rate covers a current direct conversion."""
+        _require_currency(from_currency, "FX from currency")
+        _require_currency(to_currency, "FX to currency")
+        if from_currency == to_currency:
+            return True
+        return self.is_current(at) and (
+            (self.base_currency == from_currency and self.quote_currency == to_currency)
+            or (self.base_currency == to_currency and self.quote_currency == from_currency)
+        )
+
     def factor_to(self, currency: str, *, at: datetime) -> Decimal | None:
         """Return a direct factor from `base_currency` into `currency`."""
 
@@ -376,9 +392,11 @@ class ProductEconomics:
     session_version: str
     effective_from: datetime
     observed_at: datetime
+    economics_max_age: timedelta
     version: str
     provenance: str
-    fx_to_reporting: FXRate | None
+    fx_price_to_settlement: FXRate | None
+    fx_settlement_to_reporting: FXRate | None
     impact_version: str | None = None
     impact_max_quantity: Decimal | None = None
     impact_reason: str | None = None
@@ -407,6 +425,12 @@ class ProductEconomics:
         require_utc(self.observed_at, "economics observed_at")
         if self.observed_at < self.effective_from:
             raise ValueError("economics observation cannot precede effective_from")
+        if self.economics_max_age <= timedelta(0):
+            raise ValueError("economics max age must be positive")
+        if self.commission.basis is not CostBasis.PHYSICAL_DELTA:
+            raise ValueError("commission must bind the physical delta")
+        if self.financing.basis is not CostBasis.PHYSICAL_HOLDING:
+            raise ValueError("financing must bind the physical holding")
         if (self.minimum_quantity / self.quantity_increment) % 1 != 0:
             raise ValueError("minimum quantity must be a quantity-increment multiple")
         if self.impact_disposition is ImpactDisposition.SUPPORTED_MODEL and not self.impact_version:
@@ -423,11 +447,31 @@ class ProductEconomics:
             raise ValueError("unsupported impact requires a reason")
         if self.impact_max_quantity is not None:
             _require_positive(self.impact_max_quantity, "impact maximum quantity")
-        if self.fx_to_reporting is not None and (
-            self.fx_to_reporting.quote_currency != self.reporting_currency
-            and self.fx_to_reporting.base_currency != self.reporting_currency
+        for source, target, fx, label in (
+            (
+                self.price_currency,
+                self.settlement_currency,
+                self.fx_price_to_settlement,
+                "price FX",
+            ),
+            (
+                self.settlement_currency,
+                self.reporting_currency,
+                self.fx_settlement_to_reporting,
+                "settlement FX",
+            ),
         ):
-            raise ValueError("FX path must terminate in reporting currency")
+            if fx is None:
+                continue
+            if source == target:
+                if (
+                    fx.base_currency != source
+                    or fx.quote_currency != target
+                    or fx.rate != Decimal("1")
+                ):
+                    raise ValueError(f"{label} must be an identity conversion")
+            elif {fx.base_currency, fx.quote_currency} != {source, target}:
+                raise ValueError(f"{label} does not cover the required currency pair")
 
     def eligibility(
         self,
@@ -443,17 +487,36 @@ class ProductEconomics:
         reasons: list[str] = []
         if decision_time < self.effective_from:
             reasons.append("ECONOMICS_NOT_EFFECTIVE")
+        if decision_time < self.observed_at:
+            reasons.append("ECONOMICS_OBSERVED_IN_FUTURE")
+        elif decision_time > self.observed_at + self.economics_max_age:
+            reasons.append("ECONOMICS_OBSERVATION_STALE")
         if self.session_state is not SessionState.ELIGIBLE:
             reasons.append("SESSION_NOT_ELIGIBLE")
         if not self.commission.is_available:
             reasons.append(f"COMMISSION_{self.commission.status.value}")
         if not self.financing.is_available:
             reasons.append(f"FINANCING_{self.financing.status.value}")
-        if self.price_currency != self.reporting_currency:
-            if self.fx_to_reporting is None:
-                reasons.append("FX_MISSING")
-            elif not self.fx_to_reporting.is_current(decision_time):
-                reasons.append("FX_UNAVAILABLE_OR_STALE")
+        for source, target, fx, label in (
+            (
+                self.price_currency,
+                self.settlement_currency,
+                self.fx_price_to_settlement,
+                "PRICE_FX",
+            ),
+            (
+                self.settlement_currency,
+                self.reporting_currency,
+                self.fx_settlement_to_reporting,
+                "SETTLEMENT_FX",
+            ),
+        ):
+            if source == target:
+                continue
+            if fx is None:
+                reasons.append(f"{label}_MISSING")
+            elif not fx.covers(source, target, at=decision_time):
+                reasons.append(f"{label}_UNAVAILABLE_OR_STALE")
         if self.impact_disposition is ImpactDisposition.UNSUPPORTED_BLOCKING:
             reasons.append("IMPACT_UNSUPPORTED")
         elif self.impact_disposition is ImpactDisposition.CAPPED_NO_IMPACT_RANGE:
@@ -493,6 +556,9 @@ class ComponentCost:
     version: str
     provenance: str
     reason: str | None = None
+    conversion_rate: Decimal | None = None
+    conversion_source: str | None = None
+    conversion_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.reporting_currency or not self.version or not self.provenance:
@@ -511,13 +577,40 @@ class ComponentCost:
         if self.quantity_basis is not None:
             _require_nonnegative(self.quantity_basis, "component quantity basis")
         if self.status in {InputStatus.MISSING, InputStatus.UNSUPPORTED}:
-            if self.native_amount is not None or self.reporting_amount is not None:
+            if self.native_amount is not None or self.native_currency is not None:
+                raise ValueError("missing or unsupported component cannot carry native money")
+            if self.reporting_amount is not None:
                 raise ValueError("missing or unsupported component cannot carry an amount")
+            if (
+                self.conversion_rate is not None
+                or self.conversion_source
+                or self.conversion_version
+            ):
+                raise ValueError(
+                    "missing or unsupported component cannot carry conversion evidence"
+                )
             if not self.reason:
                 raise ValueError("missing or unsupported component requires a reason")
         else:
-            if self.native_amount is None or self.reporting_amount is None:
-                raise ValueError("available component requires native and reporting amounts")
+            if (
+                self.native_amount is None
+                or self.native_currency is None
+                or self.reporting_amount is None
+                or self.conversion_rate is None
+                or not self.conversion_source
+                or not self.conversion_version
+            ):
+                raise ValueError(
+                    "available component requires conversion-bound native and reporting amounts"
+                )
+            _require_positive(self.conversion_rate, "component conversion rate")
+            if (
+                self.native_currency == self.reporting_currency
+                and self.conversion_rate != Decimal("1")
+            ):
+                raise ValueError("identity component conversion rate must equal one")
+            if self.native_amount * self.conversion_rate != self.reporting_amount:
+                raise ValueError("component conversion evidence does not reconcile amounts")
             if self.status is InputStatus.DOCUMENTED_ZERO and (
                 self.native_amount != Decimal("0") or self.reporting_amount != Decimal("0")
             ):
@@ -551,6 +644,9 @@ class ComponentCost:
         reporting_currency: str,
         version: str,
         provenance: str,
+        conversion_rate: Decimal,
+        conversion_source: str,
+        conversion_version: str,
         quantity_basis: Decimal | None = None,
         holding_interval: timedelta | None = None,
     ) -> ComponentCost:
@@ -566,6 +662,9 @@ class ComponentCost:
             holding_interval,
             version,
             provenance,
+            conversion_rate=conversion_rate,
+            conversion_source=conversion_source,
+            conversion_version=conversion_version,
         )
 
     @classmethod
@@ -578,6 +677,9 @@ class ComponentCost:
         reporting_currency: str,
         version: str,
         provenance: str,
+        conversion_rate: Decimal,
+        conversion_source: str,
+        conversion_version: str,
         quantity_basis: Decimal | None = None,
         holding_interval: timedelta | None = None,
     ) -> ComponentCost:
@@ -593,6 +695,9 @@ class ComponentCost:
             holding_interval,
             version,
             provenance,
+            conversion_rate=conversion_rate,
+            conversion_source=conversion_source,
+            conversion_version=conversion_version,
         )
 
     @classmethod
@@ -761,6 +866,7 @@ class ExpectedNet:
     gross_forecast: GrossForecast
     gross_contribution: Decimal
     physical_notional: Decimal
+    physical_notional_currency: str
     expected_cost: ExpectedCostState
     expected_net_contribution: Decimal
     expected_net_return: Decimal
@@ -768,6 +874,11 @@ class ExpectedNet:
     def __post_init__(self) -> None:
         _require_finite(self.gross_contribution, "gross contribution")
         _require_positive(self.physical_notional, "physical notional")
+        _require_currency(self.physical_notional_currency, "physical notional currency")
+        if self.gross_forecast.return_unit != COST_ADJUSTED_RETURN_UNIT:
+            raise ValueError("gross forecast return unit must be reporting-return compatible")
+        if self.expected_cost.reporting_currency != self.physical_notional_currency:
+            raise ValueError("physical notional and expected cost currencies must match")
         expected_cost = self.expected_cost.expected_total_reporting
         if expected_cost is None:
             raise ValueError("cannot derive expected net from incomplete costs")
@@ -786,6 +897,7 @@ class ExpectedNet:
         gross_forecast: GrossForecast,
         gross_contribution: Decimal,
         physical_notional: Decimal,
+        physical_notional_currency: str,
         expected_cost: ExpectedCostState,
     ) -> ExpectedNet:
         total = expected_cost.require_total_reporting()
@@ -793,6 +905,7 @@ class ExpectedNet:
             gross_forecast,
             gross_contribution,
             physical_notional,
+            physical_notional_currency,
             expected_cost,
             gross_contribution - total,
             gross_forecast.expected_return - total / physical_notional,
@@ -893,6 +1006,7 @@ def derive_expected_net(
     gross_forecast: GrossForecast,
     gross_contribution: Decimal,
     physical_notional: Decimal,
+    physical_notional_currency: str,
     expected_cost: ExpectedCostState,
 ) -> ExpectedNet:
     """Recompute expected net fields from gross forecast and complete costs."""
@@ -901,6 +1015,7 @@ def derive_expected_net(
         gross_forecast=gross_forecast,
         gross_contribution=gross_contribution,
         physical_notional=physical_notional,
+        physical_notional_currency=physical_notional_currency,
         expected_cost=expected_cost,
     )
 

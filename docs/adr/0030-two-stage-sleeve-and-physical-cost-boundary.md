@@ -53,10 +53,10 @@ within its reviewed range.
 Product economics binds canonical asset and exact source/product identity, currencies,
 contract/value-per-price-unit, minimum and increment quantities, tick size/value,
 commission and financing schedules, impact disposition, session profile/version,
-effective/observed times, economics version and provenance.  FX binds a causal observed
-rate, health, max-age, source and version.  All times are timezone-aware UTC and all
-prices,
-quantities, conversion rates and money use `Decimal`.
+effective/observed times, validity max-age, economics version and provenance.  Each
+required price-to-settlement and settlement-to-reporting FX conversion binds a causal
+observed rate, health, max-age, source and version.  All times are timezone-aware UTC;
+prices, quantities, conversion rates and money use `Decimal`.
 
 ## SolverPolicy
 
@@ -73,10 +73,12 @@ R3.A freezes `DEFAULT_SOLVER_POLICY` for the first 15-minute convex slice:
 | Tolerances | absolute/relative `1e-8`; max 1000 iterations |
 | Variable order | canonical tuple beginning with `physical_target` |
 
-The decision was reproduced on Python 3.13 with `uvx --from cvxpy==1.7.3`:
-a two-variable quadratic objective with hard box constraints returned `optimal`
-using CLARABEL with warm-start disabled.  The command resolved Python-3.13
-wheels and reported CVXPY's Apache-2.0 licence and CLARABEL's Apache-2.0 licence.
+The decision was reproduced on Python 3.13 with `uvx --from cvxpy==1.7.3` using
+CLARABEL 0.11.1 and `warm_start=False`.  The deterministic form had three
+`physical_target` variables, quadratic covariance risk, convex L1 turnover cost,
+hard per-asset, group, currency, gross, net and quadratic risk-cap constraints;
+it returned `status=optimal`, objective `0.0126693550`, 8 iterations and maximum
+constraint residual `7.392e-15`.  CVXPY and CLARABEL reported Apache-2.0 licences.
 The dependency is intentionally not added to `pyproject.toml` in R3.A; R3.C owns
 the first runtime dependency change.
 
@@ -86,7 +88,8 @@ Identity-bearing fields remain separate:
 
 - **Semantic:** contract/version, canonical asset/source/product identity,
   currencies, schedules, impact and session policies, Decimal economics values,
-  FX policy/rate state, cost component values, solver policy and tolerances.
+  FX conversion chain and rate state, cost component values and conversion evidence,
+  gross return unit, solver policy and tolerances.
 - **Closure/physical:** canonical asset/sleeve order, physical quantities/deltas,
   component ordering, exact Decimal serialisation and any declared child bytes.
 - **Provenance:** source/product observation references, effective/observed times,

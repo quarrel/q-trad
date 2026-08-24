@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from qtrad.domain.economics import (
+    COST_ADJUSTED_RETURN_UNIT,
     DEFAULT_SOLVER_POLICY,
     ComponentCost,
     CostBasis,
@@ -48,20 +49,28 @@ def _economics(
         tick_value=Decimal("0.01"),
         commission=commission
         or CostSchedule.documented_zero(
-            currency="AUD", basis="physical-delta", version="commission-v1", provenance="fixture"
+            currency="AUD",
+            basis=CostBasis.PHYSICAL_DELTA,
+            version="commission-v1",
+            provenance="fixture"
         ),
         financing=financing
         or CostSchedule.documented_zero(
-            currency="AUD", basis="physical-holding", version="financing-v1", provenance="fixture"
+            currency="AUD",
+            basis=CostBasis.PHYSICAL_HOLDING,
+            version="financing-v1",
+            provenance="fixture"
         ),
         impact_disposition=impact,
         session_state=SessionState.ELIGIBLE,
         session_version="session-v1",
         effective_from=NOW - timedelta(hours=1),
         observed_at=NOW - timedelta(minutes=1),
+        economics_max_age=timedelta(hours=1),
         version="economics-v1",
         provenance="fixture",
-        fx_to_reporting=fx,
+        fx_price_to_settlement=fx,
+        fx_settlement_to_reporting=None,
         impact_version=impact_version,
         impact_max_quantity=impact_max_quantity,
         impact_reason=impact_reason,
@@ -91,6 +100,9 @@ def _cost_state(
                         native_currency="AUD",
                         reporting_amount=Decimal("1"),
                         reporting_currency="AUD",
+                        conversion_rate=Decimal("1"),
+                        conversion_source="fixture-fx",
+                        conversion_version="fx-v1",
                         holding_interval=timedelta(minutes=15),
                         version="component-v1",
                         provenance="fixture",
@@ -117,6 +129,9 @@ def _cost_state(
                     native_currency="AUD",
                     reporting_amount=Decimal("1"),
                     reporting_currency="AUD",
+                    conversion_rate=Decimal("1"),
+                    conversion_source="fixture-fx",
+                    conversion_version="fx-v1",
                     quantity_basis=delta,
                     version="component-v1",
                     provenance="fixture",
@@ -149,7 +164,7 @@ def _cost_state(
 def test_product_economics_is_fail_closed_for_missing_inputs() -> None:
     economics = _economics(
         commission=CostSchedule.missing(
-            basis="physical-delta",
+            basis=CostBasis.PHYSICAL_DELTA,
             version="commission-v1",
             provenance="fixture",
             reason="no schedule",
@@ -180,8 +195,8 @@ def test_fx_requires_health_and_staleness() -> None:
         "fixture",
         "fx-v1",
     )
-    economics = replace(_economics(), price_currency="USD", fx_to_reporting=fx)
-    assert "FX_UNAVAILABLE_OR_STALE" in economics.eligibility(decision_time=NOW).reasons
+    economics = replace(_economics(), price_currency="USD", fx_price_to_settlement=fx)
+    assert "PRICE_FX_UNAVAILABLE_OR_STALE" in economics.eligibility(decision_time=NOW).reasons
 
 
 def test_cost_state_binds_one_physical_delta_and_financing_interval() -> None:
@@ -195,10 +210,11 @@ def test_expected_net_recomputes_from_gross_and_cost() -> None:
     state = _cost_state()
     net = derive_expected_net(
         gross_forecast=GrossForecast(
-            Decimal("0.05"), timedelta(minutes=15), "LOG_RETURN", "model-v1"
+            Decimal("0.05"), timedelta(minutes=15), COST_ADJUSTED_RETURN_UNIT, "model-v1"
         ),
         gross_contribution=Decimal("10"),
         physical_notional=Decimal("100"),
+        physical_notional_currency="AUD",
         expected_cost=state,
     )
     assert net.expected_net_contribution == Decimal("4")
@@ -211,10 +227,11 @@ def test_incomplete_cost_cannot_be_silently_zero() -> None:
     with pytest.raises(ValueError, match="incomplete"):
         derive_expected_net(
             gross_forecast=GrossForecast(
-                Decimal("0.05"), timedelta(minutes=15), "LOG_RETURN", "model-v1"
+                Decimal("0.05"), timedelta(minutes=15), COST_ADJUSTED_RETURN_UNIT, "model-v1"
             ),
             gross_contribution=Decimal("10"),
             physical_notional=Decimal("100"),
+            physical_notional_currency="AUD",
             expected_cost=_cost_state(complete=False),
         )
 
@@ -252,6 +269,9 @@ def test_expected_cost_rejects_internal_cross_component() -> None:
         native_currency="AUD",
         reporting_amount=Decimal("0"),
         reporting_currency="AUD",
+        conversion_rate=Decimal("1"),
+        conversion_source="fixture-fx",
+        conversion_version="fx-v1",
         version="component-v1",
         provenance="fixture",
     )
@@ -264,5 +284,52 @@ def test_expected_cost_rejects_internal_cross_component() -> None:
             components=tuple(components),
             reporting_currency="AUD",
             version="cost-v1",
+            provenance="fixture",
+        )
+
+
+def test_product_economics_requires_each_currency_conversion() -> None:
+    economics = replace(_economics(), price_currency="USD")
+    assert "PRICE_FX_MISSING" in economics.eligibility(decision_time=NOW).reasons
+
+
+def test_product_economics_rejects_future_observation() -> None:
+    economics = replace(
+        _economics(),
+        observed_at=NOW + timedelta(minutes=1),
+        economics_max_age=timedelta(hours=1),
+    )
+    assert "ECONOMICS_OBSERVED_IN_FUTURE" in economics.eligibility(
+        decision_time=NOW
+    ).reasons
+
+
+def test_expected_net_rejects_non_reporting_return_unit() -> None:
+    with pytest.raises(ValueError, match="reporting-return"):
+        derive_expected_net(
+            gross_forecast=GrossForecast(
+                Decimal("0.05"), timedelta(minutes=15), "LOG_RETURN", "model-v1"
+            ),
+            gross_contribution=Decimal("10"),
+            physical_notional=Decimal("100"),
+            physical_notional_currency="AUD",
+            expected_cost=_cost_state(),
+        )
+
+
+def test_component_cost_requires_reconciling_conversion_evidence() -> None:
+    with pytest.raises(ValueError, match="does not reconcile"):
+        ComponentCost.supported(
+            component=CostComponentKind.SPREAD,
+            basis=CostBasis.PHYSICAL_DELTA,
+            native_amount=Decimal("1"),
+            native_currency="USD",
+            reporting_amount=Decimal("2"),
+            reporting_currency="AUD",
+            conversion_rate=Decimal("1"),
+            conversion_source="fixture-fx",
+            conversion_version="fx-v1",
+            quantity_basis=Decimal("2"),
+            version="component-v1",
             provenance="fixture",
         )
