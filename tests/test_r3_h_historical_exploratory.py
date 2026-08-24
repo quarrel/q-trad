@@ -500,10 +500,15 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert len(rows) == 18
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
-    assert metadata["selection"]["stop_state"] == "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
+    assert all(state == "EXHAUSTED_AT_BOUND" for state in metadata["unopened_parts"].values())
+    assert metadata["stop_reason"] == "EARLIEST_COMPLETE_GROUP_BOUND"
+    assert metadata["consumed_parts_count"] == 4
+    assert all(len(hashes) == 1 for hashes in metadata["source_scan_part_hashes"].values())
     assert metadata["selected_rows"] == 18
     assert metadata["consumed_rows"] > metadata["selected_rows"]
     assert metadata["selected_bytes"] < metadata["consumed_bytes"]
+    assert metadata["selected_bytes_kind"] == "logical_serialised_fixture_row_bytes"
     assert len(metadata["source_scan_wrapper_bytes"]) == 6
 
 
@@ -591,7 +596,7 @@ def test_retained_forecast_roles_are_explicit_and_not_reversed() -> None:
     )
 
 
-def test_selector_skips_early_incomplete_group_but_requires_complete_count() -> None:
+def test_selector_rejects_early_incomplete_group_and_requires_complete_count() -> None:
     from qtrad.application.r3_historical_exploratory import select_synchronised_rows
 
     config = FreezeConfig.from_path(CONFIG)

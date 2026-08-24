@@ -1368,53 +1368,118 @@ def load_retained_rows(
     max_rows = int(decoder_limits["max_selected_rows"])
     target_ids = cast(Sequence[str], policy["required_target_ids"])
     max_groups = max(1, max_rows // max(1, len(target_ids)))
+    required_groups = int(policy["n_complete_decision_groups"])
     groups: dict[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]] = {}
     seen_by_child: dict[str, set[tuple[Any, ...]]] = {name: set() for name in child_names[2:]}
     started = time.monotonic()
-    for name in child_names[2:]:
-        for descriptor, part_rows, part_size in opened[name][1]:
-            consumed_part_receipts[name].append(descriptor)
-            source_parts += 1
-            source_bytes += part_size
-            source_rows += len(part_rows)
-            if source_rows > int(streaming["max_source_rows"]):
-                raise FreezeError("retained aggregate row bound exceeded")
-            if source_bytes > int(streaming["max_source_bytes"]):
-                raise FreezeError("retained aggregate byte bound exceeded")
-            if time.monotonic() - started > float(streaming.get("max_elapsed_seconds", 1e12)):
-                raise FreezeError("retained aggregate elapsed-time bound exceeded")
-            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 > float(
-                config.document["compute_limits"]["max_memory_mb"]
-            ):
-                raise FreezeError("retained aggregate memory bound exceeded")
-            for record in part_rows:
-                key = _canonical_join_key(record, mappings)
-                if key in seen_by_child[name]:
-                    raise FreezeError(f"duplicate canonical identity in {name}")
-                seen_by_child[name].add(key)
-                decision_time = str(record[mappings["decision_time"]])
-                group = groups.get(decision_time)
-                if group is None:
-                    if len(groups) >= max_groups:
-                        raise FreezeError(
-                            "bounded join selector exhausted before proving complete groups"
-                        )
-                    group = {}
-                    groups[decision_time] = group
-                children = group.setdefault(key, {})
-                if name in children:
-                    raise FreezeError(f"duplicate canonical identity in {name}")
-                children[name] = record
-    complete: list[tuple[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]]] = []
-    for decision_time, group in sorted(groups.items()):
-        if len(group) != len(target_ids) or any(
-            set(children) != set(child_names[2:]) for children in group.values()
+    data_names = tuple(child_names[2:])
+    part_iterators = {name: iter(opened[name][1]) for name in data_names}
+
+    def consume_part(
+        name: str,
+        descriptor: Mapping[str, Any],
+        part_rows: Sequence[Mapping[str, Any]],
+        part_size: int,
+    ) -> None:
+        nonlocal source_parts, source_bytes, source_rows
+        consumed_part_receipts[name].append(dict(descriptor))
+        source_parts += 1
+        source_bytes += part_size
+        source_rows += len(part_rows)
+        if source_rows > int(streaming["max_source_rows"]):
+            raise FreezeError("retained aggregate row bound exceeded")
+        if source_bytes > int(streaming["max_source_bytes"]):
+            raise FreezeError("retained aggregate byte bound exceeded")
+        if time.monotonic() - started > float(streaming.get("max_elapsed_seconds", 1e12)):
+            raise FreezeError("retained aggregate elapsed-time bound exceeded")
+        if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 > float(
+            config.document["compute_limits"]["max_memory_mb"]
         ):
-            if bool(policy["reject_incomplete"]):
-                raise FreezeError(f"incomplete canonical retained decision group: {decision_time}")
-            continue
-        complete.append((decision_time, group))
-    required_groups = int(policy["n_complete_decision_groups"])
+            raise FreezeError("retained aggregate memory bound exceeded")
+        for record in part_rows:
+            key = _canonical_join_key(record, mappings)
+            if key in seen_by_child[name]:
+                raise FreezeError(f"duplicate canonical identity in {name}")
+            seen_by_child[name].add(key)
+            decision_time = str(record[mappings["decision_time"]])
+            group = groups.get(decision_time)
+            if group is None:
+                if len(groups) >= max_groups:
+                    raise FreezeError(
+                        "bounded join selector exhausted before proving complete groups"
+                    )
+                group = {}
+                groups[decision_time] = group
+            children = group.setdefault(key, {})
+            if name in children:
+                raise FreezeError(f"duplicate canonical identity in {name}")
+            children[name] = record
+
+    def complete_groups() -> tuple[
+        list[tuple[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]]],
+        list[str],
+    ]:
+        complete: list[tuple[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]]] = []
+        incomplete: list[str] = []
+        for decision_time, group in sorted(groups.items()):
+            if len(group) != len(target_ids) or any(
+                set(children) != set(data_names) for children in group.values()
+            ):
+                incomplete.append(decision_time)
+                continue
+            complete.append((decision_time, group))
+        return complete, incomplete
+
+    stop_state = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    stop_reason = "FULL_SCAN_REQUIRED_NO_ORDER_PROOF"
+    unopened_parts = {name: "EXHAUSTED" for name in data_names}
+    declared_part_counts = {
+        name: len(cast(Sequence[Any], opened[name][0].get("parts", []))) for name in data_names
+    }
+    while True:
+        part_set: dict[str, tuple[dict[str, Any], list[Mapping[str, Any]], int]] = {}
+        exhausted_this_set = 0
+        for name in data_names:
+            try:
+                part_set[name] = next(part_iterators[name])
+            except StopIteration:
+                exhausted_this_set += 1
+                unopened_parts[name] = "EXHAUSTED"
+        if not part_set:
+            break
+        for name in data_names:
+            if name in part_set:
+                descriptor, part_rows, part_size = part_set[name]
+                consume_part(name, descriptor, part_rows, part_size)
+        complete, incomplete = complete_groups()
+        if incomplete and bool(policy["reject_incomplete"]):
+            raise FreezeError(
+                "incomplete canonical retained decision group in scanned part prefix: "
+                + incomplete[0]
+            )
+        if (
+            len(part_set) == len(data_names)
+            and len(complete) >= required_groups
+            and bool(streaming.get("stop_after_selected_groups", False))
+        ):
+            stop_state = "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
+            stop_reason = "EARLIEST_COMPLETE_GROUP_BOUND"
+            for name in data_names:
+                consumed_count = len(consumed_part_receipts[name])
+                unopened_parts[name] = (
+                    "NOT_SCANNED_AFTER_BOUND"
+                    if consumed_count < declared_part_counts[name]
+                    else "EXHAUSTED_AT_BOUND"
+                )
+            break
+        if exhausted_this_set == len(data_names):
+            break
+
+    complete, incomplete = complete_groups()
+    if incomplete and bool(policy["reject_incomplete"]):
+        raise FreezeError(
+            "incomplete canonical retained decision group in scanned prefix: " + incomplete[0]
+        )
     if len(complete) < required_groups:
         raise FreezeError("bounded join selector could not prove required complete groups")
     rows: list[FixtureRow] = []
@@ -1439,8 +1504,8 @@ def load_retained_rows(
                 )
             )
     selected, selection_meta = select_synchronised_rows(rows, config)
-    selection_meta["stop_state"] = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
-    data_names = tuple(child_names[2:])
+    selection_meta["stop_state"] = stop_state
+    selection_meta["stop_reason"] = stop_reason
     all_parts = [part for name in data_names for part in consumed_part_receipts[name]]
     scanned_hashes = [str(part["sha256"]) for part in all_parts]
     wrapper_bytes = {name: opened[name][2] for name in child_names}
@@ -1491,13 +1556,15 @@ def load_retained_rows(
         "consumed_parts_count": source_parts,
         "selected_rows": len(selected),
         "selected_bytes": selected_row_bytes,
+        "selected_bytes_kind": "logical_serialised_fixture_row_bytes",
         "selected_groups": required_groups,
         "selected_raw_part_provenance": "not individually attributable after bounded join",
         "role_bindings": role_bindings,
         "_role_predictions": role_predictions,
         "scanned_part_hashes": scanned_hashes,
-        "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
-        "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+        "stop_state": stop_state,
+        "stop_reason": stop_reason,
+        "unopened_parts": unopened_parts,
         "outcome_decode_performed": not _fixture,
     }
 
