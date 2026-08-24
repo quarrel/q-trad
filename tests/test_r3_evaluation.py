@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from qtrad.application.r3_evaluation import build_fixture_inputs, run_fixture
+from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
     EvaluationDisposition,
     OutcomeClosure,
@@ -150,3 +151,41 @@ def test_decision_requires_target_receipt_and_full_sleeve_keys():
     keyless = replace(decision.attributions[0], key=None)
     with pytest.raises(ValueError, match="full sleeve keys"):
         replace(decision, attributions=(keyless, *decision.attributions[1:]))
+
+
+def test_decision_requires_aud_reporting_currency():
+    decision, _ = build_fixture_inputs()
+    with pytest.raises(ValueError, match="must be AUD"):
+        replace(decision, reporting_currency="USD")
+
+
+@pytest.mark.parametrize("price_basis", (PriceBasis.BID, PriceBasis.ASK))
+def test_non_mid_quote_evidence_is_unavailable(price_basis):
+    decision, quotes = build_fixture_inputs()
+    candidates = tuple(replace(quote, price_basis=price_basis) for quote in quotes)
+    report = evaluate_independently(decision, candidates, latency=timedelta(seconds=1))
+    asset = report.assets[0]
+    assert asset.disposition is EvaluationDisposition.UNAVAILABLE
+    assert "UNSUPPORTED_PRICE_BASIS" in asset.reason_codes
+    assert asset.realised is None
+    outcomes = build_outcome_closures(decision, candidates, latency=timedelta(seconds=1))
+    assert outcomes[0].disposition is EvaluationDisposition.UNAVAILABLE
+    assert "UNSUPPORTED_PRICE_BASIS" in outcomes[0].reason_codes
+
+
+def test_outcome_rejects_non_mid_quote():
+    decision, quotes = build_fixture_inputs()
+    reference, entry, exit_quote = quotes
+    with pytest.raises(ValueError, match="MID"):
+        OutcomeClosure(
+            asset_id="ASSET_A",
+            decision_time=decision.decision_time,
+            target_time=decision.expiry_time,
+            latency=timedelta(seconds=1),
+            entry=replace(entry, price_basis=PriceBasis.ASK),
+            exit=exit_quote,
+            disposition=EvaluationDisposition.ACCEPTED,
+            physical_delta=decision.physical_delta[0],
+            decision_reference=reference,
+            reference_to_entry_latency=entry.received_time - reference.received_time,
+        )

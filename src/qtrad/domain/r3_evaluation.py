@@ -56,6 +56,7 @@ class EvaluationReasonCode(StrEnum):
     POSITION_RESIDUAL = "POSITION_RESIDUAL"
     COST_RESIDUAL = "COST_RESIDUAL"
     MISSING_DECISION_REFERENCE = "MISSING_DECISION_REFERENCE"
+    UNSUPPORTED_PRICE_BASIS = "UNSUPPORTED_PRICE_BASIS"
 
 
 def _canonical(value: object) -> object:
@@ -230,8 +231,8 @@ class DecisionClosure:
         require_utc(self.expiry_time, "expiry time")
         if self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
             raise ValueError("decision interval is invalid")
-        if not self.reporting_currency:
-            raise ValueError("decision reporting currency is required")
+        if self.reporting_currency != "AUD":
+            raise ValueError("decision reporting currency must be AUD")
         _digest(self.decision_input_identity, "decision input identity")
         _digest(self.parent_verification_identity, "parent verification identity")
         if self.rounded_target is None:
@@ -473,9 +474,16 @@ class OutcomeClosure:
         if type(self.disposition) is not EvaluationDisposition:
             raise ValueError("outcome disposition must be a declared enum")
         reference = self.decision_reference
+        if any(
+            quote is not None and quote.price_basis is not PriceBasis.MID
+            for quote in (self.entry, self.exit)
+        ):
+            raise ValueError("outcome quote requires MID price basis")
         if reference is not None:
             if reference.asset_id != self.asset_id:
                 raise ValueError("decision reference asset mismatch")
+            if reference.price_basis is not PriceBasis.MID:
+                raise ValueError("decision reference quote requires MID price basis")
             if (
                 reference.received_time > self.decision_time
                 or not reference.healthy
@@ -1278,6 +1286,8 @@ def _select_quote(
     if not candidates:
         return None, (EvaluationReasonCode.MISSING_QUOTE.value,)
     for quote in candidates:
+        if quote.price_basis is not PriceBasis.MID:
+            continue
         if quote.source_class is not source_class or quote.evidence_purpose is not evidence_purpose:
             continue
         if not quote.healthy or not quote.session_open or not quote.complete:
@@ -1298,6 +1308,8 @@ def _select_quote(
         for item in candidates
         if item.source_class is source_class and item.evidence_purpose is evidence_purpose
     )
+    if any(item.price_basis is not PriceBasis.MID for item in matching):
+        reasons.append(EvaluationReasonCode.UNSUPPORTED_PRICE_BASIS.value)
     if any(not item.healthy for item in matching):
         reasons.append(EvaluationReasonCode.STALE_QUOTE.value)
     if any(not item.session_open for item in matching):
@@ -1321,6 +1333,7 @@ def _decision_reference_quote(
             and quote.received_time <= decision.decision_time
             and quote.source_class is decision.source_class
             and quote.evidence_purpose is decision.evidence_purpose
+            and quote.price_basis is PriceBasis.MID
             and quote.healthy
             and quote.session_open
             and quote.complete
@@ -1329,6 +1342,25 @@ def _decision_reference_quote(
         reverse=True,
     )
     return candidates[0] if candidates else None
+
+
+def _decision_reference_reasons(
+    quotes: Sequence[QuoteEvidence],
+    *,
+    decision: DecisionClosure,
+    asset_id: str,
+) -> tuple[str, ...]:
+    candidates = tuple(
+        quote
+        for quote in quotes
+        if quote.asset_id == asset_id
+        and quote.received_time <= decision.decision_time
+        and quote.source_class is decision.source_class
+        and quote.evidence_purpose is decision.evidence_purpose
+    )
+    if any(item.price_basis is not PriceBasis.MID for item in candidates):
+        return (EvaluationReasonCode.UNSUPPORTED_PRICE_BASIS.value,)
+    return (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,)
 
 
 def _recompute_expected_costs(
@@ -1695,7 +1727,9 @@ def evaluate_independently(
             evidence_purpose=decision.evidence_purpose,
         )
         missing_reference = (
-            (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,) if reference is None else ()
+            ()
+            if reference is not None
+            else _decision_reference_reasons(quotes, decision=decision, asset_id=asset)
         )
         reasons = tuple(dict.fromkeys((*missing_reference, *entry_reasons, *exit_reasons)))
         if entry is None or exit_quote is None:
@@ -1926,7 +1960,9 @@ def build_outcome_closures(
             evidence_purpose=decision.evidence_purpose,
         )
         missing_reference = (
-            (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,) if reference is None else ()
+            ()
+            if reference is not None
+            else _decision_reference_reasons(quotes, decision=decision, asset_id=asset)
         )
         reasons = tuple(dict.fromkeys((*missing_reference, *entry_reasons, *exit_reasons)))
         outcomes.append(
