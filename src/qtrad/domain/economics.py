@@ -17,6 +17,7 @@ from enum import StrEnum
 from math import floor
 from typing import Final, cast
 
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.time import require_utc
 
 ECONOMICS_CONTRACT: Final = "qtrad-r3-economics-v1"
@@ -377,7 +378,8 @@ class ProductEconomics:
     """Reviewed, provider-neutral economics for one canonical asset."""
 
     asset_id: str
-    source_class: str
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     source_product_id: str
     price_currency: str
     settlement_currency: str
@@ -406,10 +408,15 @@ class ProductEconomics:
 
     def __post_init__(self) -> None:
         if (
-            type(self.impact_disposition) is not ImpactDisposition
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+            or type(self.impact_disposition) is not ImpactDisposition
             or type(self.session_state) is not SessionState
         ):
-            raise ValueError("impact disposition and session state must use declared enums")
+            raise ValueError(
+                "source class, evidence purpose, impact disposition and session state "
+                "must use declared enums"
+            )
         for value, field_name in (
             (self.price_currency, "price currency"),
             (self.settlement_currency, "settlement currency"),
@@ -425,8 +432,8 @@ class ProductEconomics:
             (self.tick_value, "tick value"),
         ):
             _require_positive(value, field_name)
-        if not self.asset_id or not self.source_class or not self.source_product_id:
-            raise ValueError("asset, source class and source product identity are required")
+        if not self.asset_id or not self.source_product_id:
+            raise ValueError("asset and source product identity are required")
         if not self.session_version or not self.version or not self.provenance:
             raise ValueError("economics version, session version and provenance are required")
         require_utc(self.effective_from, "economics effective_from")
@@ -489,6 +496,7 @@ class ProductEconomics:
                 "contract": ECONOMICS_CONTRACT,
                 "asset_id": self.asset_id,
                 "source_class": self.source_class,
+                "evidence_purpose": self.evidence_purpose,
                 "source_product_id": self.source_product_id,
                 "price_currency": self.price_currency,
                 "settlement_currency": self.settlement_currency,

@@ -1,5 +1,6 @@
 """Focused R3.C one-horizon virtual/physical target checks."""
 
+import inspect
 from collections.abc import MutableMapping
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from qtrad.domain.economics import (
     ProductEconomics,
     SessionState,
 )
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.portfolio import (
     ONE_HORIZON,
     AssetNetting,
@@ -66,7 +68,8 @@ def _economics(asset: str) -> ProductEconomics:
     )
     return ProductEconomics(
         asset_id=asset,
-        source_class="FIXTURE",
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         source_product_id=f"product:{asset}",
         price_currency="AUD",
         settlement_currency="AUD",
@@ -225,9 +228,27 @@ def _risk_state():
         as_of=NOW,
         observation_cutoff=NOW,
         config=config,
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         exposure_mapping=ExposureMapping(),
         caps=caps,
         provenance="fixture-risk",
+    )
+
+
+def _netting_for(requested_target: tuple[Decimal, Decimal]) -> NettingResult:
+    attributions: list[SleeveAttribution] = []
+    assets: list[AssetNetting] = []
+    for asset, delta in zip(ASSETS, requested_target, strict=True):
+        key = _key(asset)
+        attribution = SleeveAttribution(key, delta, Decimal("0"), delta)
+        attributions.append(attribution)
+        assets.append(AssetNetting(asset, delta, delta, Decimal("0"), (attribution,)))
+    return NettingResult(
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
+        assets=tuple(assets),
+        sleeves=tuple(attributions),
     )
 
 
@@ -239,6 +260,8 @@ def _target_inputs(
     netting: NettingResult | None = None,
 ) -> ContinuousTargetInputs:
     return ContinuousTargetInputs(
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         asset_order=ASSETS,
         current_position=(Decimal("0"), Decimal("0")),
         requested_target=requested_target,
@@ -247,18 +270,31 @@ def _target_inputs(
         decision_time=NOW,
         economics={asset: _economics(asset) for asset in ASSETS},
         continuous_costs={asset: _continuous_model(asset, unit_amount) for asset in ASSETS},
-        expected_costs={
-            asset: _cost_state(target=str(requested_target[index]), unit_amount=unit_amount)
-            for index, asset in enumerate(ASSETS)
-        },
         risk=_risk_state(),
         solver_policy=DEFAULT_SOLVER_POLICY,
-        netting=netting,
+        netting=netting or _netting_for(requested_target),
     )
 
 
-def _key(asset: str, *, source: str = "SRC") -> SleeveKey:
-    return SleeveKey(source, "experiment", "config", asset)
+def _key(
+    asset: str,
+    *,
+    source: MarketDataSourceClass | str = MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+    experiment: str = "experiment",
+) -> SleeveKey:
+    if type(source) is str:
+        source = {
+            "A": MarketDataSourceClass.IG_NATIVE_CAPTURE,
+            "B": MarketDataSourceClass.IBKR_NATIVE_CAPTURE,
+        }.get(source, MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH)
+    source_class = cast(MarketDataSourceClass, source)
+    return SleeveKey(
+        source_class=source_class,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
+        experiment_id=experiment,
+        configuration_id="config",
+        asset_id=asset,
+    )
 
 
 def _forecast(value: str, model: str = "model") -> GrossForecast:
@@ -266,8 +302,8 @@ def _forecast(value: str, model: str = "model") -> GrossForecast:
 
 
 def test_intents_net_opposing_changes_and_replay_are_ordered() -> None:
-    first = VirtualPosition(_key("asset:a", source="A"), Decimal("0"))
-    second = VirtualPosition(_key("asset:a", source="B"), Decimal("2"))
+    first = VirtualPosition(_key("asset:a", experiment="experiment-a"), Decimal("0"))
+    second = VirtualPosition(_key("asset:a", experiment="experiment-b"), Decimal("2"))
     intent_a = construct_horizon_intent(
         position=first,
         gross_forecast=_forecast("1"),
@@ -369,20 +405,7 @@ def test_zero_forecast_target_is_flat_and_missing_inputs_fail_closed() -> None:
     target = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (0.0, 0.0)))
     assert target.disposition is DecisionDisposition.ACCEPTED
     assert target.target_position == (Decimal("0"), Decimal("0"))
-    with pytest.raises(ValueError, match="expected-cost"):
-        ContinuousTargetInputs(
-            asset_order=ASSETS,
-            current_position=(Decimal("0"), Decimal("0")),
-            requested_target=(Decimal("1"), Decimal("0")),
-            alpha_return=(Decimal("1"), Decimal("0")),
-            gross_sleeve_value=Decimal("100"),
-            decision_time=NOW,
-            economics={asset: _economics(asset) for asset in ASSETS},
-            continuous_costs={asset: _continuous_model(asset) for asset in ASSETS},
-            expected_costs={"asset:a": _cost_state()},
-            risk=_risk_state(),
-            solver_policy=DEFAULT_SOLVER_POLICY,
-        )
+    assert "expected_costs" not in inspect.signature(ContinuousTargetInputs).parameters
 
 
 def test_transition_binds_state_identity_and_zero_forecast() -> None:
@@ -471,10 +494,28 @@ def test_blocked_transition_cannot_change_position() -> None:
 
 def test_netting_cross_is_bound_to_final_cost_states() -> None:
     attribution_a = (
-        SleeveAttribution(_key("asset:a", source="A"), Decimal("2"), Decimal("2"), Decimal("0")),
-        SleeveAttribution(_key("asset:a", source="B"), Decimal("2"), Decimal("0"), Decimal("2")),
+        SleeveAttribution(
+            _key(
+                "asset:a",
+                experiment="experiment-a",
+            ),
+            Decimal("2"),
+            Decimal("2"),
+            Decimal("0"),
+        ),
+        SleeveAttribution(
+            _key(
+                "asset:a",
+                experiment="experiment-b",
+            ),
+            Decimal("2"),
+            Decimal("0"),
+            Decimal("2"),
+        ),
     )
     netting = NettingResult(
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         assets=(
             AssetNetting("asset:a", Decimal("2"), Decimal("2"), Decimal("1"), attribution_a),
             AssetNetting("asset:b", Decimal("0"), Decimal("0"), Decimal("0"), ()),
@@ -544,6 +585,8 @@ def test_positive_minimum_cost_is_rejected_before_solver() -> None:
     )
     with pytest.raises(ValueError, match="minimum"):
         ContinuousTargetInputs(
+            source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+            evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
             asset_order=ASSETS,
             current_position=(Decimal("0"), Decimal("0")),
             requested_target=(Decimal("1"), Decimal("0")),
@@ -557,6 +600,7 @@ def test_positive_minimum_cost_is_rejected_before_solver() -> None:
             continuous_costs={asset: _continuous_model(asset) for asset in ASSETS},
             risk=_risk_state(),
             solver_policy=DEFAULT_SOLVER_POLICY,
+            netting=_netting_for((Decimal("1"), Decimal("0"))),
         )
 
 
@@ -583,9 +627,14 @@ def test_accepted_target_rejects_netting_external_delta_mismatch() -> None:
         runner=lambda inputs: ("optimal", (1.0, 0.0)),
     )
     mismatch_attribution = SleeveAttribution(
-        _key("asset:a", source="MISMATCH"), Decimal("2"), Decimal("0"), Decimal("2")
+        _key("asset:a", experiment="mismatch"),
+        Decimal("2"),
+        Decimal("0"),
+        Decimal("2"),
     )
     mismatched = NettingResult(
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_purpose=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         assets=(
             AssetNetting(
                 "asset:a", Decimal("2"), Decimal("2"), Decimal("0"), (mismatch_attribution,)
@@ -607,10 +656,6 @@ def test_continuous_inputs_snapshot_authorities_and_reject_mutation() -> None:
     with pytest.raises(TypeError):
         cast(MutableMapping[str, ContinuousCostModel], inputs.continuous_costs)["asset:a"] = (
             _continuous_model("replacement")
-        )
-    with pytest.raises(TypeError):
-        cast(MutableMapping[str, ExpectedCostState], inputs.expected_costs)["asset:a"] = (
-            _cost_state()
         )
     component = inputs.continuous_costs["asset:a"].components[0]
     with pytest.raises(ValueError, match="tuples"):

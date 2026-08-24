@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -28,6 +28,7 @@ from qtrad.domain.economics import (
     ProductEconomics,
     SolverPolicy,
 )
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
 
@@ -138,17 +139,22 @@ def _zero_forecast_blocks(prior: Decimal, proposed: Decimal) -> bool:
 class SleeveKey:
     """Canonical identity of one source/configuration/asset/horizon sleeve."""
 
-    source_class: str
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     experiment_id: str
     configuration_id: str
     asset_id: str
     horizon: timedelta = ONE_HORIZON
 
     def __post_init__(self) -> None:
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("sleeve source class and evidence purpose must use declared enums")
         if not all(
             type(value) is str and value
             for value in (
-                self.source_class,
                 self.experiment_id,
                 self.configuration_id,
                 self.asset_id,
@@ -159,9 +165,10 @@ class SleeveKey:
             raise ValueError("R3.C supports exactly the 15-minute horizon")
 
     @property
-    def canonical_tuple(self) -> tuple[str, str, str, str, int]:
+    def canonical_tuple(self) -> tuple[str, str, str, str, str, int]:
         return (
-            self.source_class,
+            self.source_class.value,
+            self.evidence_purpose.value,
             self.experiment_id,
             self.configuration_id,
             self.asset_id,
@@ -171,6 +178,7 @@ class SleeveKey:
     def as_json(self) -> dict[str, object]:
         return {
             "source_class": self.source_class,
+            "evidence_purpose": self.evidence_purpose,
             "experiment_id": self.experiment_id,
             "configuration_id": self.configuration_id,
             "asset_id": self.asset_id,
@@ -248,7 +256,7 @@ class HorizonIntent:
         return self.requested_quantity - self.prior_quantity
 
     @property
-    def canonical_tuple(self) -> tuple[str, str, str, str, int]:
+    def canonical_tuple(self) -> tuple[str, str, str, str, str, int]:
         return self.key.canonical_tuple
 
     def as_json(self) -> dict[str, object]:
@@ -357,10 +365,17 @@ class AssetNetting:
 
 @dataclass(frozen=True, slots=True)
 class NettingResult:
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     assets: tuple[AssetNetting, ...]
     sleeves: tuple[SleeveAttribution, ...]
 
     def __post_init__(self) -> None:
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("netting source class and evidence purpose must use declared enums")
         if not self.assets:
             raise ValueError("netting must contain at least one asset")
         ordered = tuple(sorted(self.assets, key=lambda item: item.asset_id))
@@ -373,6 +388,12 @@ class NettingResult:
             raise ValueError("netting sleeves must be canonical")
         if len({item.key for item in self.sleeves}) != len(self.sleeves):
             raise ValueError("netting sleeves must be unique")
+        if any(
+            item.key.source_class is not self.source_class
+            or item.key.evidence_purpose is not self.evidence_purpose
+            for item in self.sleeves
+        ):
+            raise ValueError("netting sleeve source and evidence purpose mismatch")
         attributions = tuple(
             attribution for asset in self.assets for attribution in asset.attributions
         )
@@ -396,6 +417,8 @@ class NettingResult:
         return canonical_json_bytes(
             {
                 "contract": PORTFOLIO_CONTRACT,
+                "source_class": self.source_class,
+                "evidence_purpose": self.evidence_purpose,
                 "assets": [
                     {
                         "asset_id": item.asset_id,
@@ -430,8 +453,18 @@ def match_internal_opposing_changes(intents: Sequence[HorizonIntent]) -> Netting
     """
 
     ordered = sorted(intents, key=lambda item: item.canonical_tuple)
+    if not ordered:
+        raise ValueError("netting requires at least one sleeve intent")
     if len({item.key for item in ordered}) != len(ordered):
         raise ValueError("duplicate sleeve intent is not deterministic")
+    source_class = ordered[0].key.source_class
+    evidence_purpose = ordered[0].key.evidence_purpose
+    if any(
+        item.key.source_class is not source_class
+        or item.key.evidence_purpose is not evidence_purpose
+        for item in ordered
+    ):
+        raise ValueError("mixed sleeve source class or evidence purpose is not allowed")
     by_asset: dict[str, list[HorizonIntent]] = defaultdict(list)
     for intent in ordered:
         by_asset[intent.key.asset_id].append(intent)
@@ -483,7 +516,12 @@ def match_internal_opposing_changes(intents: Sequence[HorizonIntent]) -> Netting
             )
         )
         all_attributions.extend(attributions)
-    return NettingResult(tuple(assets), tuple(all_attributions))
+    return NettingResult(
+        source_class=source_class,
+        evidence_purpose=evidence_purpose,
+        assets=tuple(assets),
+        sleeves=tuple(all_attributions),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +732,8 @@ def replay_virtual_transitions(
 class ContinuousTargetInputs:
     """Validated application boundary for one continuous physical target."""
 
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     asset_order: tuple[str, ...]
     current_position: tuple[Decimal, ...]
     requested_target: tuple[Decimal, ...]
@@ -704,14 +744,14 @@ class ContinuousTargetInputs:
     continuous_costs: Mapping[str, ContinuousCostModel]
     risk: RiskState
     solver_policy: SolverPolicy
-    # Legacy point states are retained only as an output/reference surface.  The
-    # optimiser never consumes them.
-    expected_costs: Mapping[str, ExpectedCostState] = field(
-        default_factory=lambda: dict[str, ExpectedCostState]()
-    )
-    netting: NettingResult | None = None
+    netting: NettingResult
 
     def __post_init__(self) -> None:
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("target source class and evidence purpose must use declared enums")
         if any(
             type(values) is not tuple
             for values in (
@@ -726,11 +766,8 @@ class ContinuousTargetInputs:
             cast(object, self.continuous_costs), Mapping
         ):
             raise ValueError("target economics and continuous costs must be mappings")
-        if not isinstance(cast(object, self.expected_costs), Mapping):
-            raise ValueError("target expected costs must be a mapping")
         object.__setattr__(self, "economics", MappingProxyType(dict(self.economics)))
         object.__setattr__(self, "continuous_costs", MappingProxyType(dict(self.continuous_costs)))
-        object.__setattr__(self, "expected_costs", MappingProxyType(dict(self.expected_costs)))
         ordered = tuple(sorted(self.asset_order))
         if not ordered or len(set(ordered)) != len(ordered) or ordered != self.asset_order:
             raise ValueError("target asset order must be non-empty, unique and canonical")
@@ -751,23 +788,34 @@ class ContinuousTargetInputs:
         require_utc(self.decision_time, "target decision time")
         if self.risk.asset_order != self.asset_order:
             raise ValueError("target risk state order does not match target assets")
+        if (
+            self.risk.source_class is not self.source_class
+            or self.risk.evidence_purpose is not self.evidence_purpose
+        ):
+            raise ValueError("target risk source or evidence purpose mismatch")
         if set(self.economics) != set(self.asset_order):
             raise ValueError("target economics keys do not match asset order")
         if set(self.continuous_costs) != set(self.asset_order):
             raise ValueError("target continuous-cost keys do not match asset order")
-        if self.expected_costs and set(self.expected_costs) != set(self.asset_order):
-            raise ValueError("target expected-cost keys do not match asset order")
-        if self.netting is not None:
-            if self.netting.asset_order != self.asset_order:
-                raise ValueError("target netting order does not match asset order")
-            expected_external = tuple(
-                target - current
-                for target, current in zip(
-                    self.requested_target, self.current_position, strict=True
-                )
-            )
-            if self.netting.external_deltas != expected_external:
-                raise ValueError("target netting external deltas do not match request")
+        if any(
+            economics.source_class is not self.source_class
+            or economics.evidence_purpose is not self.evidence_purpose
+            for economics in self.economics.values()
+        ):
+            raise ValueError("target economics source or evidence purpose mismatch")
+        if (
+            self.netting.source_class is not self.source_class
+            or self.netting.evidence_purpose is not self.evidence_purpose
+        ):
+            raise ValueError("target netting source or evidence purpose mismatch")
+        if self.netting.asset_order != self.asset_order:
+            raise ValueError("target netting order does not match asset order")
+        expected_external = tuple(
+            target - current
+            for target, current in zip(self.requested_target, self.current_position, strict=True)
+        )
+        if self.netting.external_deltas != expected_external:
+            raise ValueError("target netting external deltas do not match request")
         _require_identity(self.solver_policy.semantic_identity, "solver policy identity")
         _require_identity(self.risk.semantic_id, "risk state identity")
         for _index, asset in enumerate(self.asset_order):
@@ -839,7 +887,9 @@ class ContinuousTargetInputs:
                 "alpha_return": self.alpha_return,
                 "gross_sleeve_value": self.gross_sleeve_value,
                 "decision_time": self.decision_time,
-                "netting": self.netting.semantic_identity if self.netting is not None else None,
+                "source_class": self.source_class,
+                "evidence_purpose": self.evidence_purpose,
+                "netting": self.netting.semantic_identity,
             }
         )
 
@@ -881,6 +931,8 @@ def _cost_state_payload(state: ExpectedCostState) -> dict[str, object]:
 class ContinuousTarget:
     """Solver-independent accepted continuous physical target."""
 
+    source_class: MarketDataSourceClass
+    evidence_purpose: EvidencePurpose
     asset_order: tuple[str, ...]
     current_position: tuple[Decimal, ...]
     target_position: tuple[Decimal, ...]
@@ -896,11 +948,16 @@ class ContinuousTarget:
     decision_time: datetime
     cost_model_identities: Mapping[str, str]
     reporting_currencies: Mapping[str, str]
+    netting: NettingResult
     disposition: DecisionDisposition = DecisionDisposition.ACCEPTED
     reason_codes: tuple[str, ...] = ()
-    netting: NettingResult | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("target source class and evidence purpose must use declared enums")
         if any(
             type(values) is not tuple
             for values in (
@@ -997,22 +1054,17 @@ class ContinuousTarget:
                 raise ValueError("accepted target currencies must cover every asset")
             non_financing = Decimal("0")
             financing = Decimal("0")
-            netting_by_asset = (
-                {item.asset_id: item for item in self.netting.assets}
-                if self.netting is not None
-                else {}
-            )
-            if self.netting is not None:
-                if self.netting.asset_order != self.asset_order:
-                    raise ValueError("accepted target netting order mismatch")
-                expected_external = tuple(
-                    requested - current
-                    for requested, current in zip(
-                        self.requested_position, self.current_position, strict=True
-                    )
+            netting_by_asset = {item.asset_id: item for item in self.netting.assets}
+            if self.netting.asset_order != self.asset_order:
+                raise ValueError("accepted target netting order mismatch")
+            expected_external = tuple(
+                requested - current
+                for requested, current in zip(
+                    self.requested_position, self.current_position, strict=True
                 )
-                if self.netting.external_deltas != expected_external:
-                    raise ValueError("accepted target netting external deltas mismatch")
+            )
+            if self.netting.external_deltas != expected_external:
+                raise ValueError("accepted target netting external deltas mismatch")
             for index, asset in enumerate(self.asset_order):
                 state = self.expected_costs[asset]
                 if not state.complete:
@@ -1037,12 +1089,7 @@ class ContinuousTarget:
                     raise ValueError("accepted target financing amount is required")
                 financing += finance_component.reporting_amount
                 non_financing += state_total - finance_component.reporting_amount
-                if self.netting is None:
-                    if state.internal_cross_quantity != Decimal("0"):
-                        raise ValueError("unbound internal crossing attribution")
-                elif (
-                    state.internal_cross_quantity != netting_by_asset[asset].internal_cross_quantity
-                ):
+                if state.internal_cross_quantity != netting_by_asset[asset].internal_cross_quantity:
                     raise ValueError("accepted target internal crossing mismatch")
             if non_financing != self.expected_cost_reporting:
                 raise ValueError("accepted target cost total does not reconcile")
@@ -1069,6 +1116,8 @@ class ContinuousTarget:
         return canonical_json_bytes(
             {
                 "contract": TARGET_CONTRACT,
+                "source_class": self.source_class,
+                "evidence_purpose": self.evidence_purpose,
                 "asset_order": self.asset_order,
                 "current_position": self.current_position,
                 "requested_position": self.requested_position,
@@ -1096,7 +1145,7 @@ class ContinuousTarget:
                     for asset in self.asset_order
                     if asset in self.expected_costs
                 ),
-                "netting": self.netting.semantic_identity if self.netting is not None else None,
+                "netting": self.netting.semantic_identity,
                 "disposition": self.disposition,
                 "reason_codes": self.reason_codes,
             }

@@ -173,13 +173,9 @@ def _evaluate_costs(
     total = Decimal(0)
     financing = Decimal(0)
     for index, asset in enumerate(inputs.asset_order):
-        internal_cross_quantity = Decimal("0")
-        if inputs.netting is not None:
-            internal_cross_quantity = next(
-                item.internal_cross_quantity
-                for item in inputs.netting.assets
-                if item.asset_id == asset
-            )
+        internal_cross_quantity = next(
+            item.internal_cross_quantity for item in inputs.netting.assets if item.asset_id == asset
+        )
         state = inputs.continuous_costs[asset].evaluate(
             current_quantity=inputs.current_position[index],
             target_quantity=target[index],
@@ -216,6 +212,8 @@ def _blocked(
     reasons: tuple[str, ...],
 ) -> ContinuousTarget:
     return ContinuousTarget(
+        source_class=inputs.source_class,
+        evidence_purpose=inputs.evidence_purpose,
         asset_order=inputs.asset_order,
         current_position=inputs.current_position,
         target_position=(),
@@ -279,6 +277,8 @@ def solve_continuous_target(
         for target_value, current in zip(target, inputs.current_position, strict=True)
     )
     return ContinuousTarget(
+        source_class=inputs.source_class,
+        evidence_purpose=inputs.evidence_purpose,
         asset_order=inputs.asset_order,
         current_position=inputs.current_position,
         target_position=target,
