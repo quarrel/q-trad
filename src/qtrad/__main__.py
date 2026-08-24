@@ -82,6 +82,7 @@ from qtrad.application.r2_readiness import (
     evaluate_outcome_blind_confirmatory_readiness,
     evaluate_r2_readiness,
 )
+from qtrad.application.r3_evaluation import fixture_cli
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
     build_observation_dataset,
@@ -1255,6 +1256,9 @@ def build_parser() -> argparse.ArgumentParser:
     api = subparsers.add_parser("api", help="run the read-only operator API")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
+
+    r3e = subparsers.add_parser("r3-e", help="run the bounded R3.E fixture evaluator")
+    r3e.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -2456,6 +2460,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "api":
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
+    elif args.command == "r3-e":
+        fixture_cli(str(args.output))
     else:
         raise RuntimeError("unhandled command")
 
