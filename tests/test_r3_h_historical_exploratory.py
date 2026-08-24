@@ -831,6 +831,26 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
         lambda report: report["graph"]["tiny_learned_graph"]["execution_receipt"].__setitem__(
             "layers", 99
         ),
+        lambda report: report["retained_parents"]["identities"].__setitem__(
+            "selection_manifest_id", "f" * 64
+        ),
+        lambda report: report["retained_parents"]["terminal_authentication"].__setitem__(
+            "state", "CORRUPTED"
+        ),
+        lambda report: report["selection"].__setitem__("outcome_blind", False),
+        lambda report: report["selection"]["selected_decision_times"].pop(),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("unit", "invalid"),
+        lambda report: report["statistical"]["candidates"][0].__setitem__(
+            "support", report["statistical"]["candidates"][0]["support"] + 1
+        ),
+        lambda report: report["statistical"]["candidates"][0].__setitem__("coverage", 0.0),
+        lambda report: report["graph"]["tiny_learned_graph"].__setitem__(
+            "walk_forward_fit_executions",
+            report["graph"]["tiny_learned_graph"]["walk_forward_fit_executions"] + 1,
+        ),
+        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", 61.0),
     ]
     for mutate in mutations:
         malformed = json.loads(result.canonical_json())

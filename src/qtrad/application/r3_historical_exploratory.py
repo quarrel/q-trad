@@ -938,14 +938,18 @@ def _report_decimal(value: Any, label: str, *, nullable: bool = False) -> Decima
 def _decimal_matches(actual: Decimal | None, expected: Decimal | None) -> bool:
     if actual is None or expected is None:
         return actual is expected
-    return abs(actual - expected) <= Decimal("0.00000000002")
+    return actual == expected
 
 
 def _qdecimal(value: Decimal) -> Decimal:
     return value.quantize(_DECIMAL_QUANTUM, rounding=ROUND_HALF_EVEN)
 
 
-def _reconcile_economic_view(view: Mapping[str, Any], label: str) -> None:
+def _reconcile_economic_view(
+    view: Mapping[str, Any],
+    label: str,
+    cost_grid: Sequence[Any] | None = None,
+) -> None:
     trace = _strict_sequence(view["position_trace"], f"{label}.position_trace")
     if not trace:
         raise FreezeError(f"{label}.position_trace must not be empty")
@@ -991,8 +995,20 @@ def _reconcile_economic_view(view: Mapping[str, Any], label: str) -> None:
     sensitivity = _strict_sequence(
         view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
     )
+    if cost_grid is not None and len(sensitivity) != len(cost_grid):
+        raise FreezeError(f"renderer {label} cost-grid cardinality mismatch")
     for index, item in enumerate(sensitivity):
         entry = _strict_mapping(item, f"{label}.all_in_cost_sensitivity[{index}]")
+        if cost_grid is not None:
+            expected_point = _strict_mapping(cost_grid[index], f"config.cost_grid[{index}]")
+            expected_cost = _qdecimal(Decimal(str(expected_point["value"])))
+            actual_cost = _report_decimal(
+                entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost"
+            )
+            if actual_cost != expected_cost or entry["unit"] != expected_point["unit"]:
+                raise FreezeError(f"renderer {label} cost-grid point differs from frozen grid")
+            if entry["label"] != "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE":
+                raise FreezeError(f"renderer {label} cost-grid label is not frozen")
         cost = _report_decimal(entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost")
         net_mean = _report_decimal(
             entry["net_mean"], f"{label}.all_in_cost_sensitivity[{index}].net_mean", nullable=True
@@ -1118,6 +1134,19 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         "retained_parents.terminal_authentication.report_byte_size",
         minimum=0,
     )
+    expected_parent = _strict_mapping(
+        config.document["retained_parents"], "config.retained_parents"
+    )
+    for key in identity_keys:
+        if retained["identities"][key] != expected_parent[key]:
+            raise FreezeError(f"renderer retained identity {key} differs from frozen parent")
+    expected_terminal = _strict_mapping(
+        config.document["terminal_authentication"], "config.terminal_authentication"
+    )
+    if json.dumps(
+        _thaw_value(terminal_authentication), sort_keys=True, separators=(",", ":")
+    ) != json.dumps(_thaw_value(expected_terminal), sort_keys=True, separators=(",", ":")):
+        raise FreezeError("renderer terminal authentication differs from frozen authority")
     role_bindings = retained["role_bindings"]
     identity_bindings = config.document["retained_loader"]["identity_bindings"]
     if role_bindings:
@@ -1160,7 +1189,23 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     if "stop_reason" in report["selection"]:
         selection_keys |= frozenset({"stop_reason"})
     selection = _strict_mapping(report["selection"], "selection", selection_keys)
-    _strict_bool(selection["outcome_blind"], "selection.outcome_blind")
+    policy = _strict_mapping(
+        config.document["retained_loader"]["selection_policy"], "config.selection_policy"
+    )
+    if selection["outcome_blind"] is not policy["outcome_blind"]:
+        raise FreezeError("renderer selection outcome_blind differs from frozen policy")
+    required_target_ids = _strict_sequence(
+        policy["required_target_ids"], "config.selection_policy.required_target_ids"
+    )
+    expected_target_count = len(required_target_ids)
+    expected_groups = _strict_integer(
+        policy["n_complete_decision_groups"],
+        "config.selection_policy.n_complete_decision_groups",
+        minimum=1,
+    )
+    analysis_bound = _strict_integer(
+        policy["analysis_row_bound"], "config.selection_policy.analysis_row_bound", minimum=1
+    )
     for key in (
         "selected_rows",
         "selected_bytes",
@@ -1172,15 +1217,49 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         "target_count",
     ):
         _strict_integer(selection[key], f"selection.{key}", minimum=0)
+    if (
+        selection["target_count"] != expected_target_count
+        or selection["complete_groups"] != expected_groups
+    ):
+        raise FreezeError("renderer selection counts differ from frozen policy")
+    if (
+        selection["selected_rows"] != expected_groups * expected_target_count
+        or selection["selected_rows"] != analysis_bound
+    ):
+        raise FreezeError("renderer selected rows do not reconcile with frozen policy")
     times = _strict_sequence(
         selection["selected_decision_times"], "selection.selected_decision_times"
     )
     for index, value in enumerate(times):
         _strict_text(value, f"selection.selected_decision_times[{index}]")
+    if (
+        len(times) != expected_groups
+        or len(set(times)) != len(times)
+        or list(times) != sorted(times)
+    ):
+        raise FreezeError("renderer selected decision times do not reconcile with frozen groups")
     _strict_text(selection["stop_state"], "selection.stop_state")
+    allowed_stop_states = frozenset(
+        {
+            "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF",
+            "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+            "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND",
+        }
+    )
+    if selection["stop_state"] not in allowed_stop_states:
+        raise FreezeError("renderer selection.stop_state is not a truthful frozen state")
     if "stop_reason" in selection:
         _strict_text(selection["stop_reason"], "selection.stop_reason")
+        stop_reason_by_state = {
+            "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND": "EARLIEST_COMPLETE_GROUP_BOUND",
+        }
+        if selection["stop_reason"] != stop_reason_by_state[selection["stop_state"]]:
+            raise FreezeError("renderer selection.stop_reason does not match stop_state")
     economic = _strict_economic_view(report["economic"], "economic", root=True)
+    if economic["physical_turnover_definition"] != config.document["turnover_definition"]:
+        raise FreezeError("renderer economic turnover definition differs from frozen contract")
     expected_assets = frozenset(config.document["target_group_resolution"]["target_ids"])
     expected_periods = frozenset({"period-0", "period-1", "period-2"})
     for dimension, expected_keys in (
@@ -1191,6 +1270,43 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         groups = _strict_mapping(economic[dimension], f"economic.{dimension}")
         if frozenset(groups) != expected_keys:
             raise FreezeError(f"renderer economic.{dimension} keys differ from frozen dimensions")
+        root_trace = _strict_sequence(economic["position_trace"], "economic.position_trace")
+        if len(root_trace) != selection["selected_rows"]:
+            raise FreezeError("renderer economic root trace does not reconcile with selection rows")
+        root_decisions = frozenset(item["decision_time"] for item in root_trace)
+        expected_count = {
+            "asset": len(root_trace) // len(expected_assets),
+            "horizon": len(root_trace),
+            "period": len(root_trace) // len(expected_periods),
+        }[dimension]
+        for name, child in groups.items():
+            child_trace = _strict_sequence(
+                child["position_trace"], f"economic.{dimension}.{name}.position_trace"
+            )
+            if len(child_trace) != expected_count:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} trace cardinality differs from domain"
+                )
+            child_decisions = frozenset(item["decision_time"] for item in child_trace)
+            if dimension == "period":
+                period_index = int(name.rsplit("-", 1)[1])
+                expected_decisions = frozenset({sorted(root_decisions)[period_index]})
+            else:
+                expected_decisions = root_decisions
+            if child_decisions != expected_decisions:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} decision-time domain differs from root"
+                )
+            child_targets = frozenset(item["target_id"] for item in child_trace)
+            if dimension == "asset" and child_targets != frozenset({name}):
+                raise FreezeError(
+                    f"renderer economic.asset.{name} target domain differs from asset key"
+                )
+            if dimension in {"horizon", "period"} and child_targets != expected_assets:
+                raise FreezeError(
+                    f"renderer economic.{dimension}.{name} target domain differs "
+                    "from frozen targets"
+                )
     configurations = economic["configurations"]
     expected_configurations = frozenset(
         {
@@ -1221,12 +1337,16 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
                 f"renderer economic.configurations.{label} position trace cardinality mismatch"
             )
     for view_label, view in [("economic", economic)]:
-        _reconcile_economic_view(view, view_label)
+        _reconcile_economic_view(view, view_label, config.document["cost_grid"])
         for dimension in ("asset", "horizon", "period"):
             for name, child in view[dimension].items():
-                _reconcile_economic_view(child, f"{view_label}.{dimension}.{name}")
+                _reconcile_economic_view(
+                    child, f"{view_label}.{dimension}.{name}", config.document["cost_grid"]
+                )
         for name, child in view["configurations"].items():
-            _reconcile_economic_view(child, f"{view_label}.configurations.{name}")
+            _reconcile_economic_view(
+                child, f"{view_label}.configurations.{name}", config.document["cost_grid"]
+            )
     statistical = _strict_mapping(
         report["statistical"],
         "statistical",
@@ -1269,6 +1389,12 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     )
     if any(not isinstance(item, bool) for item in prediction_mask):
         raise FreezeError("renderer statistical.oof.prediction_mask must contain booleans")
+    oof_support = sum(prediction_mask)
+    if oof["support"] != oof_support:
+        raise FreezeError("renderer statistical.oof support does not reconcile with mask")
+    oof_coverage = _report_decimal(oof["coverage"], "renderer statistical.oof.coverage")
+    if oof_coverage != _qdecimal(Decimal(oof_support) / Decimal(rows)):
+        raise FreezeError("renderer statistical.oof coverage does not reconcile with mask")
     folds = _strict_sequence(oof["folds"], "statistical.oof.folds")
     for index, fold in enumerate(folds):
         item = _strict_mapping(
@@ -1432,17 +1558,41 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
             raise FreezeError(
                 f"renderer metric {metric['id']} prediction mask is not aligned with OOF rows"
             )
+        mask = metric["prediction_mask"]
+        expected_support = sum(mask)
+        if metric["support"] != expected_support:
+            raise FreezeError(
+                f"renderer metric {metric['id']} support does not reconcile with mask"
+            )
+        expected_coverage = _qdecimal(Decimal(expected_support) / Decimal(rows))
+        actual_coverage = _report_decimal(metric["coverage"], f"metric {metric['id']}.coverage")
+        if actual_coverage != expected_coverage:
+            raise FreezeError(
+                f"renderer metric {metric['id']} coverage does not reconcile with mask"
+            )
     expected_role_pairs = {
         (identity_bindings["dataset_ids"][role], identity_bindings["config_ids"][role])
         for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
     }
+    expected_wrappers = identity_bindings.get("wrapper_sha256s", {})
     for metric in metric_outputs:
         role_binding = metric["execution_receipt"].get("role_binding")
-        if (
-            role_binding is not None
-            and (role_binding["dataset_id"], role_binding["config_id"]) not in expected_role_pairs
-        ):
+        if role_binding is None:
+            continue
+        pair = (role_binding["dataset_id"], role_binding["config_id"])
+        if pair not in expected_role_pairs:
             raise FreezeError(f"renderer metric {metric['id']} has an unknown role binding")
+        role = next(
+            role
+            for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+            if pair
+            == (identity_bindings["dataset_ids"][role], identity_bindings["config_ids"][role])
+        )
+        expected_wrapper = expected_wrappers.get(role)
+        if expected_wrapper is not None and role_binding["wrapper_sha256"] != expected_wrapper:
+            raise FreezeError(
+                f"renderer metric {metric['id']} role wrapper differs from frozen role"
+            )
     _strict_bool(graph["r4_replacement_required"], "graph.r4_replacement_required")
     work = _strict_mapping(
         report["work"],
@@ -1471,6 +1621,10 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         _strict_integer(value, f"work.fit_executions.{key}", minimum=0)
     if sum(fit_executions.values()) != work["fit_count"]:
         raise FreezeError("renderer work.fit_executions does not reconcile fit_count")
+    metric_by_id = {metric["id"]: metric for metric in metric_outputs}
+    for execution_id, execution_count in fit_executions.items():
+        if metric_by_id[execution_id]["fit_executions"] != execution_count:
+            raise FreezeError(f"renderer metric {execution_id} fit count does not reconcile work")
     if work["rows"] != rows or work["rows"] != selection["selected_rows"]:
         raise FreezeError("renderer work rows do not reconcile with selected/OOF rows")
     if work["candidate_count"] != len(candidates):
@@ -1488,6 +1642,13 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         raise FreezeError("renderer graph fit count does not reconcile with tiny graph fits")
     if work["graph_control_count"] != len(graph_controls):
         raise FreezeError("renderer graph control count does not reconcile with controls")
+    if (
+        tiny["walk_forward_fit_executions"] != tiny["fits"]
+        or tiny["walk_forward_fit_executions"] != work["graph_fit_count"]
+    ):
+        raise FreezeError("renderer graph walk-forward count does not reconcile with graph work")
+    if not any(first_fit_mask):
+        raise FreezeError("renderer OOF first-fit mask has no executable evaluation rows")
     _strict_bool(work["within_hard_limits"], "work.within_hard_limits")
     limits = _strict_mapping(work["limits"], "work.limits")
     if json.dumps(_thaw_value(limits), sort_keys=True, separators=(",", ":")) != json.dumps(
@@ -1497,8 +1658,21 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     measurement = _strict_mapping(
         work["measurement"], "work.measurement", frozenset({"elapsed_seconds", "memory_mb"})
     )
-    _strict_number(measurement["elapsed_seconds"], "work.measurement.elapsed_seconds")
-    _strict_number(measurement["memory_mb"], "work.measurement.memory_mb")
+    elapsed = _report_decimal(
+        measurement["elapsed_seconds"], "renderer work.measurement.elapsed_seconds"
+    )
+    memory = _report_decimal(measurement["memory_mb"], "renderer work.measurement.memory_mb")
+    assert elapsed is not None and memory is not None
+    max_elapsed = _report_decimal(
+        limits_document["max_elapsed_seconds"], "config.compute_limits.max_elapsed_seconds"
+    )
+    max_memory = _report_decimal(
+        limits_document["max_memory_mb"], "config.compute_limits.max_memory_mb"
+    )
+    assert max_elapsed is not None and max_memory is not None
+    within_caps = elapsed <= max_elapsed and memory <= max_memory
+    if not within_caps or work["within_hard_limits"] is not within_caps:
+        raise FreezeError("renderer measurement does not reconcile with frozen hard limits")
     classification = _strict_mapping(
         report["result_classification"],
         "result_classification",
@@ -3142,7 +3316,7 @@ def _metrics(
         "status": status,
         "mse": round(mse, 12),
         "rank_correlation": round(rank_correlation, 12) if rank_correlation is not None else None,
-        "coverage": len(selected_rows) / len(rows),
+        "coverage": round(len(selected_rows) / len(rows), 12),
         "support": len(selected_rows),
         "prediction_trace": prediction_trace,
         "prediction_mask": list(mask),
@@ -3304,42 +3478,51 @@ def _economic_views(
         indices_by_group["horizon"][str(row.horizon_minutes)].append(index)
 
     def view(indices: Sequence[int]) -> dict[str, Any]:
-        gross_total = sum(gross_values[index] for index in indices)
-        turnover = sum(abs(changes[index]) for index in indices)
+        rendered_positions = {
+            index: _qdecimal(Decimal(str(round(positions[index], 12)))) for index in indices
+        }
+        rendered_changes = {
+            index: _qdecimal(Decimal(str(round(changes[index], 12)))) for index in indices
+        }
+        rendered_gross = {
+            index: _qdecimal(Decimal(str(round(gross_values[index], 12)))) for index in indices
+        }
+        gross_total = sum(rendered_gross.values(), Decimal("0"))
+        turnover = sum((abs(value) for value in rendered_changes.values()), Decimal("0"))
         count = len(indices)
-        gross_mean = gross_total / count if count else 0.0
+        gross_mean = gross_total / count if count else Decimal("0")
         break_even_cost = gross_total / turnover if turnover else None
-        sensitivities = [
-            {
-                "cost": float(point["value"]),
-                "unit": point["unit"],
-                "net_mean": (
-                    round(gross_mean - float(point["value"]) * turnover / count, 12)
-                    if count
-                    else None
-                ),
-                "break_even_cost": (
-                    round(break_even_cost, 12) if break_even_cost is not None else None
-                ),
-                "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
-            }
-            for point in config.document["cost_grid"]
-        ]
+        sensitivities: list[dict[str, Any]] = []
+        for point in config.document["cost_grid"]:
+            cost = _qdecimal(Decimal(str(point["value"])))
+            sensitivities.append(
+                {
+                    "cost": float(cost),
+                    "unit": point["unit"],
+                    "net_mean": (
+                        float(_qdecimal(gross_mean - cost * turnover / count)) if count else None
+                    ),
+                    "break_even_cost": (
+                        float(_qdecimal(break_even_cost)) if break_even_cost is not None else None
+                    ),
+                    "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
+                }
+            )
         return {
-            "gross_total": round(gross_total, 12),
-            "gross_mean": round(gross_mean, 12),
-            "turnover": round(turnover, 12),
+            "gross_total": float(_qdecimal(gross_total)),
+            "gross_mean": float(_qdecimal(gross_mean)),
+            "turnover": float(_qdecimal(turnover)),
             "break_even_cost": (
-                round(break_even_cost, 12) if break_even_cost is not None else None
+                float(_qdecimal(break_even_cost)) if break_even_cost is not None else None
             ),
             "all_in_cost_sensitivity": sensitivities,
             "position_trace": [
                 {
                     "target_id": rows[index].target_id,
                     "decision_time": rows[index].decision_time,
-                    "target_position": round(positions[index], 12),
-                    "target_position_change": round(changes[index], 12),
-                    "realised_gross": round(gross_values[index], 12),
+                    "target_position": float(rendered_positions[index]),
+                    "target_position_change": float(rendered_changes[index]),
+                    "realised_gross": float(rendered_gross[index]),
                 }
                 for index in indices
             ],
