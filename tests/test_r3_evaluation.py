@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 
+import qtrad.application.r3_evaluation as evaluation_app
 from qtrad.application.r3_evaluation import build_fixture_inputs, run_fixture
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
@@ -50,16 +51,80 @@ def test_missing_executable_side_is_fail_closed():
 
 
 def test_zero_delta_outcome_is_accepted_without_quotes():
+    decision, _ = build_fixture_inputs()
     outcome = OutcomeClosure(
         "ASSET_A",
-        datetime(2025, 1, 2, tzinfo=UTC),
-        datetime(2025, 1, 2, 0, 15, tzinfo=UTC),
+        decision.decision_time,
+        decision.expiry_time,
         timedelta(seconds=1),
         None,
         None,
         EvaluationDisposition.ACCEPTED,
+        source_class=decision.source_class,
+        evidence_purpose=decision.evidence_purpose,
+        decision_semantic_identity=decision.semantic_identity,
+        decision_closure_identity=decision.closure_identity,
     )
     assert outcome.entry is None and outcome.exit is None
+
+
+@pytest.mark.parametrize(
+    ("disposition", "reason_codes"),
+    (
+        (EvaluationDisposition.ACCEPTED, ()),
+        (EvaluationDisposition.UNAVAILABLE, ("MISSING_QUOTE",)),
+        (EvaluationDisposition.BLOCKED, ("BLOCKED_BY_POLICY",)),
+    ),
+)
+def test_quote_less_outcome_binds_source_evidence_and_decision(disposition, reason_codes):
+    decision, _ = build_fixture_inputs()
+    outcome = OutcomeClosure(
+        asset_id="ASSET_A",
+        decision_time=decision.decision_time,
+        target_time=decision.expiry_time,
+        latency=timedelta(seconds=1),
+        entry=None,
+        exit=None,
+        disposition=disposition,
+        reason_codes=reason_codes,
+        physical_delta=Decimal("0"),
+        source_class=decision.source_class,
+        evidence_purpose=decision.evidence_purpose,
+        decision_semantic_identity=decision.semantic_identity,
+        decision_closure_identity=decision.closure_identity,
+    )
+    assert outcome.canonical_payload["source_class"] is decision.source_class
+    assert outcome.canonical_payload["evidence_purpose"] is decision.evidence_purpose
+    assert outcome.canonical_payload["decision_semantic_identity"] == decision.semantic_identity
+    assert outcome.canonical_payload["decision_closure_identity"] == decision.closure_identity
+    for field in ("source_class", "evidence_purpose"):
+        with pytest.raises(ValueError, match="declared enums"):
+            replace(outcome, **{field: None}, closure_identity="")
+
+
+def test_fixture_rejects_stale_persisted_outcome_parent(monkeypatch, tmp_path):
+    original = evaluation_app.build_outcome_closures
+
+    def stale_outcomes(*args, **kwargs):
+        return tuple(
+            replace(item, decision_semantic_identity="0" * 64, closure_identity="")
+            for item in original(*args, **kwargs)
+        )
+
+    monkeypatch.setattr(evaluation_app, "build_outcome_closures", stale_outcomes)
+    with pytest.raises(ValueError, match="persisted outcome does not bind"):
+        run_fixture(tmp_path)
+
+
+def test_fixture_rejects_stale_report_parent(monkeypatch, tmp_path):
+    original = evaluation_app.evaluate_independently
+
+    def stale_report(*args, **kwargs):
+        return replace(original(*args, **kwargs), decision_identity="0" * 64)
+
+    monkeypatch.setattr(evaluation_app, "evaluate_independently", stale_report)
+    with pytest.raises(ValueError, match="evaluation report does not bind"):
+        run_fixture(tmp_path)
 
 
 def test_bad_fx_fails_closed():
@@ -192,6 +257,10 @@ def test_outcome_rejects_non_mid_quote():
             physical_delta=decision.physical_delta[0],
             decision_reference=reference,
             reference_to_entry_latency=entry.received_time - reference.received_time,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
+            decision_semantic_identity=decision.semantic_identity,
+            decision_closure_identity=decision.closure_identity,
         )
 
 

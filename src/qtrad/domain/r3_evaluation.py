@@ -464,6 +464,10 @@ class OutcomeClosure:
     closure_identity: str = ""
     decision_reference: QuoteEvidence | None = None
     reference_to_entry_latency: timedelta | None = None
+    source_class: MarketDataSourceClass = field(kw_only=True)
+    evidence_purpose: EvidencePurpose = field(kw_only=True)
+    decision_semantic_identity: str = field(kw_only=True)
+    decision_closure_identity: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         require_utc(self.decision_time, "outcome decision time")
@@ -473,7 +477,20 @@ class OutcomeClosure:
             raise ValueError("outcome times are invalid")
         if type(self.disposition) is not EvaluationDisposition:
             raise ValueError("outcome disposition must be a declared enum")
+        if (
+            type(self.source_class) is not MarketDataSourceClass
+            or type(self.evidence_purpose) is not EvidencePurpose
+        ):
+            raise ValueError("outcome source and evidence purpose must be declared enums")
+        _digest(self.decision_semantic_identity, "decision semantic identity")
+        _digest(self.decision_closure_identity, "decision closure identity")
         reference = self.decision_reference
+        for quote in (reference, self.entry, self.exit):
+            if quote is not None and (
+                quote.source_class is not self.source_class
+                or quote.evidence_purpose is not self.evidence_purpose
+            ):
+                raise ValueError("outcome source/evidence mismatch")
         if any(
             quote is not None and quote.price_basis is not PriceBasis.MID
             for quote in (self.entry, self.exit)
@@ -492,13 +509,6 @@ class OutcomeClosure:
                 or reference.midpoint is None
             ):
                 raise ValueError("decision reference quote is not valid")
-            for quote in (self.entry, self.exit):
-                if quote is not None and (
-                    quote.source_class is not reference.source_class
-                    or quote.evidence_purpose is not reference.evidence_purpose
-                    or quote.price_basis is not reference.price_basis
-                ):
-                    raise ValueError("decision reference source/evidence mismatch")
             if self.entry is not None:
                 bridge = self.entry.received_time - reference.received_time
                 if bridge < self.latency:
@@ -546,11 +556,6 @@ class OutcomeClosure:
                 raise ValueError("entry quote must precede exit quote")
             if self.entry.closure_identity == self.exit.closure_identity:
                 raise ValueError("entry and exit quote evidence must be distinct")
-            if (
-                self.entry.source_class is not self.exit.source_class
-                or self.entry.evidence_purpose is not self.exit.evidence_purpose
-            ):
-                raise ValueError("entry and exit source/evidence mismatch")
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
         expected_identity = identity(self.canonical_payload)
         if not self.closure_identity:
@@ -569,6 +574,10 @@ class OutcomeClosure:
             "target_time": self.target_time,
             "latency": self.latency,
             "physical_delta": self.physical_delta,
+            "source_class": self.source_class,
+            "evidence_purpose": self.evidence_purpose,
+            "decision_semantic_identity": self.decision_semantic_identity,
+            "decision_closure_identity": self.decision_closure_identity,
             "decision_reference": self.decision_reference.canonical_payload
             if self.decision_reference
             else None,
@@ -1667,6 +1676,10 @@ def evaluate_independently(
                 EvaluationDisposition.UNAVAILABLE,
                 (EvaluationReasonCode.BAD_FX.value,),
                 physical_delta=decision.physical_delta[index],
+                source_class=decision.source_class,
+                evidence_purpose=decision.evidence_purpose,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
             )
             unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1698,6 +1711,10 @@ def evaluate_independently(
                 None,
                 EvaluationDisposition.ACCEPTED,
                 physical_delta=decision.physical_delta[index],
+                source_class=decision.source_class,
+                evidence_purpose=decision.evidence_purpose,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
             )
             outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1747,6 +1764,10 @@ def evaluate_independently(
                 reasons,
                 physical_delta=decision.physical_delta[index],
                 decision_reference=reference,
+                source_class=decision.source_class,
+                evidence_purpose=decision.evidence_purpose,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
             )
             unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1784,6 +1805,10 @@ def evaluate_independently(
                 reasons,
                 physical_delta=decision.physical_delta[index],
                 decision_reference=reference,
+                source_class=decision.source_class,
+                evidence_purpose=decision.evidence_purpose,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
             )
             unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1826,6 +1851,10 @@ def evaluate_independently(
             physical_delta=decision.physical_delta[index],
             decision_reference=reference,
             reference_to_entry_latency=entry.received_time - reference.received_time,
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
+            decision_semantic_identity=decision.semantic_identity,
+            decision_closure_identity=decision.closure_identity,
         )
         outcome_ids.append(outcome.semantic_identity)
         assets.append(
@@ -1941,6 +1970,10 @@ def build_outcome_closures(
                     None,
                     EvaluationDisposition.ACCEPTED,
                     physical_delta=decision.physical_delta[index],
+                    source_class=decision.source_class,
+                    evidence_purpose=decision.evidence_purpose,
+                    decision_semantic_identity=decision.semantic_identity,
+                    decision_closure_identity=decision.closure_identity,
                 )
             )
             continue
@@ -1987,6 +2020,10 @@ def build_outcome_closures(
                     if entry is not None and reference is not None
                     else None
                 ),
+                source_class=decision.source_class,
+                evidence_purpose=decision.evidence_purpose,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
             )
         )
     return tuple(outcomes)

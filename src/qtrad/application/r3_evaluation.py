@@ -323,6 +323,13 @@ def run_fixture(output_dir: Path) -> EvaluationReport:
     latency = timedelta(seconds=1)
     outcomes = build_outcome_closures(decision, quotes, latency=latency)
     report = evaluate_independently(decision, quotes, latency=latency)
+    if (
+        report.source_class is not decision.source_class
+        or report.evidence_purpose is not decision.evidence_purpose
+        or report.decision_identity != decision.semantic_identity
+        or report.decision_closure_identity != decision.closure_identity
+    ):
+        raise ValueError("evaluation report does not bind decision closure")
     target = decision.rounded_target
     if target is None:
         raise ValueError("fixture decision must bind a rounded target")
@@ -331,11 +338,18 @@ def run_fixture(output_dir: Path) -> EvaluationReport:
     _write_create_only(output_dir / "target.json", target.canonical_bytes)
     persisted_outcome_ids: list[str] = []
     for outcome in outcomes:
-        persisted_id = _write_create_only(
-            output_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes
-        )
+        output_path = output_dir / f"outcome-{outcome.asset_id}.json"
+        persisted_id = _write_create_only(output_path, outcome.canonical_bytes)
         if persisted_id != outcome.semantic_identity:
             raise ValueError("persisted outcome identity does not match closure")
+        persisted_payload = json.loads(output_path.read_bytes())
+        if (
+            persisted_payload["source_class"] != decision.source_class.value
+            or persisted_payload["evidence_purpose"] != decision.evidence_purpose.value
+            or persisted_payload["decision_semantic_identity"] != decision.semantic_identity
+            or persisted_payload["decision_closure_identity"] != decision.closure_identity
+        ):
+            raise ValueError("persisted outcome does not bind decision closure")
         persisted_outcome_ids.append(persisted_id)
     expected_outcome_ids = (
         report.outcome_identities
