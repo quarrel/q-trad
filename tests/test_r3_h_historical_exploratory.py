@@ -460,6 +460,77 @@ def test_retained_child_identity_binding_is_strict() -> None:
         _validate_child_metadata("local_forecast", metadata, loader)
 
 
+def test_forecast_wrapper_schema_matches_producer_and_fixture_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.domain.market_data import MarketDataSourceClass
+    from qtrad.domain.r2_holdout import HoldoutScope, R2HoldoutForecastDataset
+    from qtrad.domain.r2_readiness import EvidenceClass
+
+    opportunity_id = "c" * 64
+    target_id = "d" * 64
+    producer = R2HoldoutForecastDataset.create(
+        selection_manifest_id="a" * 64,
+        feature_dataset_id=None,
+        configuration_id="b" * 64,
+        final_fit_id=None,
+        rows=(),
+        expected_opportunity_ids=(opportunity_id,),
+        opportunity_target_ids=((opportunity_id, target_id),),
+        source_class=next(iter(MarketDataSourceClass)),
+        evidence_class=next(iter(EvidenceClass)),
+        holdout_scope=next(iter(HoldoutScope)),
+    )
+    producer_keys = tuple(producer.semantic_json())
+    expected_wrapper_keys = (*producer_keys, "dataset_id")
+    assert producer_keys[9] == "opportunity_target_ids"
+
+    config = FreezeConfig.from_path(CONFIG)
+    loader = config.document["retained_loader"]
+    forecast_children = ("local_forecast", "pooled_forecast", "zero_forecast")
+    for name in forecast_children:
+        declaration = loader["child_wrappers"][name]
+        assert tuple(declaration["required_keys"]) == expected_wrapper_keys
+
+        metadata: dict[str, Any] = {key: None for key in declaration["required_keys"]}
+        metadata["contract"] = declaration["contract"]
+        metadata["dataset_id"] = declaration["identity"]
+        implementation._validate_child_metadata(name, metadata, loader)
+
+        missing = dict(metadata)
+        del missing["opportunity_target_ids"]
+        with pytest.raises(FreezeError, match="incomplete"):
+            implementation._validate_child_metadata(name, missing, loader)
+
+        unknown = dict(metadata)
+        unknown["unknown"] = True
+        with pytest.raises(FreezeError, match="unknown fields"):
+            implementation._validate_child_metadata(name, unknown, loader)
+
+    seen_fixture_metadata: dict[str, Mapping[str, Any]] = {}
+    original_validator = implementation._validate_child_metadata
+
+    def capture_fixture_metadata(
+        name: str,
+        metadata: Mapping[str, Any],
+        fixture_loader: Mapping[str, Any],
+        *,
+        fixture: bool = False,
+    ) -> None:
+        if fixture and name in forecast_children:
+            seen_fixture_metadata[name] = dict(metadata)
+        original_validator(name, metadata, fixture_loader, fixture=fixture)
+
+    monkeypatch.setattr(implementation, "_validate_child_metadata", capture_fixture_metadata)
+    implementation.load_fixture_rows(synthetic_fixture(), config)
+
+    assert set(seen_fixture_metadata) == set(forecast_children)
+    for fixture_metadata in seen_fixture_metadata.values():
+        assert "opportunity_target_ids" in fixture_metadata
+        assert set(fixture_metadata) == set(expected_wrapper_keys) | {"parts"}
+
+
 def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path) -> None:
     from qtrad.application.r3_historical_exploratory import _read_json_document
 
