@@ -31,3 +31,18 @@ with `freeze_finalists`, and supply the exact freeze SHA-256 and configuration I
 `TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt failed, evaluated training-only
 rows, or evaluated the terminal block, that configuration is permanently ineligible for a later
 freeze in the same workstream and manifest.
+
+## LAB-L temporal representation experiment
+
+LAB-L consumes only the exact canonical LAB-0 manifest named in
+`sequence-configurations.json`. Run the controlled smoke before a full CORE_6 execution:
+
+    uv run --isolated --with torch -m experiments.r2_historical_lab.sequence \
+        --config experiments/r2_historical_lab/sequence-configurations.json \
+        --scope CORE_6 --smoke \
+        --output /workspace/tmp/qtrad-r2-lab/LAB-L-smoke
+
+The full fixed experiment omits `--smoke` and writes under
+`/workspace/tmp/qtrad-r2-lab/LAB-L`. The former consumed holdout remains inaccessible unless
+a sequence configuration first passes every declared development screening condition and is
+create-only frozen by the shared LAB harness.
