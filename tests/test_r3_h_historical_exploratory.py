@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from qtrad.application.r3_historical_exploratory import (
+    FixtureMeasurement,
     FreezeConfig,
     FreezeError,
     analyse_fixture,
@@ -18,7 +21,15 @@ from qtrad.application.r3_historical_exploratory import (
 CONFIG = Path("docs/archive/r3/r3-historical-exploratory-freeze.json")
 
 
-def test_freeze_is_deterministic_and_rejects_unknown_or_expanded_candidates() -> None:
+def _rehashed(document: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: value for key, value in document.items() if key != "semantic_identity"}
+    document["semantic_identity"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return document
+
+
+def test_freeze_is_deterministic_and_rejects_unknown_expansion_and_mutation() -> None:
     first = FreezeConfig.from_path(CONFIG)
     second = FreezeConfig.from_path(CONFIG)
     assert first.semantic_identity == second.semantic_identity
@@ -36,6 +47,34 @@ def test_freeze_is_deterministic_and_rejects_unknown_or_expanded_candidates() ->
     with pytest.raises(FreezeError, match="candidate expansion"):
         FreezeConfig.from_mapping(expanded)
 
+    mutations = (
+        ("cost_grid", lambda value: value[0].__setitem__("value", 0.002)),
+        ("targets", lambda value: value.__setitem__(0, "MUTATED_TARGET")),
+        (
+            "statistical_formulations",
+            lambda value: value.__setitem__("metrics", ["mutated_metric"]),
+        ),
+        (
+            "retained_parents",
+            lambda value: value.__setitem__("stage7_semantic_id", "mutated-parent"),
+        ),
+        (
+            "nonlinear_candidates",
+            lambda value: value[0].__setitem__("degree", 7),
+        ),
+        ("tiny_graph_candidate", lambda value: value.__setitem__("hidden_units", 8)),
+        ("compute_limits", lambda value: value.__setitem__("max_rows", 63)),
+        (
+            "output_contract",
+            lambda value: value.__setitem__("post_result_expansion", True),
+        ),
+    )
+    for section, mutate in mutations:
+        candidate = json.loads(first.canonical_json())
+        mutate(candidate[section])
+        with pytest.raises(FreezeError):
+            FreezeConfig.from_mapping(_rehashed(candidate))
+
 
 def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> None:
     result = analyse_fixture(synthetic_fixture(), FreezeConfig.from_path(CONFIG))
@@ -43,10 +82,23 @@ def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> Non
     assert {"economic", "statistical", "graph"} <= report.keys()
     assert len(report["economic"]["all_in_cost_sensitivity"]) == 4
     assert {"asset", "horizon", "period"} <= report["economic"].keys()
+    assert report["economic"]["asset"]["A"]["turnover"] == 0.25
+    assert report["economic"]["asset"]["B"]["turnover"] == 0.25
+    assert report["economic"]["all_in_cost_sensitivity"][0]["break_even_cost"] is not None
     assert report["statistical"]["oof"]["causal"] is True
+    assert report["statistical"]["oof"]["support"] == 4
+    assert report["statistical"]["oof"]["coverage"] == 1.0
     assert report["statistical"]["negative_failed_inconclusive_rendered"] is True
     assert report["graph"]["tiny_learned_graph"]["feasibility_only"] is True
     assert report["graph"]["r4_replacement_required"] is True
+    assert {control["id"] for control in report["graph"]["controls"]} == {
+        "local_non_graph",
+        "pooled_non_graph",
+        "fixed_graph",
+        "shuffled_graph",
+    }
+    for control in report["graph"]["controls"]:
+        assert {"status", "mse", "rank_correlation", "coverage", "support"} <= control.keys()
     assert report["retained_parents"]["authentication_performed"] is False
     assert report["retained_parents"]["outcome_decode_performed"] is False
     assert report["claims"] == [
@@ -58,27 +110,41 @@ def test_fixture_micro_run_covers_economic_statistical_graph_and_labels() -> Non
     ]
 
 
-def test_chronology_and_work_limits_are_fail_closed() -> None:
+def test_synchronised_timestamps_are_allowed_but_duplicate_identity_fails() -> None:
     config = FreezeConfig.from_path(CONFIG)
     rows = list(synthetic_fixture())
-    rows[1] = type(rows[1])(
-        timestamp=rows[0].timestamp,
-        asset=rows[1].asset,
-        horizon_minutes=rows[1].horizon_minutes,
-        period=rows[1].period,
-        prediction=rows[1].prediction,
-        realised_return=rows[1].realised_return,
-        available_at=rows[1].available_at,
-    )
-    with pytest.raises(FreezeError, match="duplicate decision timestamp"):
+    rows[1] = replace(rows[1], timestamp=rows[0].timestamp, asset=rows[0].asset, horizon_minutes=30)
+    result = analyse_fixture(rows, config)
+    assert result.report["statistical"]["oof"]["rows"] == 4
+
+    rows[1] = replace(rows[1], horizon_minutes=rows[0].horizon_minutes, period=rows[0].period)
+    with pytest.raises(FreezeError, match="duplicate decision identity"):
         analyse_fixture(rows, config)
 
-    limited = json.loads(config.canonical_json())
-    limited["compute_limits"]["max_rows"] = 1
-    payload = {key: value for key, value in limited.items() if key != "semantic_identity"}
-    limited["semantic_identity"] = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    limited_config = FreezeConfig.from_mapping(limited)
+
+def test_work_and_resource_limits_fail_closed() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    base = synthetic_fixture()[0]
+    too_many_rows = tuple(
+        replace(
+            base,
+            timestamp=f"2026-02-01T00:{index:02}:00Z",
+            period=f"period-{index}",
+        )
+        for index in range(65)
+    )
     with pytest.raises(FreezeError, match="max_rows"):
-        analyse_fixture(synthetic_fixture(), limited_config)
+        analyse_fixture(too_many_rows, config)
+
+    with pytest.raises(FreezeError, match="max_elapsed_seconds"):
+        analyse_fixture(
+            synthetic_fixture(),
+            config,
+            measurement=FixtureMeasurement(elapsed_seconds=61, memory_mb=1),
+        )
+    with pytest.raises(FreezeError, match="max_memory_mb"):
+        analyse_fixture(
+            synthetic_fixture(),
+            config,
+            measurement=FixtureMeasurement(elapsed_seconds=1, memory_mb=513),
+        )

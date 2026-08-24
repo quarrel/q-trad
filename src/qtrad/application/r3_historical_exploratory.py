@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import resource
+import sys
+import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +25,10 @@ REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v1"
 AUTHENTICATION_COMMAND: Final = (
     "qtrad research observations authenticate-provider-history "
     "--manifest <stage7-v3-manifest> --receipt <stage7-v3-receipt>"
+)
+
+_REVIEWED_SEMANTIC_IDENTITY: Final = (
+    "482e941019fbeffc9396bff5b8a947bcef9b8fba71e30ef854722a96cab5c4d8"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
@@ -92,6 +100,7 @@ class FixtureRow:
     period: str
     prediction: float
     realised_return: float
+    target_position_change: float
     available_at: str
 
     def __post_init__(self) -> None:
@@ -99,6 +108,11 @@ class FixtureRow:
             raise ValueError("horizon_minutes must be positive")
         if self.available_at > self.timestamp:
             raise ValueError("availability cannot follow decision timestamp")
+        if not all(
+            math.isfinite(value)
+            for value in (self.prediction, self.realised_return, self.target_position_change)
+        ):
+            raise ValueError("fixture numeric values must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,8 +155,10 @@ class FreezeConfig:
             raise FreezeError("output contract permits an unbounded or mutable result")
         computed = _semantic_hash(raw)
         supplied = raw.get("semantic_identity")
-        if not isinstance(supplied, str) or supplied != computed:
-            raise FreezeError("semantic_identity does not match canonical configuration")
+        if computed != _REVIEWED_SEMANTIC_IDENTITY:
+            raise FreezeError("configuration does not match reviewed frozen semantic identity")
+        if not isinstance(supplied, str) or supplied != _REVIEWED_SEMANTIC_IDENTITY:
+            raise FreezeError("semantic_identity does not match reviewed frozen identity")
         frozen = _freeze_value(json.loads(json.dumps(raw, sort_keys=True, separators=(",", ":"))))
         if not isinstance(frozen, Mapping):
             raise FreezeError("configuration could not be frozen")
@@ -158,6 +174,20 @@ class FreezeConfig:
 
     def canonical_json(self) -> str:
         return json.dumps(_thaw_value(self.document), sort_keys=True, separators=(",", ":")) + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureMeasurement:
+    """Deterministic fixture-run resource sample; tests may inject this seam."""
+
+    elapsed_seconds: float
+    memory_mb: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must be finite and non-negative")
+        if not math.isfinite(self.memory_mb) or self.memory_mb < 0:
+            raise ValueError("memory_mb must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,16 +359,74 @@ def retained_input_paths() -> Mapping[str, str]:
     }
 
 
-def _chronological_oof(rows: Sequence[FixtureRow]) -> tuple[dict[str, Any], int]:
-    ordered = sorted(rows, key=lambda row: (row.timestamp, row.asset, row.horizon_minutes))
-    seen: set[str] = set()
+def _decision_identity(row: FixtureRow) -> tuple[str, str, int, str]:
+    return (row.timestamp, row.asset, row.horizon_minutes, row.period)
+
+
+def _rank_values(values: Sequence[float]) -> list[float]:
+    ranks = [0.0] * len(values)
+    for index, value in enumerate(values):
+        lower = sum(other < value for other in values)
+        equal = sum(other == value for other in values)
+        ranks[index] = lower + (equal + 1) / 2
+    return ranks
+
+
+def _metrics(
+    rows: Sequence[FixtureRow],
+    predictions: Sequence[float],
+    *,
+    baseline_mse: float | None,
+    minimum_support: int = 1,
+) -> dict[str, Any]:
+    if len(rows) != len(predictions) or not rows:
+        raise FreezeError("fixture control produced no aligned predictions")
+    if any(
+        not math.isfinite(prediction) or not math.isfinite(row.realised_return)
+        for row, prediction in zip(rows, predictions, strict=True)
+    ):
+        raise FreezeError("fixture control produced non-finite values")
+    realised = [row.realised_return for row in rows]
+    errors = [prediction - actual for prediction, actual in zip(predictions, realised, strict=True)]
+    mse = sum(error * error for error in errors) / len(errors)
+    prediction_ranks = _rank_values(predictions)
+    realised_ranks = _rank_values(realised)
+    mean_prediction_rank = sum(prediction_ranks) / len(prediction_ranks)
+    mean_realised_rank = sum(realised_ranks) / len(realised_ranks)
+    covariance = sum(
+        (left - mean_prediction_rank) * (right - mean_realised_rank)
+        for left, right in zip(prediction_ranks, realised_ranks, strict=True)
+    )
+    prediction_scale = sum((rank - mean_prediction_rank) ** 2 for rank in prediction_ranks)
+    realised_scale = sum((rank - mean_realised_rank) ** 2 for rank in realised_ranks)
+    rank_correlation = (
+        covariance / math.sqrt(prediction_scale * realised_scale)
+        if prediction_scale and realised_scale
+        else None
+    )
+    status = "FAILED" if len(rows) < minimum_support else "INCONCLUSIVE"
+    if baseline_mse is not None and mse > baseline_mse + 1e-15 and status != "FAILED":
+        status = "NEGATIVE"
+    return {
+        "status": status,
+        "mse": round(mse, 12),
+        "rank_correlation": round(rank_correlation, 12) if rank_correlation is not None else None,
+        "coverage": 1.0,
+        "support": len(rows),
+    }
+
+
+def _chronological_oof(rows: Sequence[FixtureRow]) -> tuple[dict[str, Any], int, list[FixtureRow]]:
+    ordered = sorted(rows, key=_decision_identity)
+    seen: set[tuple[str, str, int, str]] = set()
     errors: list[float] = []
     for row in ordered:
+        identity = _decision_identity(row)
         if row.available_at > row.timestamp:
             raise FreezeError("OOF row uses a value unavailable at its decision time")
-        if row.timestamp in seen:
-            raise FreezeError("duplicate decision timestamp would make chronology ambiguous")
-        seen.add(row.timestamp)
+        if identity in seen:
+            raise FreezeError("duplicate decision identity would make chronology ambiguous")
+        seen.add(identity)
         errors.append(row.prediction - row.realised_return)
     if not errors:
         raise FreezeError("fixture must contain at least one chronological row")
@@ -346,18 +434,26 @@ def _chronological_oof(rows: Sequence[FixtureRow]) -> tuple[dict[str, Any], int]
     return (
         {
             "formulation": "chronological_oof_mean_squared_error",
+            "ordering": "timestamp,asset,horizon_minutes,period",
+            "decision_identity": "timestamp|asset|horizon_minutes|period",
             "rows": len(ordered),
             "first_timestamp": ordered[0].timestamp,
             "last_timestamp": ordered[-1].timestamp,
             "mse": round(mse, 12),
             "causal": True,
+            "purge_embargo": {
+                "applied": False,
+                "rows_excluded": 0,
+                "reason": "fixture carries no dependency interval; availability was checked",
+            },
         },
         len(ordered),
+        ordered,
     )
 
 
 def _economic_views(rows: Sequence[FixtureRow], config: FreezeConfig) -> dict[str, Any]:
-    turnover = sum(abs(row.prediction) for row in rows) / len(rows)
+    turnover = sum(abs(row.target_position_change) for row in rows)
     gross = sum(row.prediction * row.realised_return for row in rows) / len(rows)
     periods: dict[str, list[FixtureRow]] = defaultdict(list)
     assets: dict[str, list[FixtureRow]] = defaultdict(list)
@@ -370,12 +466,12 @@ def _economic_views(rows: Sequence[FixtureRow], config: FreezeConfig) -> dict[st
     def view(groups: Mapping[str, Sequence[FixtureRow]]) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for name, group in sorted(groups.items()):
-            group_turnover = sum(abs(item.prediction) for item in group) / len(group)
+            group_turnover = sum(abs(item.target_position_change) for item in group)
             group_gross = sum(item.prediction * item.realised_return for item in group) / len(group)
             values[name] = {
                 "gross_mean": round(group_gross, 12),
                 "turnover": round(group_turnover, 12),
-                "break_even_cost": round(group_gross / group_turnover, 12)
+                "break_even_cost": round(group_gross * len(group) / group_turnover, 12)
                 if group_turnover
                 else None,
             }
@@ -385,8 +481,8 @@ def _economic_views(rows: Sequence[FixtureRow], config: FreezeConfig) -> dict[st
         {
             "cost": float(point["value"]),
             "unit": point["unit"],
-            "net_mean": round(gross - float(point["value"]) * turnover, 12),
-            "break_even_cost": round(gross / turnover, 12) if turnover else None,
+            "net_mean": round(gross - float(point["value"]) * turnover / len(rows), 12),
+            "break_even_cost": round(gross * len(rows) / turnover, 12) if turnover else None,
             "label": "MIDPOINT_ASSUMPTION_NOT_EXECUTABLE",
         }
         for point in config.document["cost_grid"]
@@ -400,42 +496,137 @@ def _economic_views(rows: Sequence[FixtureRow], config: FreezeConfig) -> dict[st
     }
 
 
-def analyse_fixture(rows: Sequence[FixtureRow], config: FreezeConfig) -> MicroRun:
-    """Run all three bounded components against synthetic/fixture rows only."""
+def _runtime_measurement(started: float) -> FixtureMeasurement:
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return FixtureMeasurement(time.monotonic() - started, usage / divisor)
 
-    limits = config.document["compute_limits"]
+
+def _check_hard_limits(limits: Mapping[str, Any], measurement: FixtureMeasurement) -> None:
+    if measurement.elapsed_seconds > limits["max_elapsed_seconds"]:
+        raise FreezeError("fixture analysis exceeded max_elapsed_seconds")
+    if measurement.memory_mb > limits["max_memory_mb"]:
+        raise FreezeError("fixture analysis exceeded max_memory_mb")
+
+
+def _graph_predictions(rows: Sequence[FixtureRow]) -> dict[str, list[float]]:
+    values = [row.prediction for row in rows]
+    mean_prediction = sum(values) / len(values)
+    return {
+        "local_non_graph": values,
+        "pooled_non_graph": [mean_prediction] * len(rows),
+        "fixed_graph": [
+            (value + values[(index - 1) % len(values)]) / 2 for index, value in enumerate(values)
+        ],
+        "shuffled_graph": [values[(index + 1) % len(values)] for index in range(len(values))],
+        "tiny_learned_graph": [
+            0.75 * value + 0.25 * values[(index - 1) % len(values)]
+            for index, value in enumerate(values)
+        ],
+    }
+
+
+def analyse_fixture(
+    rows: Sequence[FixtureRow],
+    config: FreezeConfig,
+    *,
+    measurement: FixtureMeasurement | None = None,
+) -> MicroRun:
+    """Run all three bounded components against synthetic/fixture rows only."""
+    started = time.monotonic()
+    limits = cast(Mapping[str, Any], config.document["compute_limits"])
     if len(rows) > limits["max_rows"]:
         raise FreezeError("fixture exceeds max_rows")
-    oof, row_count = _chronological_oof(rows)
-    economic = _economic_views(rows, config)
+    oof, row_count, ordered = _chronological_oof(rows)
+    economic = _economic_views(ordered, config)
     candidate_ids = list(_CANDIDATE_IDS)
-    fits = len(candidate_ids) + 1
+    zero_predictions = [0.0] * row_count
+    local_predictions = [row.prediction for row in ordered]
+    pooled_value = sum(local_predictions) / row_count
+    candidate_predictions = {
+        "linear_ridge": local_predictions,
+        "linear_zero_return": zero_predictions,
+        "nonlinear_huber": [max(-0.05, min(0.05, row.prediction)) for row in ordered],
+    }
+    zero_metrics = _metrics(ordered, zero_predictions, baseline_mse=None)
+    baseline_mse = float(zero_metrics["mse"])
+    candidate_metrics = {
+        candidate_id: _metrics(
+            ordered,
+            candidate_predictions[candidate_id],
+            baseline_mse=baseline_mse if candidate_id != "linear_zero_return" else None,
+            minimum_support=5 if candidate_id == "nonlinear_huber" else 1,
+        )
+        for candidate_id in candidate_ids
+    }
+    tiny_graph = cast(Mapping[str, Any], config.document["tiny_graph_candidate"])
+    graph_fit_count = 1 if tiny_graph["enabled"] else 0
+    fits = len(candidate_metrics) + graph_fit_count
     if fits > limits["max_fits"] or len(candidate_ids) > limits["max_candidates"]:
         raise FreezeError("fixture analysis exceeded frozen work limits")
-    statuses = {
-        "linear_ridge": "NEGATIVE",
-        "linear_zero_return": "INCONCLUSIVE",
-        "nonlinear_huber": "FAILED",
+    control_predictions = {
+        "zero_return": zero_predictions,
+        "local_ridge": local_predictions,
+        "pooled_local_ridge": [pooled_value] * row_count,
     }
+    control_metrics = {
+        control_id: _metrics(
+            ordered,
+            predictions,
+            baseline_mse=baseline_mse if control_id != "zero_return" else None,
+        )
+        for control_id, predictions in control_predictions.items()
+    }
+    oof_metrics = control_metrics["local_ridge"]
     statistical = {
-        "oof": oof,
-        "simple_controls": [{"id": key, "status": statuses[key]} for key in candidate_ids],
-        "negative_failed_inconclusive_rendered": True,
+        "oof": {
+            **oof,
+            "rank_correlation": oof_metrics["rank_correlation"],
+            "coverage": oof_metrics["coverage"],
+            "support": oof_metrics["support"],
+        },
+        "simple_controls": [
+            {"id": control_id, **control_metrics[control_id]}
+            for control_id in ("zero_return", "local_ridge", "pooled_local_ridge")
+        ],
+        "negative_failed_inconclusive_rendered": {
+            metric["status"] for metric in (*candidate_metrics.values(), *control_metrics.values())
+        }
+        >= {"NEGATIVE", "FAILED", "INCONCLUSIVE"},
         "post_result_selection": False,
+    }
+    graph_predictions = _graph_predictions(ordered)
+    graph_metrics = {
+        control_id: _metrics(
+            ordered,
+            predictions,
+            baseline_mse=baseline_mse,
+        )
+        for control_id, predictions in graph_predictions.items()
     }
     graph = {
         "tiny_learned_graph": {
             "id": "tiny_learned_graph",
-            "status": "INCONCLUSIVE",
+            **graph_metrics["tiny_learned_graph"],
             "feasibility_only": True,
-            "fits": 1,
+            "fits": graph_fit_count,
         },
         "controls": [
-            {"id": key, "status": "INCONCLUSIVE", "feasibility_only": True}
-            for key in _GRAPH_CONTROL_IDS
+            {
+                "id": control_id,
+                **graph_metrics[control_id],
+                "feasibility_only": True,
+            }
+            for control_id in _GRAPH_CONTROL_IDS
         ],
         "r4_replacement_required": True,
     }
+    measured = measurement or _runtime_measurement(started)
+    _check_hard_limits(limits, measured)
+    statuses = {
+        candidate_id: metric["status"] for candidate_id, metric in candidate_metrics.items()
+    }
+    graph_statuses = {control_id: metric["status"] for control_id, metric in graph_metrics.items()}
     report: dict[str, Any] = {
         "contract": REPORT_CONTRACT,
         "schema_version": 1,
@@ -457,19 +648,37 @@ def analyse_fixture(rows: Sequence[FixtureRow], config: FreezeConfig) -> MicroRu
             "rows": row_count,
             "candidate_count": len(candidate_ids),
             "fit_count": fits,
-            "graph_fit_count": 1,
+            "graph_fit_count": graph_fit_count,
+            "graph_control_count": len(graph_metrics) - graph_fit_count,
             "within_hard_limits": True,
             "limits": dict(limits),
+            "measurement": {
+                "elapsed_seconds": round(measured.elapsed_seconds, 9),
+                "memory_mb": round(measured.memory_mb, 6),
+            },
         },
         "result_classification": {
-            "negative": ["linear_ridge"],
-            "failed": ["nonlinear_huber"],
-            "inconclusive": ["linear_zero_return", "tiny_learned_graph", *_GRAPH_CONTROL_IDS],
+            "negative": [
+                key
+                for key, status in {**statuses, **graph_statuses}.items()
+                if status == "NEGATIVE"
+            ],
+            "failed": [
+                key for key, status in {**statuses, **graph_statuses}.items() if status == "FAILED"
+            ],
+            "inconclusive": [
+                key
+                for key, status in {**statuses, **graph_statuses}.items()
+                if status == "INCONCLUSIVE"
+            ],
         },
         "create_only_destination": "operator-selected future R3.H report path",
         "no_post_result_expansion": True,
     }
-    return MicroRun(report, {"rows": row_count, "fits": fits, "candidates": len(candidate_ids)})
+    return MicroRun(
+        report,
+        {"rows": row_count, "fits": fits, "candidates": len(candidate_ids)},
+    )
 
 
 def synthetic_fixture() -> tuple[FixtureRow, ...]:
@@ -483,10 +692,16 @@ def synthetic_fixture() -> tuple[FixtureRow, ...]:
             period="fixture-period",
             prediction=prediction,
             realised_return=realised,
+            target_position_change=position_change,
             available_at=f"2025-12-31T23:5{index}:00Z",
         )
-        for index, (asset, prediction, realised) in enumerate(
-            (("A", 0.02, 0.01), ("B", -0.01, 0.00), ("A", 0.01, -0.01), ("B", 0.00, 0.01)),
+        for index, (asset, prediction, realised, position_change) in enumerate(
+            (
+                ("A", 0.02, 0.01, 0.20),
+                ("B", -0.01, 0.00, -0.10),
+                ("A", 0.01, -0.01, 0.05),
+                ("B", 0.00, 0.01, -0.15),
+            ),
             start=1,
         )
     )
