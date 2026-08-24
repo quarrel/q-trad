@@ -5,7 +5,7 @@
   "source_class": "IBKR_HISTORICAL_RESEARCH",
   "lab_manifest": "/workspace/tmp/qtrad-r2-lab/LAB-0/lab-manifest.json",
   "lab_manifest_sha256": "462e40fa84038156b16c68bde4b68d574ab7862c680657ebd1a0035b39bf0072",
-  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-L",
+  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2",
   "horizon_minutes": 15,
   "core_instruments": [
     "commodity:spot-gold",
@@ -22,10 +22,10 @@
   "mlp_hidden_size": 16,
   "learning_rate": 0.001,
   "weight_decay": 0.0001,
-  "batch_size": 512,
-  "maximum_epochs": 8,
-  "early_stopping_patience": 2,
+  "batch_size": 4096,
+  "maximum_epochs": 4,
+  "early_stopping_patience": 1,
   "validation_fraction": 0.15,
-  "maximum_fit_rows_per_fold": 60000,
-  "maximum_validation_rows_per_fold": 20000
+  "maximum_fit_rows_per_fold": 20000,
+  "maximum_validation_rows_per_fold": 5000
 }

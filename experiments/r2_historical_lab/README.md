@@ -40,9 +40,11 @@ LAB-L consumes only the exact canonical LAB-0 manifest named in
     uv run --isolated --with torch -m experiments.r2_historical_lab.sequence \
         --config experiments/r2_historical_lab/sequence-configurations.json \
         --scope CORE_6 --smoke \
-        --output /workspace/tmp/qtrad-r2-lab/LAB-L-smoke
+        --output /workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2-smoke
 
 The full fixed experiment omits `--smoke` and writes under
-`/workspace/tmp/qtrad-r2-lab/LAB-L`. The former consumed holdout remains inaccessible unless
-a sequence configuration first passes every declared development screening condition and is
-create-only frozen by the shared LAB harness.
+`/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2`. The first retained-scale attempt is preserved as a
+failed timeout under `/workspace/tmp/qtrad-r2-lab/LAB-L`; its completed configurations count as
+attempted exploratory variants. The former consumed holdout remains inaccessible unless a sequence
+configuration first passes every declared development screening condition and is create-only frozen
+by the shared LAB harness.

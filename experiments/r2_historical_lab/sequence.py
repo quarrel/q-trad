@@ -256,7 +256,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _model_configurations(config: LabConfig, *, smoke: bool) -> tuple[ModelConfiguration, ...]:
+def _model_configurations(config: LabConfig) -> tuple[ModelConfiguration, ...]:
     seed = config.seeds[0]
     values = [
         ModelConfiguration("POOLED_RIDGE_ENGINEERED", "RIDGE", seed),
@@ -274,7 +274,7 @@ def _model_configurations(config: LabConfig, *, smoke: bool) -> tuple[ModelConfi
         for hidden in config.hidden_sizes
         for candidate_seed in config.seeds
     ]
-    values.extend(lstms[:1] if smoke else lstms)
+    values.extend(lstms)
     return tuple(values)
 
 
@@ -811,7 +811,7 @@ def run(config: LabConfig, *, scope: str, smoke: bool, output: Path) -> dict[str
     )
     instruments = tuple(config.core_instruments if scope == "CORE_6" else manifest["instruments"])
     market_groups = cast(dict[str, str], manifest["market_groups"])
-    models = _model_configurations(config, smoke=smoke)
+    models = _model_configurations(config)
     register = output / "run-register.jsonl"
     result_rows: list[dict[str, Any]] = []
     curves: list[dict[str, Any]] = []

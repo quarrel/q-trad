@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -9,8 +10,10 @@ import polars as pl
 from experiments.r2_historical_lab.sequence import (
     GROUPS,
     SEQUENCE_COLUMNS,
+    LabConfig,
     SequenceIndex,
     Standardiser,
+    _model_configurations,
     chronological_fit_validation,
     screening_gate,
 )
@@ -106,3 +109,23 @@ def test_standardiser_handles_an_entirely_absent_channel() -> None:
     assert standardiser.mean.tolist() == [2.0, 0.0]
     assert standardiser.scale.tolist() == [1.0, 1.0]
     assert standardiser.transform(values).tolist() == [[-1.0, 0.0], [1.0, 0.0]]
+
+
+def test_fixed_configuration_and_smoke_cover_every_planned_model() -> None:
+    config = LabConfig.read(Path("experiments/r2_historical_lab/sequence-configurations.json"))
+
+    models = _model_configurations(config)
+
+    assert [model.family for model in models] == [
+        "RIDGE",
+        "MLP",
+        "LSTM",
+        "LSTM",
+        "LSTM",
+        "LSTM",
+    ]
+    assert config.batch_size == 4096
+    assert config.maximum_epochs == 4
+    assert config.patience == 1
+    assert config.maximum_fit_rows == 20000
+    assert config.maximum_validation_rows == 5000
