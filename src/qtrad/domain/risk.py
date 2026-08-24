@@ -235,6 +235,7 @@ class ExposureMapping:
     def ordered_currency_keys(self) -> tuple[str, ...]:
         return self.currency_keys
 
+
 @dataclass(frozen=True, slots=True)
 class RiskState:
     """Immutable, ordered covariance and exposure state for one horizon."""
@@ -665,7 +666,6 @@ estimate_risk_state = estimate_ordered_risk_state
 OrderedRiskState = RiskState
 
 
-
 def _ledoit_wolf(matrix: FloatMatrix) -> tuple[FloatMatrix, float]:
     """Calculate a centered Ledoit-Wolf covariance without model libraries."""
     sample_count = len(matrix)
@@ -675,17 +675,14 @@ def _ledoit_wolf(matrix: FloatMatrix) -> tuple[FloatMatrix, float]:
     if feature_count == 0 or any(len(row) != feature_count for row in matrix):
         raise ValueError("risk estimator matrix has invalid shape")
     means = tuple(
-        sum(row[index] for row in matrix) / sample_count
-        for index in range(feature_count)
+        sum(row[index] for row in matrix) / sample_count for index in range(feature_count)
     )
     centered = tuple(
-        tuple(row[index] - means[index] for index in range(feature_count))
-        for row in matrix
+        tuple(row[index] - means[index] for index in range(feature_count)) for row in matrix
     )
     empirical = tuple(
         tuple(
-            sum(row[row_index] * row[column_index] for row in centered)
-            / sample_count
+            sum(row[row_index] * row[column_index] for row in centered) / sample_count
             for column_index in range(feature_count)
         )
         for row_index in range(feature_count)
@@ -694,8 +691,7 @@ def _ledoit_wolf(matrix: FloatMatrix) -> tuple[FloatMatrix, float]:
         return empirical, 0.0
     squared = tuple(tuple(value * value for value in row) for row in centered)
     trace_by_feature = tuple(
-        sum(row[index] for row in squared) / sample_count
-        for index in range(feature_count)
+        sum(row[index] for row in squared) / sample_count for index in range(feature_count)
     )
     mu = sum(trace_by_feature) / feature_count
     beta_sum = sum(
@@ -705,44 +701,26 @@ def _ledoit_wolf(matrix: FloatMatrix) -> tuple[FloatMatrix, float]:
         for column_index in range(feature_count)
     )
     gram_square_sum = sum(
-        (
-            sum(
-                row[feature_index] * row[column_index]
-                for row in centered
-            )
-        )
-        ** 2
+        (sum(row[feature_index] * row[column_index] for row in centered)) ** 2
         for feature_index in range(feature_count)
         for column_index in range(feature_count)
     )
     delta_estimate = gram_square_sum / (sample_count**2)
-    beta = (
-        beta_sum / sample_count - delta_estimate
-    ) / (feature_count * sample_count)
+    beta = (beta_sum / sample_count - delta_estimate) / (feature_count * sample_count)
     beta = min(beta, delta_estimate)
     delta = (
-        delta_estimate
-        - 2.0 * mu * sum(trace_by_feature)
-        + feature_count * mu * mu
+        delta_estimate - 2.0 * mu * sum(trace_by_feature) + feature_count * mu * mu
     ) / feature_count
     shrinkage = 0.0 if beta <= 0.0 or delta <= 0.0 else min(1.0, beta / delta)
     covariance = tuple(
         tuple(
             (1.0 - shrinkage) * empirical[row_index][column_index]
-            + (
-                shrinkage * mu
-                if row_index == column_index
-                else 0.0
-            )
+            + (shrinkage * mu if row_index == column_index else 0.0)
             for column_index in range(feature_count)
         )
         for row_index in range(feature_count)
     )
-    if any(
-        not isfinite(value)
-        for row in covariance
-        for value in row
-    ) or not isfinite(shrinkage):
+    if any(not isfinite(value) for row in covariance for value in row) or not isfinite(shrinkage):
         raise ValueError("risk estimator produced an invalid covariance")
     return covariance, shrinkage
 
@@ -754,8 +732,7 @@ def _is_positive_semidefinite(matrix: FloatMatrix, tolerance: float) -> bool:
     for row in range(size):
         for column in range(row + 1):
             residual = matrix[row][column] - sum(
-                factor[row][index] * factor[column][index]
-                for index in range(column)
+                factor[row][index] * factor[column][index] for index in range(column)
             )
             if row == column:
                 if residual < -tolerance:
@@ -766,6 +743,7 @@ def _is_positive_semidefinite(matrix: FloatMatrix, tolerance: float) -> bool:
             elif abs(residual) > tolerance:
                 return False
     return True
+
 
 def _validate_mapping(
     keys: tuple[str, ...],
@@ -809,7 +787,6 @@ def _validate_square_matrix(
         raise ValueError(f"{label} is not symmetric within tolerance")
     if not _is_positive_semidefinite(matrix, psd_tolerance):
         raise ValueError(f"{label} is not positive semidefinite within tolerance")
-
 
 
 def _complete_values(values: tuple[float | None, ...]) -> tuple[float, ...]:
