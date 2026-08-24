@@ -32,7 +32,7 @@ STAGE8_AUTHENTICATION_COMMAND: Final = (
     "--foundation-promotion <stage8-promotion> --experiment <experiment> --output <new-json>"
 )
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "8359cd82ed5a20fa7f104fe05586efa9277241445edd0d2b14f92dc8d60f545c"
+    "f0c13c149f0fcddafa55d462d5f67583b5d1e8c38d1e20dc1a07b4736a0ec60a"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",

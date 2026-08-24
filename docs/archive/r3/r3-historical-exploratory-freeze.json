@@ -97,7 +97,8 @@
       "available_at",
       "target_available_at",
       "dependency_start",
-      "dependency_end"
+      "dependency_end",
+      "feature_value"
     ],
     "identity_bindings": {
       "target_dataset": "2a09e6146e6feaa1e707f245c8585949fdc15a3a92828f37e1a9e93866de8e5f",
@@ -170,5 +171,5 @@
     "create_only": true,
     "post_result_expansion": false
   },
-  "semantic_identity": "8359cd82ed5a20fa7f104fe05586efa9277241445edd0d2b14f92dc8d60f545c"
+  "semantic_identity": "f0c13c149f0fcddafa55d462d5f67583b5d1e8c38d1e20dc1a07b4736a0ec60a"
 }
