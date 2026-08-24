@@ -246,8 +246,26 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
     )
     target_receipt = _target_receipt(target)
     attributions = (
-        SleeveAttribution("long", asset, Decimal("1"), Decimal("0.5"), Decimal("0.5")),
-        SleeveAttribution("short", asset, Decimal("-0.5"), Decimal("0.5"), Decimal("0")),
+        SleeveAttribution(
+            "long",
+            asset,
+            repaired[0].requested_delta,
+            repaired[0].internal_cross_quantity,
+            repaired[0].external_delta_share,
+            repaired[0].repair_delta,
+            repaired[0].reason_codes,
+            key=repaired[0].key,
+        ),
+        SleeveAttribution(
+            "short",
+            asset,
+            repaired[1].requested_delta,
+            repaired[1].internal_cross_quantity,
+            repaired[1].external_delta_share,
+            repaired[1].repair_delta,
+            repaired[1].reason_codes,
+            key=repaired[1].key,
+        ),
     )
     risk = _risk_state(source, purpose)
     decision = DecisionClosure(

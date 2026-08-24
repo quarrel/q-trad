@@ -25,6 +25,7 @@ from qtrad.domain.economics import (
     InputStatus,
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass, PriceBasis
+from qtrad.domain.portfolio import SleeveKey
 from qtrad.domain.r3_rounding import RoundedTarget
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
@@ -54,6 +55,7 @@ class EvaluationReasonCode(StrEnum):
     DOUBLE_COUNTING = "DOUBLE_COUNTING"
     POSITION_RESIDUAL = "POSITION_RESIDUAL"
     COST_RESIDUAL = "COST_RESIDUAL"
+    MISSING_DECISION_REFERENCE = "MISSING_DECISION_REFERENCE"
 
 
 def _canonical(value: object) -> object:
@@ -131,7 +133,7 @@ def _ordered_decimal_pairs(
 
 @dataclass(frozen=True, slots=True)
 class SleeveAttribution:
-    """Independent copy of final sleeve movement, including non-alpha repair."""
+    """Independent copy of final sleeve movement, retaining full R3.D identity."""
 
     sleeve_id: str
     asset_id: str
@@ -140,10 +142,15 @@ class SleeveAttribution:
     external_delta_share: Decimal
     repair_delta: Decimal = Decimal("0")
     reason_codes: tuple[str, ...] = ()
+    key: SleeveKey | None = None
 
     def __post_init__(self) -> None:
         if not self.sleeve_id or not self.asset_id:
             raise ValueError("sleeve and asset identity are required")
+        if self.key is not None and (
+            self.key.asset_id != self.asset_id or self.key.configuration_id != self.sleeve_id
+        ):
+            raise ValueError("sleeve key does not bind sleeve and asset identity")
         for value, name in (
             (self.requested_delta, "requested delta"),
             (self.internal_cross_quantity, "internal cross quantity"),
@@ -153,7 +160,6 @@ class SleeveAttribution:
             _decimal(value, name)
         if self.internal_cross_quantity < 0:
             raise ValueError("internal cross quantity must be non-negative")
-        # The pre-repair external movement is the amount requested after internal matching.
         if abs(self.external_delta_share - self.repair_delta) + self.internal_cross_quantity != abs(
             self.requested_delta
         ):
@@ -161,8 +167,12 @@ class SleeveAttribution:
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     @property
-    def canonical_key(self) -> tuple[str, str]:
-        return (self.asset_id, self.sleeve_id)
+    def canonical_key(self) -> tuple[object, ...]:
+        return self.key.canonical_tuple if self.key is not None else (self.asset_id, self.sleeve_id)
+
+    @property
+    def sleeve_key(self) -> SleeveKey | None:
+        return self.key
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,20 +252,24 @@ class DecisionClosure:
                 raise ValueError("decision closure does not bind rounded target")
             if self.parent_verification_identity != self.target_verification_identity:
                 raise ValueError("decision parent must be the rounded-target receipt")
-            expected_attributions = {
-                (item.key.asset_id, item.key.configuration_id): item for item in target.attributions
-            }
+            expected_attributions = {item.key.canonical_tuple: item for item in target.attributions}
             actual_attributions = {
-                (item.asset_id, item.sleeve_id): item for item in self.attributions
+                actual.key.canonical_tuple
+                if actual.key is not None
+                else actual.canonical_key: actual
+                for actual in self.attributions
             }
             if set(expected_attributions) != set(actual_attributions):
                 raise ValueError("decision attributions do not bind rounded target")
             for key, item in expected_attributions.items():
                 actual = actual_attributions[key]
                 if (
-                    actual.requested_delta != item.requested_delta
+                    actual.key != item.key
+                    or actual.requested_delta != item.requested_delta
                     or actual.internal_cross_quantity != item.internal_cross_quantity
                     or actual.external_delta_share != item.external_delta_share
+                    or actual.repair_delta != item.repair_delta
+                    or actual.reason_codes != item.reason_codes
                 ):
                     raise ValueError("decision attribution differs from rounded target")
         if self.risk_state is not None and (
@@ -626,6 +640,56 @@ class AssetReconciliation:
 
 
 @dataclass(frozen=True, slots=True)
+class ComponentCostReconciliation:
+    """One authoritative component return and AUD money equation."""
+
+    component: CostComponentKind
+    basis: CostBasis
+    quantity_basis: Decimal
+    native_amount: Decimal
+    native_currency: str
+    reporting_amount: Decimal
+    reporting_currency: str
+    conversion_rate: Decimal
+    cost_return: Decimal
+    aud_notional_basis: Decimal
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.quantity_basis, "component quantity basis"),
+            (self.native_amount, "component native amount"),
+            (self.reporting_amount, "component reporting amount"),
+            (self.conversion_rate, "component conversion rate"),
+            (self.cost_return, "component cost return"),
+            (self.aud_notional_basis, "component AUD notional basis"),
+        ):
+            _decimal(value, name)
+        if self.aud_notional_basis <= 0:
+            raise ValueError("component AUD notional basis must be finite and non-zero")
+        if not self.native_currency or self.reporting_currency != "AUD":
+            raise ValueError("component currencies must bind an AUD reporting basis")
+        if self.reporting_amount != self.native_amount * self.conversion_rate:
+            raise ValueError("component reporting amount does not reconcile conversion")
+        if self.reporting_amount != self.cost_return * self.aud_notional_basis:
+            raise ValueError("component return does not reconcile AUD basis")
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "component": self.component,
+            "basis": self.basis,
+            "quantity_basis": self.quantity_basis,
+            "native_amount": self.native_amount,
+            "native_currency": self.native_currency,
+            "reporting_amount": self.reporting_amount,
+            "reporting_currency": self.reporting_currency,
+            "conversion_rate": self.conversion_rate,
+            "cost_return": self.cost_return,
+            "aud_notional_basis": self.aud_notional_basis,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SleeveReconciliation:
     """Canonical Decimal cost and realised P&L allocation for one final sleeve movement."""
 
@@ -636,13 +700,28 @@ class SleeveReconciliation:
     expected_cost_components: Mapping[str, Decimal]
     expected_cost: Decimal
     realised: PnlBreakdown | None
+    key: SleeveKey | None = None
+    requested_delta: Decimal = Decimal("0")
+    internal_cross_quantity: Decimal = Decimal("0")
+    reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.sleeve_id or not self.asset_id:
             raise ValueError("sleeve allocation identity is required")
-        _decimal(self.physical_delta, "sleeve physical delta")
-        _decimal(self.repair_delta, "sleeve repair delta")
-        _decimal(self.expected_cost, "sleeve expected cost")
+        if self.key is not None and (
+            self.key.asset_id != self.asset_id or self.key.configuration_id != self.sleeve_id
+        ):
+            raise ValueError("sleeve allocation key does not bind identity")
+        for value, name in (
+            (self.physical_delta, "sleeve physical delta"),
+            (self.repair_delta, "sleeve repair delta"),
+            (self.expected_cost, "sleeve expected cost"),
+            (self.requested_delta, "sleeve requested delta"),
+            (self.internal_cross_quantity, "sleeve internal cross quantity"),
+        ):
+            _decimal(value, name)
+        if self.internal_cross_quantity < 0:
+            raise ValueError("sleeve internal cross quantity must be non-negative")
         components = MappingProxyType(dict(self.expected_cost_components))
         expected_kinds = tuple(kind.value for kind in CostComponentKind)
         if tuple(components) != expected_kinds:
@@ -651,19 +730,36 @@ class SleeveReconciliation:
             _decimal(value, "sleeve expected component")
         if sum(components.values(), Decimal("0")) != self.expected_cost:
             raise ValueError("sleeve expected cost does not reconcile components")
+        if self.requested_delta and abs(
+            self.physical_delta - self.repair_delta
+        ) + self.internal_cross_quantity != abs(self.requested_delta):
+            raise ValueError("sleeve allocation does not reconcile requested delta")
         object.__setattr__(self, "expected_cost_components", components)
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     @property
-    def canonical_key(self) -> tuple[str, str]:
-        return (self.asset_id, self.sleeve_id)
+    def canonical_key(self) -> tuple[object, ...]:
+        return self.key.canonical_tuple if self.key is not None else (self.asset_id, self.sleeve_id)
+
+    @property
+    def sleeve_key(self) -> SleeveKey | None:
+        return self.key
+
+    @property
+    def external_delta_share(self) -> Decimal:
+        return self.physical_delta
 
     @property
     def canonical_payload(self) -> dict[str, object]:
         return {
             "sleeve_id": self.sleeve_id,
             "asset_id": self.asset_id,
-            "physical_delta": self.physical_delta,
+            "key": self.key.as_json() if self.key is not None else None,
+            "requested_delta": self.requested_delta,
+            "internal_cross_quantity": self.internal_cross_quantity,
+            "external_delta_share": self.external_delta_share,
             "repair_delta": self.repair_delta,
+            "reason_codes": self.reason_codes,
             "expected_cost_components": tuple(self.expected_cost_components.items()),
             "expected_cost": self.expected_cost,
             "realised": self.realised.canonical_payload if self.realised else None,
@@ -690,6 +786,9 @@ class EvaluationReport:
     gross_expected_contribution: Mapping[str, Decimal] = MappingProxyType({})
     expected_net_return: Mapping[str, Decimal] = MappingProxyType({})
     expected_cost_components: Mapping[str, Mapping[str, Decimal]] = MappingProxyType({})
+    expected_cost_component_details: Mapping[str, tuple[ComponentCostReconciliation, ...]] = (
+        MappingProxyType({})
+    )
     fx_translation_identity: str = ""
     group_exposure: tuple[tuple[str, Decimal], ...] = ()
     currency_exposure: tuple[tuple[str, Decimal], ...] = ()
@@ -704,6 +803,10 @@ class EvaluationReport:
     risk_tolerance: Decimal = Decimal("0")
     allocation_cost_residuals: tuple[tuple[str, Decimal], ...] = ()
     allocation_pnl_residuals: tuple[tuple[str, Decimal], ...] = ()
+    risk_state: RiskState | None = None
+    risk_current_position: tuple[Decimal, ...] = ()
+    risk_target_position: tuple[Decimal, ...] = ()
+    risk_state_identity: str = ""
     report_contract: str = REPORT_CONTRACT
 
     def __post_init__(self) -> None:
@@ -847,7 +950,21 @@ class EvaluationReport:
                 _decimal(value, "report expected component")
             if sum(values.values(), Decimal("0")) != self.expected_cost[asset]:
                 raise ValueError("expected cost components do not reconcile total")
+        details = {
+            asset: tuple(values) for asset, values in self.expected_cost_component_details.items()
+        }
+        if tuple(details) != asset_ids:
+            raise ValueError("expected cost component details must match canonical asset order")
+        expected_kinds = tuple(kind.value for kind in CostComponentKind)
+        for asset, values in details.items():
+            if tuple(item.component.value for item in values) != expected_kinds:
+                raise ValueError("expected cost details must use canonical component order")
+            if any(
+                item.reporting_amount != components[asset][item.component.value] for item in values
+            ):
+                raise ValueError("expected cost detail amounts do not reconcile")
         object.__setattr__(self, "expected_cost_components", MappingProxyType(components))
+        object.__setattr__(self, "expected_cost_component_details", MappingProxyType(details))
         object.__setattr__(
             self, "group_exposure", _ordered_decimal_pairs(self.group_exposure, "group exposure")
         )
@@ -894,6 +1011,47 @@ class EvaluationReport:
             raise ValueError("risk values must be non-negative")
         if self.risk_residual != max(Decimal("0"), self.portfolio_risk_after - self.risk_tolerance):
             raise ValueError("risk residual does not reconcile portfolio risk and tolerance")
+        if self.risk_state is not None:
+            if (
+                not self.risk_state_identity
+                or self.risk_state_identity != self.risk_state.semantic_identity
+            ):
+                raise ValueError("report risk state identity is not authoritative")
+            if len(self.risk_current_position) != len(asset_ids) or len(
+                self.risk_target_position
+            ) != len(asset_ids):
+                raise ValueError("report risk positions must bind canonical assets")
+            projection = _risk_projection_positions(
+                self.risk_state, self.risk_current_position, self.risk_target_position
+            )
+            supplied = (
+                self.group_exposure,
+                self.currency_exposure,
+                self.group_exposure_before,
+                self.currency_exposure_before,
+                self.marginal_risk_before,
+                self.marginal_risk_after,
+                self.allocations,
+                self.portfolio_risk_before,
+                self.portfolio_risk_after,
+                self.risk_residual,
+                self.risk_tolerance,
+            )
+            expected = (
+                projection.group_after,
+                projection.currency_after,
+                projection.group_before,
+                projection.currency_before,
+                projection.marginal_before,
+                projection.marginal_after,
+                projection.allocations,
+                projection.portfolio_before,
+                projection.portfolio_after,
+                projection.residual,
+                projection.tolerance,
+            )
+            if supplied != expected:
+                raise ValueError("report risk equations do not match authoritative risk state")
         if self.fx_translation_identity:
             _digest(self.fx_translation_identity, "FX translation identity")
 
@@ -918,6 +1076,10 @@ class EvaluationReport:
                 (asset, tuple(values.items()))
                 for asset, values in self.expected_cost_components.items()
             ),
+            "expected_cost_component_details": tuple(
+                (asset, tuple(item.canonical_payload for item in values))
+                for asset, values in self.expected_cost_component_details.items()
+            ),
             "expected_net_contribution": tuple(self.expected_net_contribution.items()),
             "expected_net_return": tuple(self.expected_net_return.items()),
             "fx_translation_identity": self.fx_translation_identity,
@@ -934,6 +1096,9 @@ class EvaluationReport:
             "risk_tolerance": self.risk_tolerance,
             "allocation_cost_residuals": self.allocation_cost_residuals,
             "allocation_pnl_residuals": self.allocation_pnl_residuals,
+            "risk_state_identity": self.risk_state_identity,
+            "risk_current_position": self.risk_current_position,
+            "risk_target_position": self.risk_target_position,
         }
 
     @property
@@ -996,6 +1161,7 @@ def _attribution_payload(item: SleeveAttribution) -> dict[str, object]:
     return {
         "sleeve_id": item.sleeve_id,
         "asset_id": item.asset_id,
+        "key": item.key.as_json() if item.key is not None else None,
         "requested_delta": item.requested_delta,
         "internal_cross_quantity": item.internal_cross_quantity,
         "external_delta_share": item.external_delta_share,
@@ -1114,16 +1280,15 @@ def _decision_reference_quote(
 
 def _recompute_expected_costs(
     decision: DecisionClosure,
-) -> tuple[dict[str, Decimal], dict[str, dict[CostComponentKind, Decimal]]]:
-    """Recompute component money from the final physical movement.
-
-    The supplied ExpectedCostState is checked as an immutable closure, never
-    used as the source of the total. Transaction costs apply once to the final
-    physical delta; financing remains bound to the final position.
-    """
-
+) -> tuple[
+    dict[str, Decimal],
+    dict[str, dict[CostComponentKind, Decimal]],
+    dict[str, tuple[ComponentCostReconciliation, ...]],
+]:
+    """Recompute component money and retain each return/AUD-basis equation."""
     totals: dict[str, Decimal] = {}
     components_by_asset: dict[str, dict[CostComponentKind, Decimal]] = {}
+    details_by_asset: dict[str, tuple[ComponentCostReconciliation, ...]] = {}
     for index, asset in enumerate(decision.asset_order):
         model = decision.cost_models[asset]
         supplied = decision.expected_costs[asset]
@@ -1136,7 +1301,12 @@ def _recompute_expected_costs(
         if _cost_state_payload(supplied) != _cost_state_payload(authoritative):
             raise ValueError(f"expected cost state identity does not bind economics for {asset}")
         external_quantity = abs(decision.physical_delta[index])
+        aud_basis = decision.physical_notional[asset]
+        if aud_basis <= 0 or not aud_basis.is_finite():
+            raise ValueError(f"physical AUD notional must be finite and non-zero for {asset}")
         computed: dict[CostComponentKind, Decimal] = {}
+        details: list[ComponentCostReconciliation] = []
+        supplied_by_kind = {item.component: item for item in supplied.components}
         for component in model.components:
             quantity = (
                 abs(decision.target_position[index])
@@ -1147,10 +1317,40 @@ def _recompute_expected_costs(
                 raise ValueError(
                     f"cost component unavailable for {asset}: {component.component.value}"
                 )
-            computed[component.component] = component.evaluate(quantity) * component.conversion_rate
+            money = component.evaluate(quantity) * component.conversion_rate
+            state_component = supplied_by_kind[component.component]
+            if state_component.reporting_amount != money:
+                raise ValueError(
+                    "cost component amount does not reconcile for "
+                    f"{asset}: {component.component.value}"
+                )
+            computed[component.component] = money
+            if (
+                state_component.native_amount is None
+                or state_component.native_currency is None
+                or state_component.conversion_rate is None
+            ):
+                raise ValueError(
+                    f"cost component basis is unavailable for {asset}: {component.component.value}"
+                )
+            details.append(
+                ComponentCostReconciliation(
+                    component=component.component,
+                    basis=component.basis,
+                    quantity_basis=quantity,
+                    native_amount=state_component.native_amount,
+                    native_currency=state_component.native_currency,
+                    reporting_amount=money,
+                    reporting_currency=state_component.reporting_currency,
+                    conversion_rate=state_component.conversion_rate,
+                    cost_return=money / aud_basis,
+                    aud_notional_basis=aud_basis,
+                )
+            )
         components_by_asset[asset] = computed
+        details_by_asset[asset] = tuple(details)
         totals[asset] = sum(computed.values(), Decimal("0"))
-    return totals, components_by_asset
+    return totals, components_by_asset, details_by_asset
 
 
 def reconcile_positions(decision: DecisionClosure) -> dict[str, Decimal]:
@@ -1198,14 +1398,14 @@ class _RiskProjection:
     tolerance: Decimal
 
 
-def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
-    """Project positions through the authoritative ordered R3.D risk state."""
-    risk = decision.risk_state
-    if risk is None:
-        raise ValueError("decision risk state is required for independent evaluation")
-    risk_state = risk
-    before = tuple(float(value) for value in decision.current_position)
-    after = tuple(float(value) for value in decision.target_position)
+def _risk_projection_positions(
+    risk_state: RiskState,
+    current_position: Sequence[Decimal],
+    target_position: Sequence[Decimal],
+) -> _RiskProjection:
+    """Recompute ordered risk equations from immutable state and positions."""
+    before = tuple(float(value) for value in current_position)
+    after = tuple(float(value) for value in target_position)
     risk_state.validate_position(before)
     risk_state.validate_position(after)
 
@@ -1261,12 +1461,20 @@ def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
         marginal(after),
         tuple(
             (asset, target)
-            for asset, target in zip(decision.asset_order, decision.target_position, strict=True)
+            for asset, target in zip(risk_state.asset_order, target_position, strict=True)
         ),
         portfolio_before,
         portfolio_after,
         max(Decimal("0"), portfolio_after - tolerance),
         tolerance,
+    )
+
+
+def _risk_projection(decision: DecisionClosure) -> _RiskProjection:
+    if decision.risk_state is None:
+        raise ValueError("decision risk state is required for independent evaluation")
+    return _risk_projection_positions(
+        decision.risk_state, decision.current_position, decision.target_position
     )
 
 
@@ -1321,6 +1529,10 @@ def _allocate_sleeve_reconciliations(
                 components,
                 sum(components.values(), Decimal("0")),
                 allocated,
+                key=attribution.key,
+                requested_delta=attribution.requested_delta,
+                internal_cross_quantity=attribution.internal_cross_quantity,
+                reason_codes=attribution.reason_codes,
             )
         )
     return tuple(sorted(result, key=lambda item: item.canonical_key))
@@ -1339,7 +1551,7 @@ def evaluate_independently(
     if latency < timedelta(0) or adverse_slippage_increments < 0:
         raise ValueError("latency and slippage must be non-negative")
     reconcile_positions(decision)
-    expected, computed_components = _recompute_expected_costs(decision)
+    expected, computed_components, component_details = _recompute_expected_costs(decision)
     fx = dict(fx_translation or {})
     for asset, value in fx.items():
         _decimal(value, f"FX translation for {asset}")
@@ -1466,16 +1678,33 @@ def evaluate_independently(
             raise ValueError("complete quote lost bid/ask during evaluation")
         quantity = abs(decision.physical_delta[index])
         reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
-        latency_movement = (
-            (entry.midpoint - reference.midpoint) * quantity * Decimal(direction)
-            if reference is not None and reference.midpoint is not None
-            else Decimal("0")
-        )
-        basis_midpoint = (
-            reference.midpoint
-            if reference is not None and reference.midpoint is not None
-            else entry.midpoint
-        )
+        if reference is None or reference.midpoint is None:
+            outcome = OutcomeClosure(
+                asset,
+                decision.decision_time,
+                decision.expiry_time,
+                latency,
+                entry,
+                exit_quote,
+                EvaluationDisposition.UNAVAILABLE,
+                (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,),
+                physical_delta=decision.physical_delta[index],
+            )
+            unavailable_outcome_ids.append(outcome.semantic_identity)
+            assets.append(
+                AssetReconciliation(
+                    asset,
+                    EvaluationDisposition.UNAVAILABLE,
+                    Decimal("0"),
+                    expected[asset],
+                    None,
+                    (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,),
+                    outcome_identity=outcome.semantic_identity,
+                )
+            )
+            continue
+        latency_movement = (entry.midpoint - reference.midpoint) * quantity * Decimal(direction)
+        basis_midpoint = reference.midpoint
         gross_mid = (exit_quote.midpoint - basis_midpoint) * quantity * Decimal(direction)
         spread = abs(entry.ask - entry.bid) * quantity / Decimal("2") + abs(
             exit_quote.ask - exit_quote.bid
@@ -1539,6 +1768,7 @@ def evaluate_independently(
             }
             for asset in decision.asset_order
         },
+        expected_cost_component_details=component_details,
         expected_net_contribution={
             asset: decision.gross_contribution[asset] - expected[asset]
             for asset in decision.asset_order
@@ -1555,6 +1785,12 @@ def evaluate_independently(
         risk_residual=risk.residual,
         risk_tolerance=risk.tolerance,
         fx_translation_identity=expected_fx_identity,
+        risk_state=decision.risk_state,
+        risk_current_position=decision.current_position,
+        risk_target_position=decision.target_position,
+        risk_state_identity=(decision.risk_state.semantic_identity or "")
+        if decision.risk_state is not None
+        else "",
     )
 
 
