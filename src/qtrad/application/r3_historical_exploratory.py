@@ -12,9 +12,10 @@ import json
 import math
 import resource
 import sys
+import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -23,7 +24,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "341d15247f3763c0489984e16df4ce241dd22b0cb753e136199ff4423e9ef667"
+    "cf80f2543379344cc1bbf62cd324f78e136ace2d76a0e514ead38d34678bbc14"
 )
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
@@ -83,6 +84,182 @@ _CANDIDATE_IDS: Final = ("linear_ridge", "linear_zero_return", "nonlinear_huber"
 _GRAPH_CONTROL_IDS: Final = ("local_non_graph", "pooled_non_graph", "fixed_graph", "shuffled_graph")
 _CANDIDATE_KEYS: Final = frozenset({"id", "family", "degree", "enabled"})
 _GRAPH_KEYS: Final = frozenset({"id", "kind", "enabled"})
+_CHILD_WRAPPER_NAMES: Final = (
+    "selection",
+    "consumed",
+    "local_forecast",
+    "pooled_forecast",
+    "zero_forecast",
+    "outcome_evidence",
+)
+_CHILD_WRAPPER_SHA256: Final = {
+    "selection": "7f1020f422b01a64a47439342d6b2301be6aeb16e934daab11e2598935de3a53",
+    "consumed": "da69bbd8cee38cbd9f0df63e7c0c33f6268ed189dc81fce75c7bd5176bfc708f",
+    "local_forecast": "a11e7096d25cb0ffcda3c4c0bd2efd5d6fde51c50ff8607598b957176992fd0a",
+    "pooled_forecast": "e973e855ab2d62585cd8b809d9a57e74f6fc5b0908b292c08b7ad42ba16df6b6",
+    "zero_forecast": "bfba06f10de85ad356bfc587d2010544a3f3959d13204f987f22773e916cd72d",
+    "outcome_evidence": "44be69c09433f4e237eb78535a2e0ba0cab6de67c96d5b79e6e1d69df28f13b1",
+}
+_CHILD_WRAPPER_CONTRACTS: Final = {
+    "selection": "qtrad-r2-selection-v4",
+    "consumed": "qtrad-r2-holdout-consumed-v1",
+    "local_forecast": "qtrad-r2-holdout-forecast-v1",
+    "pooled_forecast": "qtrad-r2-holdout-forecast-v1",
+    "zero_forecast": "qtrad-r2-holdout-forecast-v1",
+    "outcome_evidence": "qtrad-r2-holdout-outcome-evidence-v1",
+}
+_CHILD_WRAPPER_IDENTITY_FIELDS: Final = {
+    "selection": (
+        "manifest_id",
+        "15483908d45455ae7ccc5f8d1a3fdcd19b3226308b3a4c6afda067daedb627dc",
+    ),
+    "consumed": ("marker_id", "c9bf58cebaa51435369704e629fc9df65b05020bf4354c0541ae17726a802446"),
+    "local_forecast": (
+        "dataset_id",
+        "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9",
+    ),
+    "pooled_forecast": (
+        "dataset_id",
+        "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b",
+    ),
+    "zero_forecast": (
+        "dataset_id",
+        "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223",
+    ),
+    "outcome_evidence": (
+        "outcome_evidence_id",
+        "480ef61aec7daff49eadbec7d5ec6dc7c7f6f702c92b6a0bdbc9a7c05a342f8a",
+    ),
+}
+_CHILD_WRAPPER_REQUIRED_KEYS: Final = {
+    "selection": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "experiment_configuration_id",
+            "foundation_bundle_id",
+            "oof_id",
+            "evaluation_report_id",
+            "prior_selection_manifest_id",
+            "source_class",
+            "evidence_class",
+            "holdout_scope",
+            "evaluated_configuration_ids",
+            "selected_configuration_ids",
+            "control_configuration_ids",
+            "holdout_configuration_ids",
+            "comparator_families",
+            "configuration_registry",
+            "metric_policy",
+            "threshold_policy",
+            "evaluation_policy",
+            "final_fitting_policy",
+            "questions",
+            "holdout_range",
+            "experiment_count",
+            "runtime_identities",
+            "frozen_metadata",
+            "frozen_at",
+            "frozen_by",
+            "state",
+            "holdout_outcomes_accessed",
+            "manifest_id",
+        }
+    ),
+    "consumed": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "selection_manifest_id",
+            "seal_id",
+            "opened_marker_id",
+            "consumed_at",
+            "consumed_by",
+            "evaluation_id",
+            "outcome_accessed",
+            "state",
+            "marker_id",
+        }
+    ),
+    "local_forecast": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "selection_manifest_id",
+            "feature_dataset_id",
+            "configuration_id",
+            "final_fit_id",
+            "final_fit_ids",
+            "rows",
+            "expected_opportunity_ids",
+            "opportunity_target_ids",
+            "source_class",
+            "evidence_class",
+            "holdout_scope",
+            "holdout_outcomes_accessed",
+            "dataset_id",
+        }
+    ),
+    "pooled_forecast": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "selection_manifest_id",
+            "feature_dataset_id",
+            "configuration_id",
+            "final_fit_id",
+            "final_fit_ids",
+            "rows",
+            "expected_opportunity_ids",
+            "opportunity_target_ids",
+            "source_class",
+            "evidence_class",
+            "holdout_scope",
+            "holdout_outcomes_accessed",
+            "dataset_id",
+        }
+    ),
+    "zero_forecast": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "selection_manifest_id",
+            "feature_dataset_id",
+            "configuration_id",
+            "final_fit_id",
+            "final_fit_ids",
+            "rows",
+            "expected_opportunity_ids",
+            "opportunity_target_ids",
+            "source_class",
+            "evidence_class",
+            "holdout_scope",
+            "holdout_outcomes_accessed",
+            "dataset_id",
+        }
+    ),
+    "outcome_evidence": frozenset(
+        {
+            "contract",
+            "schema_version",
+            "selection_manifest_id",
+            "seal_id",
+            "opened_marker_id",
+            "experiment_configuration_id",
+            "foundation_bundle_id",
+            "feature_dataset_id",
+            "target_dataset_id",
+            "holdout_range",
+            "expected_target_ids",
+            "source_row_ids",
+            "outcomes",
+            "source_class",
+            "evidence_class",
+            "holdout_scope",
+            "outcome_evidence_id",
+        }
+    ),
+}
 _TINY_GRAPH_KEYS: Final = frozenset({"id", "family", "layers", "hidden_units", "enabled"})
 _COST_KEYS: Final = frozenset({"name", "value", "unit"})
 _LIMIT_KEYS: Final = frozenset(
@@ -159,6 +336,7 @@ _SECTION_KEYS: Final = {
             "selection_policy",
             "streaming_policy",
             "decoder_limits",
+            "child_wrappers",
         }
     ),
     "scale_projection": frozenset(
@@ -181,7 +359,7 @@ _SECTION_KEYS: Final = {
     ),
     "algorithms": frozenset({"ridge", "huber", "graph", "fixed_graph", "shuffled_graph"}),
 }
-_STATISTICAL_KEYS: Final = frozenset({"oof", "controls", "metrics", "views"})
+_STATISTICAL_KEYS: Final = frozenset({"oof", "controls", "control_descriptors", "metrics", "views"})
 _OUTPUT_KEYS: Final = frozenset({"report_contract", "create_only", "post_result_expansion"})
 
 
@@ -448,8 +626,8 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         "ZERO_RETURN": "6ea3c2aff09d5dae7d30d8cc7eb7883382bfb2ce7a3b51cf5f80bb1d69604f4b",
     }
     expected_wrappers = {
-        "POOLED_LOCAL_RIDGE": "e973e855ab2d62585cd8b809d9a57e74f6fc5b0908b292c08b7ad42ba16df6b6",
-        "ZERO_RETURN": "bfba06f10de85ad356bfc587d2010544a3f3959d13204f987f22773e916cd72d",
+        "POOLED_LOCAL_RIDGE": _CHILD_WRAPPER_SHA256["pooled_forecast"],
+        "ZERO_RETURN": _CHILD_WRAPPER_SHA256["zero_forecast"],
     }
     if (
         bindings.get("dataset_ids") != expected_datasets
@@ -457,6 +635,30 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         or bindings.get("wrapper_sha256s") != expected_wrappers
     ):
         raise FreezeError("retained forecast role bindings are not frozen")
+    child_wrappers_raw = loader.get("child_wrappers")
+    if not isinstance(child_wrappers_raw, Mapping):
+        raise FreezeError("retained child wrapper declarations are incomplete")
+    child_wrappers = cast(Mapping[str, Any], child_wrappers_raw)
+    if set(child_wrappers) != set(_CHILD_WRAPPER_NAMES):
+        raise FreezeError("retained child wrapper declarations are incomplete")
+    for name in _CHILD_WRAPPER_NAMES:
+        declaration_raw = child_wrappers[name]
+        declaration = cast(Mapping[str, Any], declaration_raw)
+        if not isinstance(declaration_raw, Mapping):
+            raise FreezeError(f"child wrapper declaration is not an object: {name}")
+        expected_keys = {"contract", "identity_field", "identity", "sha256", "required_keys"}
+        if set(declaration) != expected_keys:
+            raise FreezeError(f"child wrapper declaration schema mismatch: {name}")
+        expected_field, expected_identity = _CHILD_WRAPPER_IDENTITY_FIELDS[name]
+        if (
+            declaration["contract"] != _CHILD_WRAPPER_CONTRACTS[name]
+            or declaration["identity_field"] != expected_field
+            or declaration["identity"] != expected_identity
+            or declaration["sha256"] != _CHILD_WRAPPER_SHA256[name]
+            or frozenset(cast(Sequence[str], declaration["required_keys"]))
+            != _CHILD_WRAPPER_REQUIRED_KEYS[name]
+        ):
+            raise FreezeError(f"child wrapper declaration is not frozen: {name}")
 
     statistical = raw["statistical_formulations"]
     if not isinstance(statistical, dict):
@@ -465,6 +667,30 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
     _reject_unknown(statistical_object, _STATISTICAL_KEYS, "statistical_formulations")
     if set(statistical_object) != set(_STATISTICAL_KEYS):
         raise FreezeError("statistical formulations are incomplete")
+    expected_control_descriptors = [
+        {
+            "id": "zero_return",
+            "kind": "constant_zero",
+            "candidate_id": "linear_zero_return",
+            "fit_policy": "none",
+        },
+        {
+            "id": "local_ridge",
+            "kind": "local_ridge",
+            "candidate_id": "linear_ridge",
+            "fit_policy": "chronological_oof",
+        },
+        {
+            "id": "pooled_local_ridge",
+            "kind": "pooled_ridge",
+            "candidate_id": "linear_ridge",
+            "fit_policy": "chronological_oof",
+        },
+    ]
+    if statistical_object["controls"] != [item["id"] for item in expected_control_descriptors]:
+        raise FreezeError("frozen control IDs differ from declarations")
+    if statistical_object["control_descriptors"] != expected_control_descriptors:
+        raise FreezeError("frozen control declarations are not explicit")
     output = raw["output_contract"]
     if not isinstance(output, dict):
         raise FreezeError("output_contract must be an object")
@@ -780,10 +1006,10 @@ def _json_depth(value: Any) -> int:
     return 0
 
 
-def _read_json_document(
+def _open_json_document(
     path: Path, limits: Mapping[str, Any]
-) -> tuple[dict[str, Any], list[Mapping[str, Any]], int]:
-    """Read one frozen wrapper, validating bytes before decoding its parts."""
+) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int]:
+    """Validate a wrapper immediately, then decode one declared part per iteration."""
     if not path.is_file():
         raise FreezeError(f"retained child path does not exist: {path}")
     size = path.stat().st_size
@@ -803,126 +1029,125 @@ def _read_json_document(
         raise FreezeError(f"retained child is not valid JSON: {path}") from exc
     if _json_depth(payload) > int(limits["max_nested_depth"]):
         raise FreezeError("retained child exceeds decoder nesting bound")
-
-    metadata: dict[str, Any]
-    if isinstance(payload, dict):
+    if not isinstance(payload, dict):
+        if not isinstance(payload, list):
+            raise FreezeError("retained child rows must be an array")
+        metadata: dict[str, Any] = {}
+        parts_value: Any = None
+        inline_rows: list[Any] = cast(list[Any], payload)
+    else:
         payload_object = cast(dict[str, Any], payload)
         metadata = dict(payload_object)
         expected_contract = limits.get("expected_wrapper_contract")
-        expected_identity = limits.get("expected_wrapper_identity")
         if expected_contract is not None and payload_object.get("contract") != expected_contract:
             raise FreezeError("retained wrapper contract mismatch")
-        if expected_identity is not None and payload_object.get("identity") != expected_identity:
-            raise FreezeError("retained wrapper identity mismatch")
+        expected_identity = limits.get("expected_wrapper_identity")
+        if expected_identity is not None:
+            identity_field = str(limits.get("expected_identity_field", "identity"))
+            if payload_object.get(identity_field) != expected_identity:
+                raise FreezeError("retained wrapper identity mismatch")
         parts_value = payload_object.get("parts")
+        inline_rows_value = payload_object.get("rows")
         if parts_value is None:
-            records_value: Any = payload_object.get("rows", [payload_object])
-            consumed_parts: list[dict[str, Any]] = [
-                {
-                    "locator": str(path),
-                    "sha256": wrapper_hash,
-                    "rows": len(cast(list[Any], records_value))
-                    if isinstance(records_value, list)
-                    else 0,
-                    "bytes": size,
-                }
-            ]
+            inline_rows = (
+                [payload_object]
+                if inline_rows_value is None
+                else cast(list[Any], inline_rows_value)
+            )
         else:
-            if not isinstance(parts_value, list) or not parts_value:
-                raise FreezeError("retained wrapper must declare non-empty parts")
-            records_value = []
-            consumed_parts = []
-            required_descriptor_keys = {
-                "locator",
-                "contract",
-                "identity",
-                "sha256",
-                "byte_size",
-                "row_count",
-            }
-            for part_raw in cast(list[Any], parts_value):
-                if not isinstance(part_raw, dict):
-                    raise FreezeError("retained part descriptor must be an object")
-                descriptor = cast(dict[str, Any], part_raw)
-                if set(descriptor) != required_descriptor_keys:
-                    raise FreezeError("retained part descriptor fields are incomplete")
-                locator_value = descriptor["locator"]
-                if not isinstance(locator_value, str):
-                    raise FreezeError("retained part locator is malformed")
-                part_path = Path(locator_value)
-                if part_path.is_absolute() or ".." in part_path.parts or not locator_value:
-                    raise FreezeError("retained part locator must be safely relative")
-                resolved_part = path.parent / part_path
-                try:
-                    part_bytes = resolved_part.read_bytes()
-                except OSError as exc:
-                    raise FreezeError("retained part locator does not exist") from exc
-                actual_hash = hashlib.sha256(part_bytes).hexdigest()
-                if actual_hash != descriptor["sha256"]:
-                    raise FreezeError("retained part byte hash mismatch")
-                part_size = len(part_bytes)
-                if part_size != int(descriptor["byte_size"]):
-                    raise FreezeError("retained part byte-size declaration mismatch")
-                if part_size > int(limits["max_source_bytes"]):
-                    raise FreezeError("retained part exceeds source-byte bound")
-                try:
-                    part_payload = json.loads(part_bytes)
-                except json.JSONDecodeError as exc:
-                    raise FreezeError("retained part is not valid JSON") from exc
-                if _json_depth(part_payload) > int(limits["max_nested_depth"]):
-                    raise FreezeError("retained part exceeds decoder nesting bound")
-                if not isinstance(part_payload, list):
-                    raise FreezeError("retained part payload must be an array")
-                part_rows = cast(list[Any], part_payload)
-                if len(part_rows) != int(descriptor["row_count"]):
-                    raise FreezeError("retained part row-count declaration mismatch")
-                if len(part_rows) > int(limits["max_part_rows"]):
-                    raise FreezeError("retained part exceeds row bound")
-                required_record_keys = limits.get("required_record_keys")
-                for record_raw in part_rows:
-                    if not isinstance(record_raw, dict):
-                        raise FreezeError("retained row must be an object")
-                    record_object = cast(dict[str, Any], record_raw)
-                    if required_record_keys is not None and set(record_object) != set(
-                        cast(Sequence[str], required_record_keys)
-                    ):
-                        raise FreezeError("retained row fields do not match frozen mapping")
-                    if len(json.dumps(record_object, separators=(",", ":")).encode()) > int(
-                        limits["max_row_bytes"]
-                    ):
-                        raise FreezeError("retained row exceeds decoder byte bound")
-                records_value.extend(part_rows)
-                consumed_parts.append(
-                    {
-                        "locator": locator_value,
-                        "sha256": actual_hash,
-                        "rows": len(part_rows),
-                        "bytes": part_size,
-                        "contract": descriptor["contract"],
-                        "identity": descriptor["identity"],
-                    }
-                )
-    elif isinstance(payload, list):
-        metadata = {}
-        records_value = cast(Any, payload)
-        consumed_parts: list[dict[str, Any]] = [
-            {
+            inline_rows = []
+    started = time.monotonic()
+    source_rows = 0
+    source_bytes = size
+    source_parts = 0
+
+    def iter_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
+        nonlocal source_rows, source_bytes, source_parts
+        if parts_value is None:
+            part_rows = inline_rows
+            descriptor = {
                 "locator": str(path),
                 "sha256": wrapper_hash,
-                "rows": len(cast(list[Any], payload)),
+                "rows": len(part_rows),
                 "bytes": size,
             }
-        ]
-    else:
-        raise FreezeError("retained child rows must be an array")
-    if not isinstance(records_value, list):
-        raise FreezeError("retained child object must contain rows")
-    records = cast(list[Any], records_value)
-    if len(records) > int(limits["max_source_rows"]):
-        raise FreezeError("retained child exceeds frozen source-row bound")
+            _validate_part_rows(part_rows, limits)
+            source_rows = len(part_rows)
+            source_parts = 1
+            yield descriptor, [cast(Mapping[str, Any], row) for row in part_rows], size
+            return
+        if not isinstance(parts_value, list) or not parts_value:
+            raise FreezeError("retained wrapper must declare non-empty parts")
+        required_descriptor_keys = {
+            "locator",
+            "contract",
+            "identity",
+            "sha256",
+            "byte_size",
+            "row_count",
+        }
+        for part_raw in cast(list[Any], parts_value):
+            if time.monotonic() - started > float(limits.get("max_elapsed_seconds", 1e12)):
+                raise FreezeError("retained child exceeds elapsed-time bound")
+            if not isinstance(part_raw, dict):
+                raise FreezeError("retained part descriptor must be an object")
+            descriptor = cast(dict[str, Any], part_raw)
+            if set(descriptor) != required_descriptor_keys:
+                raise FreezeError("retained part descriptor fields are incomplete")
+            locator_value = descriptor["locator"]
+            if not isinstance(locator_value, str):
+                raise FreezeError("retained part locator is malformed")
+            part_path = Path(locator_value)
+            if part_path.is_absolute() or ".." in part_path.parts or not locator_value:
+                raise FreezeError("retained part locator must be safely relative")
+            resolved_part = path.parent / part_path
+            try:
+                part_bytes = resolved_part.read_bytes()
+            except OSError as exc:
+                raise FreezeError("retained part locator does not exist") from exc
+            actual_hash = hashlib.sha256(part_bytes).hexdigest()
+            if actual_hash != descriptor["sha256"]:
+                raise FreezeError("retained part byte hash mismatch")
+            part_size = len(part_bytes)
+            if part_size != int(descriptor["byte_size"]):
+                raise FreezeError("retained part byte-size declaration mismatch")
+            source_bytes += part_size
+            source_parts += 1
+            if source_bytes > int(limits["max_source_bytes"]):
+                raise FreezeError("retained child exceeds source-byte bound")
+            try:
+                part_payload = json.loads(part_bytes)
+            except json.JSONDecodeError as exc:
+                raise FreezeError("retained part is not valid JSON") from exc
+            if _json_depth(part_payload) > int(limits["max_nested_depth"]):
+                raise FreezeError("retained part exceeds decoder nesting bound")
+            if not isinstance(part_payload, list):
+                raise FreezeError("retained part payload must be an array")
+            part_rows = cast(list[Any], part_payload)
+            if len(part_rows) != int(descriptor["row_count"]):
+                raise FreezeError("retained part row-count declaration mismatch")
+            if len(part_rows) > int(limits["max_part_rows"]):
+                raise FreezeError("retained part exceeds row bound")
+            _validate_part_rows(part_rows, limits)
+            source_rows += len(part_rows)
+            if source_rows > int(limits["max_source_rows"]):
+                raise FreezeError("retained child exceeds frozen source-row bound")
+            part_info = {
+                "locator": locator_value,
+                "sha256": actual_hash,
+                "rows": len(part_rows),
+                "bytes": part_size,
+                "contract": descriptor["contract"],
+                "identity": descriptor["identity"],
+            }
+            yield part_info, [cast(Mapping[str, Any], row) for row in part_rows], part_size
+
+    return metadata, iter_parts(), size
+
+
+def _validate_part_rows(rows: Sequence[Any], limits: Mapping[str, Any]) -> None:
     required_record_keys = limits.get("required_record_keys")
-    result: list[Mapping[str, Any]] = []
-    for record_raw in records:
+    for record_raw in rows:
         if not isinstance(record_raw, dict):
             raise FreezeError("retained row must be an object")
         record_object = cast(dict[str, Any], record_raw)
@@ -930,17 +1155,31 @@ def _read_json_document(
             cast(Sequence[str], required_record_keys)
         ):
             raise FreezeError("retained row fields do not match frozen mapping")
-        record = cast(Mapping[str, Any], record_object)
         if len(json.dumps(record_object, separators=(",", ":")).encode()) > int(
             limits["max_row_bytes"]
         ):
             raise FreezeError("retained row exceeds decoder byte bound")
-        result.append(record)
+
+
+def _read_json_document(
+    path: Path, limits: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[Mapping[str, Any]], int]:
+    """Compatibility collector; retained loading uses the streaming iterator directly."""
+    metadata, parts, size = _open_json_document(path, limits)
+    records: list[Mapping[str, Any]] = []
+    consumed_parts: list[dict[str, Any]] = []
+    rows = 0
+    bytes_read = size
+    for descriptor, part_rows, part_size in parts:
+        records.extend(part_rows)
+        consumed_parts.append(descriptor)
+        rows += len(part_rows)
+        bytes_read += part_size
     metadata["consumed_parts"] = consumed_parts
-    metadata["source_scan_rows"] = len(records)
-    metadata["source_scan_bytes"] = size + sum(int(part.get("bytes", 0)) for part in consumed_parts)
+    metadata["source_scan_rows"] = rows
+    metadata["source_scan_bytes"] = bytes_read
     metadata["source_scan_parts"] = len(consumed_parts)
-    return metadata, result, size
+    return metadata, records, size
 
 
 def _read_json_records(  # pyright: ignore[reportUnusedFunction]
@@ -953,233 +1192,336 @@ def _validate_child_metadata(
     name: str,
     metadata: Mapping[str, Any],
     loader: Mapping[str, Any],
+    *,
+    fixture: bool = False,
 ) -> None:
     if not metadata:
         raise FreezeError(f"retained child metadata is missing: {name}")
-    bindings = cast(Mapping[str, Any], loader["identity_bindings"])
-    if name == "selection":
-        if metadata.get("contract") != "qtrad-r2-selection-v4":
-            raise FreezeError("selection child contract mismatch")
-        if metadata.get("manifest_id") != bindings["selection_manifest_id"]:
-            raise FreezeError("selection child identity mismatch")
-        return
-    if name == "consumed":
-        if metadata.get("contract") != "qtrad-r2-holdout-consumed-v1":
-            raise FreezeError("consumed child contract mismatch")
-        if metadata.get("marker_id") != bindings["consumed_marker_id"]:
-            raise FreezeError("consumed child identity mismatch")
-        return
-    dataset_key = {
-        "local_forecast": "LOCAL_RIDGE",
-        "pooled_forecast": "POOLED_LOCAL_RIDGE",
-        "zero_forecast": "ZERO_RETURN",
-        "outcome_evidence": None,
-    }[name]
-    if metadata.get("contract") not in {
-        loader["manifest_contract"],
-        "qtrad-r2-holdout-forecast-seal-v1",
-    }:
+    declarations = cast(Mapping[str, Any], loader["child_wrappers"])
+    declaration = cast(Mapping[str, Any], declarations[name])
+    if metadata.get("contract") != declaration["contract"]:
         raise FreezeError(f"{name} child contract mismatch")
-    child_manifest = metadata.get(
-        "g2_manifest_id", metadata.get("seal_id", metadata.get("manifest_id"))
-    )
-    if child_manifest != bindings["g2_manifest_id"]:
-        raise FreezeError(f"{name} manifest identity mismatch")
-    if dataset_key is not None:
-        dataset_id = cast(Mapping[str, Any], bindings["dataset_ids"])[dataset_key]
-        config_id = cast(Mapping[str, Any], bindings["config_ids"])[dataset_key]
-        if metadata.get("dataset_id") != dataset_id:
-            raise FreezeError(f"{name} dataset identity mismatch")
-        if metadata.get("configuration_id") != config_id:
-            raise FreezeError(f"{name} configuration identity mismatch")
-    elif metadata.get("manifest_id") != bindings["outcome_evidence_manifest_id"]:
-        raise FreezeError("outcome evidence manifest identity mismatch")
+    identity_field = str(declaration["identity_field"])
+    if not fixture and metadata.get(identity_field) != declaration["identity"]:
+        raise FreezeError(f"{name} child identity mismatch")
+    required = set(cast(Sequence[str], declaration["required_keys"]))
+    actual = set(metadata)
+    allowed_wrapper_keys = required | {"parts"}
+    if actual - allowed_wrapper_keys:
+        raise FreezeError(f"{name} child metadata has unknown fields")
+    if not fixture and actual - {"parts"} != required:
+        raise FreezeError(f"{name} child metadata fields are incomplete")
+    if name in {"selection", "consumed"} and "parts" in metadata:
+        raise FreezeError(f"{name} marker must not declare data parts")
     parts = metadata.get("parts")
     if parts is not None:
-        if not isinstance(parts, list):
+        if not isinstance(parts, list) or not parts:
             raise FreezeError(f"{name} parts metadata is malformed")
         for part_raw in cast(list[Any], parts):
             if not isinstance(part_raw, dict):
                 raise FreezeError(f"{name} part metadata is malformed")
             part = cast(Mapping[str, Any], part_raw)
-            if not part.get("sha256"):
+            expected_part_keys = {
+                "locator",
+                "contract",
+                "identity",
+                "sha256",
+                "byte_size",
+                "row_count",
+            }
+            if set(part) != expected_part_keys:
+                raise FreezeError(f"{name} part descriptor fields are incomplete")
+            if not isinstance(part["sha256"], str) or len(part["sha256"]) != 64:
                 raise FreezeError(f"{name} part hash is missing")
 
 
 def load_retained_rows(
-    config: FreezeConfig, *, locators: Mapping[str, str] | None = None
+    config: FreezeConfig, *, locators: Mapping[str, str] | None = None, _fixture: bool = False
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
-    """Load exact terminal children after one terminal authentication boundary."""
-    authority = authenticate_terminal_authority(config)
+    """Stream frozen children through a bounded, outcome-blind join selector."""
+    authority = (
+        {
+            "authentication_performed": False,
+            "contract": config.document["terminal_authentication"]["contract"],
+            "state": "FIXTURE_INJECTED",
+            "verdict": "NOT_AUTHENTICATED",
+        }
+        if _fixture
+        else authenticate_terminal_authority(config)
+    )
     loader = cast(Mapping[str, Any], config.document["retained_loader"])
     expected_locators = cast(Mapping[str, str], loader["locators"])
     actual_locators = expected_locators if locators is None else locators
-    if dict(actual_locators) != dict(expected_locators):
+    if not _fixture and dict(actual_locators) != dict(expected_locators):
         raise FreezeError("retained loader locator differs from frozen terminal child")
     decoder_limits = cast(Mapping[str, Any], loader["decoder_limits"])
     streaming = cast(Mapping[str, Any], loader["streaming_policy"])
+    mappings = cast(Mapping[str, str], loader["field_mappings"])
+    required = set(cast(Sequence[str], loader["required_columns"]))
+    expected_fields = {mappings[field] for field in required}
+    child_names = tuple(_CHILD_WRAPPER_NAMES)
+    wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
     limits = dict(decoder_limits)
-    limits["max_source_rows"] = streaming["max_source_rows"]
-    limits["max_source_bytes"] = streaming["max_source_bytes"]
-
-    selection_metadata, selection_records, selection_size = _read_json_document(
-        Path(actual_locators["selection"]), limits
+    limits.update(
+        {
+            "max_source_rows": streaming["max_source_rows"],
+            "max_source_bytes": streaming["max_source_bytes"],
+            "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+        }
     )
-    consumed_metadata, consumed_records, consumed_size = _read_json_document(
-        Path(actual_locators["consumed"]), limits
-    )
-    _validate_child_metadata("selection", selection_metadata, loader)
-    _validate_child_metadata("consumed", consumed_metadata, loader)
+    opened: dict[
+        str,
+        tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int],
+    ] = {}
+    for name in child_names:
+        declaration = cast(Mapping[str, Any], wrappers[name])
+        child_limits = dict(limits)
+        child_limits.update(
+            {
+                **(
+                    {}
+                    if _fixture
+                    else {
+                        "expected_wrapper_sha256": declaration["sha256"],
+                        "expected_wrapper_identity": declaration["identity"],
+                    }
+                ),
+                "expected_wrapper_contract": declaration["contract"],
+                "expected_identity_field": declaration["identity_field"],
+                "required_record_keys": (
+                    expected_fields
+                    if name not in {"selection", "consumed"}
+                    else declaration["required_keys"]
+                ),
+            }
+        )
+        opened[name] = _open_json_document(Path(actual_locators[name]), child_limits)
+        _validate_child_metadata(name, opened[name][0], loader, fixture=_fixture)
+    _selection_metadata, selection_parts, selection_size = opened["selection"]
+    _consumed_metadata, consumed_parts, consumed_size = opened["consumed"]
+    consumed_part_receipts: dict[str, list[dict[str, Any]]] = {name: [] for name in child_names}
+    selection_records: list[Mapping[str, Any]] = []
+    consumed_records: list[Mapping[str, Any]] = []
+    source_rows = 0
+    source_bytes = selection_size + consumed_size
+    source_parts = 0
+    for descriptor, part_rows, _ in selection_parts:
+        consumed_part_receipts["selection"].append(descriptor)
+        selection_records.extend(part_rows)
+        source_rows += len(part_rows)
+        source_parts += 1
+    for descriptor, part_rows, _ in consumed_parts:
+        consumed_part_receipts["consumed"].append(descriptor)
+        consumed_records.extend(part_rows)
+        source_rows += len(part_rows)
+        source_parts += 1
+    if source_rows > int(streaming["max_source_rows"]) or source_bytes > int(
+        streaming["max_source_bytes"]
+    ):
+        raise FreezeError("retained aggregate marker bounds exceeded")
     if len(selection_records) != 1 or len(consumed_records) != 1:
         raise FreezeError("selection and consumed markers must be single objects")
     selection = selection_records[0]
     consumed = consumed_records[0]
     if consumed.get("state") != "CONSUMED":
         raise FreezeError("retained lifecycle marker is not terminal")
-    bindings = cast(Mapping[str, Any], loader["identity_bindings"])
-    if selection.get("manifest_id") != bindings["selection_manifest_id"]:
+    if (
+        not _fixture
+        and selection.get("manifest_id")
+        != cast(Mapping[str, Any], wrappers["selection"])["identity"]
+    ):
         raise FreezeError("selection manifest identity mismatch")
-    if consumed.get("marker_id") != bindings["consumed_marker_id"]:
+    if (
+        not _fixture
+        and consumed.get("marker_id") != cast(Mapping[str, Any], wrappers["consumed"])["identity"]
+    ):
         raise FreezeError("consumed marker identity mismatch")
-    if consumed.get("selection_manifest_id") != bindings["selection_manifest_id"]:
+    if consumed.get("selection_manifest_id") != selection.get("manifest_id"):
         raise FreezeError("consumed selection identity mismatch")
-    if consumed.get("g2_manifest_id", consumed.get("seal_id")) != bindings["g2_manifest_id"]:
-        raise FreezeError("consumed G2 manifest identity mismatch")
-
-    child_names = ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
-    mappings = cast(Mapping[str, str], loader["field_mappings"])
-    required = set(cast(Sequence[str], loader["required_columns"]))
-    expected_fields = {mappings[field] for field in required}
-    wrapper_hashes = cast(Mapping[str, Any], bindings.get("wrapper_sha256s", {}))
-    wrapper_roles = {
-        "pooled_forecast": "POOLED_LOCAL_RIDGE",
-        "zero_forecast": "ZERO_RETURN",
-    }
-    rows_by_key: dict[tuple[Any, ...], dict[str, Mapping[str, Any]]] = {}
-    child_summaries: dict[str, tuple[dict[str, Any], int, int]] = {}
-    for name in child_names:
-        child_limits = dict(limits)
-        child_limits["required_record_keys"] = expected_fields
-        role = wrapper_roles.get(name)
-        if role is not None:
-            expected_hash = wrapper_hashes.get(role)
-            if not isinstance(expected_hash, str):
-                raise FreezeError(f"missing frozen wrapper hash: {name}")
-            child_limits["expected_wrapper_sha256"] = expected_hash
-        metadata, records, size = _read_json_document(Path(actual_locators[name]), child_limits)
-        _validate_child_metadata(name, metadata, loader)
-        child_summaries[name] = (metadata, size, len(records))
-        for record in records:
-            key = _canonical_join_key(record, mappings)
-            children = rows_by_key.setdefault(key, {})
-            if name in children:
-                raise FreezeError(f"duplicate canonical identity in {name}")
-            children[name] = record
-            if len(rows_by_key) > int(decoder_limits["max_selected_rows"]):
-                raise FreezeError("bounded join state exceeds max_selected_rows before selection")
-
-    rows: list[FixtureRow] = []
-    for key, children in rows_by_key.items():
-        if set(children) != set(child_names):
-            raise FreezeError(f"incomplete canonical join for {key}")
-        local = children["local_forecast"]
-        outcome = children["outcome_evidence"]
-        if set(local) != expected_fields or set(outcome) != expected_fields:
-            raise FreezeError("retained row fields do not match frozen mapping")
-        rows.append(
-            FixtureRow(
-                **{field: local[mappings[field]] for field in required}
-                | {"realised_return": outcome[mappings["realised_return"]]}
-            )
-        )
-    selected, selection_meta = select_synchronised_rows(rows, config)
-    source_rows = sum(summary[2] for summary in child_summaries.values())
-    source_bytes = (
-        selection_size + consumed_size + sum(summary[1] for summary in child_summaries.values())
+    max_rows = int(decoder_limits["max_selected_rows"])
+    target_ids = cast(
+        Sequence[str], cast(Mapping[str, Any], loader["selection_policy"])["required_target_ids"]
     )
-    consumed_parts = {
-        name: list(cast(list[Any], summary[0].get("consumed_parts", [])))
-        for name, summary in child_summaries.items()
-    }
-    source_parts = 2 + sum(len(parts) or 1 for parts in consumed_parts.values())
+    max_groups = max(1, max_rows // max(1, len(target_ids)))
+    groups: dict[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]] = {}
+    seen_by_child: dict[str, set[tuple[Any, ...]]] = {name: set() for name in child_names[2:]}
+    started = time.monotonic()
+    for name in child_names[2:]:
+        for descriptor, part_rows, part_size in opened[name][1]:
+            consumed_part_receipts[name].append(descriptor)
+            source_parts += 1
+            source_bytes += part_size
+            source_rows += len(part_rows)
+            if source_rows > int(streaming["max_source_rows"]):
+                raise FreezeError("retained aggregate row bound exceeded")
+            if source_bytes > int(streaming["max_source_bytes"]):
+                raise FreezeError("retained aggregate byte bound exceeded")
+            if time.monotonic() - started > float(streaming.get("max_elapsed_seconds", 1e12)):
+                raise FreezeError("retained aggregate elapsed-time bound exceeded")
+            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 > float(
+                config.document["compute_limits"]["max_memory_mb"]
+            ):
+                raise FreezeError("retained aggregate memory bound exceeded")
+            if name in {"selection", "consumed"}:
+                continue
+            for record in part_rows:
+                key = _canonical_join_key(record, mappings)
+                if key in seen_by_child[name]:
+                    raise FreezeError(f"duplicate canonical identity in {name}")
+                seen_by_child[name].add(key)
+                decision_time = str(record[mappings["decision_time"]])
+                group = groups.get(decision_time)
+                if group is None:
+                    if len(groups) >= max_groups:
+                        worst = max(groups)
+                        if decision_time >= worst:
+                            continue
+                        del groups[worst]
+                    group = {}
+                    groups[decision_time] = group
+                children = group.setdefault(key, {})
+                if name in children:
+                    raise FreezeError(f"duplicate canonical identity in {name}")
+                children[name] = record
+    complete: list[tuple[str, dict[tuple[Any, ...], dict[str, Mapping[str, Any]]]]] = []
+    for decision_time, group in sorted(groups.items()):
+        if len(group) != len(target_ids):
+            continue
+        if any(set(children) != set(child_names[2:]) for children in group.values()):
+            continue
+        complete.append((decision_time, group))
+    policy = cast(Mapping[str, Any], loader["selection_policy"])
+    required_groups = int(policy["n_complete_decision_groups"])
+    if len(complete) < required_groups:
+        raise FreezeError("bounded join selector could not prove required complete groups")
+    rows: list[FixtureRow] = []
+    for _, group in complete[:required_groups]:
+        for key in sorted(group):
+            children = group[key]
+            local = children["local_forecast"]
+            outcome = children["outcome_evidence"]
+            rows.append(
+                FixtureRow(
+                    **{field: local[mappings[field]] for field in required}
+                    | {
+                        "timestamp": local[mappings["decision_time"]],
+                        "realised_return": outcome[mappings["realised_return"]],
+                    }
+                )
+            )
+    selected, selection_meta = select_synchronised_rows(rows, config)
+    selection_meta["stop_state"] = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    all_parts = [part for parts in consumed_part_receipts.values() for part in parts]
+    scanned_hashes = [str(part["sha256"]) for part in all_parts]
     return selected, {
         "authority": authority,
         "selection": selection_meta,
         "source_scan_rows": source_rows,
         "source_scan_bytes": source_bytes,
         "source_scan_parts": source_parts,
-        "consumed_parts": consumed_parts,
+        "consumed_parts": consumed_part_receipts,
         "selected_rows": len(selected),
-        "selected_parts": sum(len(parts) for parts in consumed_parts.values()),
-        "stop_reason": "STOPPED_AFTER_SELECTED_GROUPS",
-        "outcome_decode_performed": True,
+        "selected_parts": len(all_parts),
+        "selected_bytes": source_bytes,
+        "selected_part_hashes": scanned_hashes,
+        "scanned_part_hashes": scanned_hashes,
+        "consumed_rows": source_rows,
+        "consumed_bytes": source_bytes,
+        "consumed_parts_count": source_parts,
+        "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+        "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+        "outcome_decode_performed": not _fixture,
     }
 
 
 def load_fixture_rows(
     rows: Sequence[FixtureRow], config: FreezeConfig
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
-    """Route injected child records through the retained join and selector boundary."""
+    """Inject six distinct wrapper/part documents through the retained streaming boundary."""
     if len(rows) > int(config.document["compute_limits"]["max_rows"]):
         raise FreezeError("fixture source exceeds frozen row bound")
-    mappings = cast(Mapping[str, str], config.document["retained_loader"]["field_mappings"])
+    loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    mappings = cast(Mapping[str, str], loader["field_mappings"])
     expected_fields = set(mappings.values())
     fixture_fields = set(FixtureRow.__dataclass_fields__)
     if not expected_fields <= fixture_fields:
         raise FreezeError("fixture fields do not match frozen retained mapping")
-    child_keys: set[tuple[Any, ...]] = set()
-    for row in rows:
-        record = {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__}
-        key = _canonical_join_key(record, mappings)
-        if key in child_keys:
-            raise FreezeError("duplicate canonical identity in fixture child")
-        child_keys.add(key)
-    selected, selection = select_synchronised_rows(rows, config)
-    encoded_rows = [
-        json.dumps(
-            {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        for row in rows
-    ]
-    source_bytes = sum(len(encoded) for encoded in encoded_rows)
-    child_hashes = {
-        name: hashlib.sha256(b"[" + b",".join(encoded_rows) + b"]").hexdigest()
-        for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence")
-    }
-    consumed_parts = {
-        name: [
-            {
-                "locator": f"<fixture:{name}:part-0>",
-                "contract": config.document["retained_loader"]["manifest_contract"],
-                "identity": f"fixture-{name}-part-0",
-                "sha256": child_hashes[name],
-                "rows": len(rows),
-                "bytes": source_bytes,
+    records = [{field: getattr(row, field) for field in expected_fields} for row in rows]
+    with tempfile.TemporaryDirectory(prefix="qtrad-r3-h-fixture-") as temporary:
+        root = Path(temporary)
+        locators: dict[str, str] = {}
+        declarations = cast(Mapping[str, Any], loader["child_wrappers"])
+
+        def metadata_for(name: str) -> dict[str, Any]:
+            declaration = cast(Mapping[str, Any], declarations[name])
+            values: dict[str, Any] = {
+                key: None for key in cast(Sequence[str], declaration["required_keys"])
             }
-        ]
-        for name in child_hashes
-    }
-    return selected, {
-        "authority": {
-            "authentication_performed": False,
-            "contract": config.document["terminal_authentication"]["contract"],
-            "state": "FIXTURE_INJECTED",
-            "verdict": "NOT_AUTHENTICATED",
-        },
-        "selection": selection,
-        "source_scan_rows": len(rows),
-        "source_scan_bytes": source_bytes,
-        "source_scan_parts": 4,
-        "consumed_parts": consumed_parts,
-        "selected_rows": len(selected),
-        "selected_parts": 4,
-        "selected_bytes": selection["selected_bytes"],
-        "stop_reason": "STOPPED_AFTER_SELECTED_GROUPS",
-        "outcome_decode_performed": False,
-        "fixture_injected": True,
-    }
+            values["contract"] = declaration["contract"]
+            values["schema_version"] = 1
+            values[cast(str, declaration["identity_field"])] = f"fixture-{name}-identity"
+            if name == "consumed" and "selection_manifest_id" in values:
+                values["selection_manifest_id"] = "fixture-selection-identity"
+            for key in values:
+                if key.endswith("_ids") or key in {
+                    "questions",
+                    "comparator_families",
+                    "runtime_identities",
+                    "frozen_metadata",
+                    "rows",
+                    "outcomes",
+                    "source_row_ids",
+                }:
+                    values[key] = []
+            if "rows" in values:
+                values["rows"] = len(records)
+            for key, value in (
+                ("source_class", "FIXTURE"),
+                ("evidence_class", "FIXTURE"),
+                ("holdout_scope", "FIXTURE"),
+                ("state", "CONSUMED" if name == "consumed" else "SEALED_UNOPENED"),
+            ):
+                if key in values:
+                    values[key] = value
+            if "outcome_accessed" in values:
+                values["outcome_accessed"] = False
+            if "holdout_outcomes_accessed" in values:
+                values["holdout_outcomes_accessed"] = False
+            if "frozen_at" in values:
+                values["frozen_at"] = "1970-01-01T00:00:00Z"
+            if "frozen_by" in values:
+                values["frozen_by"] = "fixture"
+            if "experiment_count" in values:
+                values["experiment_count"] = 1
+            return values
+
+        for name in ("selection", "consumed"):
+            path = root / f"{name}.json"
+            path.write_text(
+                json.dumps(metadata_for(name), sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            locators[name] = str(path)
+        for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence"):
+            part_path = root / f"{name}-part.json"
+            part_bytes = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+            part_path.write_bytes(part_bytes)
+            descriptor = {
+                "locator": part_path.name,
+                "contract": cast(Mapping[str, Any], declarations[name])["contract"],
+                "identity": f"fixture-{name}-part-0",
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "byte_size": len(part_bytes),
+                "row_count": len(records),
+            }
+            wrapper = metadata_for(name)
+            wrapper["parts"] = [descriptor]
+            wrapper_path = root / f"{name}.json"
+            wrapper_path.write_text(
+                json.dumps(wrapper, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+            )
+            locators[name] = str(wrapper_path)
+        return load_retained_rows(config, locators=locators, _fixture=True)
 
 
 def _decision_identity(row: FixtureRow) -> tuple[str, str, str, str, int, str]:
@@ -1843,6 +2185,8 @@ def analyse_fixture(
         raise FreezeError("fixture analysis exceeded frozen candidate limits")
     candidate_by_family: dict[str, Mapping[str, Any]] = {}
     for descriptor in candidate_descriptors:
+        if set(descriptor) != {"degree", "enabled", "family", "id"}:
+            raise FreezeError("candidate declaration schema is not frozen")
         if not descriptor["enabled"]:
             raise FreezeError("disabled candidate cannot enter the frozen execution set")
         family = str(descriptor["family"])
@@ -1853,9 +2197,11 @@ def analyse_fixture(
         ] not in {0, 1}:
             raise FreezeError(f"unsupported candidate declaration: {family}")
         candidate_by_family[family] = descriptor
+    candidate_ids = [str(descriptor["id"]) for descriptor in candidate_descriptors]
+    if len(candidate_ids) != len(set(candidate_ids)) or set(candidate_ids) != set(_CANDIDATE_IDS):
+        raise FreezeError("frozen candidate declarations have missing or extra IDs")
     if set(candidate_by_family) != {"ridge", "constant_zero", "bounded_huber"}:
         raise FreezeError("frozen candidate declarations are incomplete")
-    candidate_ids = [str(descriptor["id"]) for descriptor in candidate_descriptors]
 
     zero_predictions = [0.0] * row_count
     local_predictions = [row.prediction for row in ordered]
@@ -1917,24 +2263,83 @@ def analyse_fixture(
             "fit_evaluation_time": first_evaluation_time if fit_count else None,
             "execution_receipt": dict(descriptor),
         }
-
+    if set(candidate_metrics) != set(candidate_ids) or any(
+        "execution_receipt" not in metric for metric in candidate_metrics.values()
+    ):
+        raise FreezeError("candidate execution receipts have missing or extra declarations")
+    statistical_formulations = cast(Mapping[str, Any], config.document["statistical_formulations"])
     control_ids = [
-        str(control_id)
-        for control_id in cast(list[Any], config.document["statistical_formulations"]["controls"])
+        str(control_id) for control_id in cast(list[Any], statistical_formulations["controls"])
     ]
-    if len(control_ids) != 3:
+    control_descriptors = [
+        cast(Mapping[str, Any], descriptor)
+        for descriptor in cast(list[Any], statistical_formulations["control_descriptors"])
+    ]
+    if any(
+        set(descriptor) != {"candidate_id", "fit_policy", "id", "kind"}
+        for descriptor in control_descriptors
+    ):
+        raise FreezeError("control declaration schema is not frozen")
+    if len(control_ids) != 3 or len(control_descriptors) != len(control_ids):
         raise FreezeError("frozen control declarations are incomplete")
-    zero_control_id, local_control_id, _pooled_control_id = control_ids
-    control_predictions = dict(
-        zip(control_ids, (zero_predictions, local_predictions, pooled_predictions), strict=True)
+    if {str(descriptor["id"]) for descriptor in control_descriptors} != set(control_ids):
+        raise FreezeError("control declarations have missing or extra IDs")
+    descriptor_by_id = {str(descriptor["id"]): descriptor for descriptor in control_descriptors}
+    expected_kinds = {
+        "zero_return": "constant_zero",
+        "local_ridge": "local_ridge",
+        "pooled_local_ridge": "pooled_ridge",
+    }
+    if any(
+        str(descriptor["kind"]) != expected_kinds[str(descriptor["id"])]
+        for descriptor in control_descriptors
+    ):
+        raise FreezeError("control declaration kind does not match frozen mapping")
+    zero_control_id = next(
+        control_id
+        for control_id in control_ids
+        if descriptor_by_id[control_id]["kind"] == "constant_zero"
     )
-    control_masks = dict(zip(control_ids, (all_mask, all_mask, evaluation_mask), strict=True))
-    control_fit_executions = dict(zip(control_ids, (0, 0, pooled_fit_executions), strict=True))
+    local_control_id = next(
+        control_id
+        for control_id in control_ids
+        if descriptor_by_id[control_id]["kind"] == "local_ridge"
+    )
+    pooled_control_id = next(
+        control_id
+        for control_id in control_ids
+        if descriptor_by_id[control_id]["kind"] == "pooled_ridge"
+    )
+    control_predictions: dict[str, list[float]] = {}
+    control_masks: dict[str, list[bool]] = {}
+    control_fit_executions: dict[str, int] = {}
+    for control_id in control_ids:
+        kind = str(descriptor_by_id[control_id]["kind"])
+        if kind == "constant_zero":
+            (
+                control_predictions[control_id],
+                control_masks[control_id],
+                control_fit_executions[control_id],
+            ) = zero_predictions, all_mask, 0
+        elif kind == "local_ridge":
+            (
+                control_predictions[control_id],
+                control_masks[control_id],
+                control_fit_executions[control_id],
+            ) = local_predictions, all_mask, 0
+        elif kind == "pooled_ridge":
+            (
+                control_predictions[control_id],
+                control_masks[control_id],
+                control_fit_executions[control_id],
+            ) = pooled_predictions, evaluation_mask, pooled_fit_executions
+        else:
+            raise FreezeError(f"unsupported control declaration: {kind}")
     control_metrics: dict[str, dict[str, Any]] = {
         control_id: {
             **_metrics(
                 ordered,
-                predictions,
+                control_predictions[control_id],
                 baseline_mse=(
                     local_reference_mse if control_id == zero_control_id else baseline_mse
                 ),
@@ -1945,8 +2350,9 @@ def analyse_fixture(
             "fit_evaluation_time": (
                 first_evaluation_time if control_fit_executions[control_id] else None
             ),
+            "execution_receipt": dict(descriptor_by_id[control_id]),
         }
-        for control_id, predictions in control_predictions.items()
+        for control_id in control_ids
     }
     oof_metrics = control_metrics[local_control_id]
     statistical: dict[str, Any] = {
@@ -1973,9 +2379,25 @@ def analyse_fixture(
     }
 
     tiny_graph = cast(Mapping[str, Any], config.document["tiny_graph_candidate"])
-    if not tiny_graph["enabled"]:
-        raise FreezeError("tiny learned graph is required and enabled")
+    if set(tiny_graph) != {"enabled", "family", "hidden_units", "id", "layers"}:
+        raise FreezeError("tiny graph declaration schema is not frozen")
+    if not bool(tiny_graph["enabled"]) or str(tiny_graph["id"]) != "tiny_learned_graph":
+        raise FreezeError("tiny graph declaration is not enabled and frozen")
     graph_controls = cast(list[Mapping[str, Any]], config.document["graph_controls"])
+    expected_graph_ids = {
+        "local_non_graph",
+        "pooled_non_graph",
+        "fixed_graph",
+        "shuffled_graph",
+    }
+    graph_control_ids = [str(control["id"]) for control in graph_controls]
+    if (
+        len(graph_control_ids) != len(set(graph_control_ids))
+        or set(graph_control_ids) != expected_graph_ids
+        or any(set(control) != {"enabled", "id", "kind"} for control in graph_controls)
+        or any(not bool(control["enabled"]) for control in graph_controls)
+    ):
+        raise FreezeError("graph control declarations have missing or extra entries")
     graph_predictions, graph_fit_count, graph_fit_executions = _graph_predictions(
         ordered,
         pooled_predictions,
@@ -1986,6 +2408,9 @@ def analyse_fixture(
         cast(Mapping[str, Any], algorithms["shuffled_graph"]),
         graph_controls,
     )
+    expected_graph_execution_ids = expected_graph_ids | {str(tiny_graph["id"])}
+    if set(graph_predictions) != expected_graph_execution_ids:
+        raise FreezeError("graph execution receipts have missing or extra declarations")
     fits = sum(candidate_fit_executions.values()) + pooled_fit_executions + graph_fit_count
     if fits > limits["max_fits"]:
         raise FreezeError("fixture analysis exceeded frozen fit limits")
@@ -2103,7 +2528,7 @@ def analyse_fixture(
             "fit_count": fits,
             "fit_executions": {
                 **candidate_fit_executions,
-                _pooled_control_id: pooled_fit_executions,
+                pooled_control_id: pooled_fit_executions,
                 tiny_graph_id: graph_fit_executions,
             },
             "graph_fit_count": graph_fit_count,

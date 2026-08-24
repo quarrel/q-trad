@@ -157,7 +157,52 @@
             "max_row_bytes": 16384,
             "max_nested_depth": 8,
             "max_part_rows": 1000000,
-            "max_selected_rows": 64}},
+            "max_selected_rows": 64},
+        "child_wrappers": {
+            "selection": {
+                "contract": "qtrad-r2-selection-v4",
+                "identity_field": "manifest_id",
+                "identity": "15483908d45455ae7ccc5f8d1a3fdcd19b3226308b3a4c6afda067daedb627dc",
+                "sha256": "7f1020f422b01a64a47439342d6b2301be6aeb16e934daab11e2598935de3a53",
+                "required_keys": ["contract", "schema_version", "experiment_configuration_id", "foundation_bundle_id", "oof_id", "evaluation_report_id", "prior_selection_manifest_id", "source_class", "evidence_class", "holdout_scope", "evaluated_configuration_ids", "selected_configuration_ids", "control_configuration_ids", "holdout_configuration_ids", "comparator_families", "configuration_registry", "metric_policy", "threshold_policy", "evaluation_policy", "final_fitting_policy", "questions", "holdout_range", "experiment_count", "runtime_identities", "frozen_metadata", "frozen_at", "frozen_by", "state", "holdout_outcomes_accessed", "manifest_id"]
+            },
+            "consumed": {
+                "contract": "qtrad-r2-holdout-consumed-v1",
+                "identity_field": "marker_id",
+                "identity": "c9bf58cebaa51435369704e629fc9df65b05020bf4354c0541ae17726a802446",
+                "sha256": "da69bbd8cee38cbd9f0df63e7c0c33f6268ed189dc81fce75c7bd5176bfc708f",
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "seal_id", "opened_marker_id", "consumed_at", "consumed_by", "evaluation_id", "outcome_accessed", "state", "marker_id"]
+            },
+            "local_forecast": {
+                "contract": "qtrad-r2-holdout-forecast-v1",
+                "identity_field": "dataset_id",
+                "identity": "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9",
+                "sha256": "a11e7096d25cb0ffcda3c4c0bd2efd5d6fde51c50ff8607598b957176992fd0a",
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+            },
+            "pooled_forecast": {
+                "contract": "qtrad-r2-holdout-forecast-v1",
+                "identity_field": "dataset_id",
+                "identity": "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b",
+                "sha256": "e973e855ab2d62585cd8b809d9a57e74f6fc5b0908b292c08b7ad42ba16df6b6",
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+            },
+            "zero_forecast": {
+                "contract": "qtrad-r2-holdout-forecast-v1",
+                "identity_field": "dataset_id",
+                "identity": "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223",
+                "sha256": "bfba06f10de85ad356bfc587d2010544a3f3959d13204f987f22773e916cd72d",
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+            },
+            "outcome_evidence": {
+                "contract": "qtrad-r2-holdout-outcome-evidence-v1",
+                "identity_field": "outcome_evidence_id",
+                "identity": "480ef61aec7daff49eadbec7d5ec6dc7c7f6f702c92b6a0bdbc9a7c05a342f8a",
+                "sha256": "44be69c09433f4e237eb78535a2e0ba0cab6de67c96d5b79e6e1d69df28f13b1",
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "seal_id", "opened_marker_id", "experiment_configuration_id", "foundation_bundle_id", "feature_dataset_id", "target_dataset_id", "holdout_range", "expected_target_ids", "source_row_ids", "outcomes", "source_class", "evidence_class", "holdout_scope", "outcome_evidence_id"]
+            }
+        }
+    },
     "scale_projection": {
         "retained_row_count": 3376258,
         "target_count": 6,
@@ -210,6 +255,10 @@
     "statistical_formulations": {
         "oof": "chronological folds with dependency-derived purge and embargo; no outcome-blind selection after scoring",
         "controls": ["zero_return", "local_ridge", "pooled_local_ridge"],
+        "control_descriptors": [
+            {"id": "zero_return", "kind": "constant_zero", "candidate_id": "linear_zero_return", "fit_policy": "none"},
+            {"id": "local_ridge", "kind": "local_ridge", "candidate_id": "linear_ridge", "fit_policy": "chronological_oof"},
+            {"id": "pooled_local_ridge", "kind": "pooled_ridge", "candidate_id": "linear_ridge", "fit_policy": "chronological_oof"}],
         "metrics": ["mse", "rank_correlation", "coverage", "support"],
         "views": ["asset", "horizon", "period"]},
     "nonlinear_candidates": [
@@ -263,4 +312,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "341d15247f3763c0489984e16df4ce241dd22b0cb753e136199ff4423e9ef667"}
+    "semantic_identity": "cf80f2543379344cc1bbf62cd324f78e136ace2d76a0e514ead38d34678bbc14"}

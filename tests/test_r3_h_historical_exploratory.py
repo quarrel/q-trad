@@ -431,17 +431,27 @@ def test_retained_child_identity_binding_is_strict() -> None:
 
     config = FreezeConfig.from_path(CONFIG)
     loader = config.document["retained_loader"]
-    bindings = loader["identity_bindings"]
-    metadata = {
-        "contract": loader["manifest_contract"],
-        "g2_manifest_id": bindings["g2_manifest_id"],
-        "dataset_id": bindings["dataset_ids"]["LOCAL_RIDGE"],
-        "configuration_id": bindings["config_ids"]["LOCAL_RIDGE"],
-        "parts": [{"sha256": "part-hash"}],
-    }
+    declaration = loader["child_wrappers"]["local_forecast"]
+    metadata: dict[str, Any] = {key: None for key in declaration["required_keys"]}
+    metadata.update(
+        {
+            "contract": declaration["contract"],
+            "dataset_id": declaration["identity"],
+            "parts": [
+                {
+                    "locator": "part.json",
+                    "contract": declaration["contract"],
+                    "identity": "part",
+                    "sha256": "a" * 64,
+                    "byte_size": 1,
+                    "row_count": 1,
+                }
+            ],
+        }
+    )
     _validate_child_metadata("local_forecast", metadata, loader)
     metadata["dataset_id"] = "wrong-dataset"
-    with pytest.raises(FreezeError, match="dataset identity"):
+    with pytest.raises(FreezeError, match="identity mismatch"):
         _validate_child_metadata("local_forecast", metadata, loader)
 
 
@@ -489,7 +499,7 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert len(rows) == 18
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
-    assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_SELECTED_GROUPS"
+    assert metadata["selection"]["stop_state"] == "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
 
 
 def test_create_only_writer_is_atomic_on_collision_and_failure(
