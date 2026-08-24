@@ -18,15 +18,25 @@ from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
-from pathlib import Path
+from itertools import pairwise
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, cast
 
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "cf80f2543379344cc1bbf62cd324f78e136ace2d76a0e514ead38d34678bbc14"
+    "0fb453ccf3bffbfee015a3188116ac21c90ff4c0593e01e6fb8dc141317fc14a"
 )
+_PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
+_PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
+_MAX_PART_BYTES: Final = 64 * 1024 * 1024
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
     "historical_exploratory",
@@ -374,6 +384,7 @@ _SECTION_KEYS: Final = {
             "field_mappings",
             "identity_bindings",
             "locators",
+            "manifest_root",
             "decode_policy",
             "selection_policy",
             "streaming_policy",
@@ -2268,6 +2279,8 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         raise FreezeError("retained loader columns are not frozen")
     if "target_position_change" in loader["required_columns"]:
         raise FreezeError("target_position_change compatibility field is forbidden")
+    if not isinstance(loader.get("manifest_root"), str) or not loader["manifest_root"]:
+        raise FreezeError("retained compact manifest root is not frozen")
     if loader["locators"] != {
         "selection": retained_object["selection"],
         "consumed": retained_object["consumed"],
@@ -2309,7 +2322,16 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         declaration = cast(Mapping[str, Any], declaration_raw)
         if not isinstance(declaration_raw, Mapping):
             raise FreezeError(f"child wrapper declaration is not an object: {name}")
+        is_partitioned = name not in {"selection", "consumed"}
         expected_keys = {"contract", "identity_field", "identity", "sha256", "required_keys"}
+        if is_partitioned:
+            expected_keys |= {
+                "physical_required_keys",
+                "manifest_relative_path",
+                "partition_row_field",
+                "partition_fields",
+                "partition_mapping_fields",
+            }
         if set(declaration) != expected_keys:
             raise FreezeError(f"child wrapper declaration schema mismatch: {name}")
         expected_field, expected_identity = _CHILD_WRAPPER_IDENTITY_FIELDS[name]
@@ -2322,6 +2344,40 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
             != _CHILD_WRAPPER_REQUIRED_KEYS[name]
         ):
             raise FreezeError(f"child wrapper declaration is not frozen: {name}")
+        if is_partitioned:
+            logical_row_field = "outcomes" if name == "outcome_evidence" else "rows"
+            partition_fields = set(cast(Sequence[str], declaration["partition_fields"]))
+            expected_physical = _CHILD_WRAPPER_REQUIRED_KEYS[name] - partition_fields | {
+                "storage",
+                "identity_field",
+                "row_count",
+                "parts",
+                "header_sha256",
+                "partition_row_field",
+                "partition_fields",
+                "partition_mapping_fields",
+            }
+            if (
+                frozenset(cast(Sequence[str], declaration["physical_required_keys"]))
+                != expected_physical
+                or declaration["partition_row_field"] != logical_row_field
+                or declaration["partition_mapping_fields"] != []
+            ):
+                raise FreezeError(f"child compact manifest declaration is not frozen: {name}")
+            expected_partition_fields = (
+                ["expected_target_ids", "source_row_ids", "outcomes"]
+                if name == "outcome_evidence"
+                else ["rows"]
+            )
+            if declaration["partition_fields"] != expected_partition_fields:
+                raise FreezeError(f"child compact partition fields are not frozen: {name}")
+            expected_relative = (
+                "outcome-evidence.json"
+                if name == "outcome_evidence"
+                else f"forecasts/{declaration['identity']}.json"
+            )
+            if declaration["manifest_relative_path"] != expected_relative:
+                raise FreezeError(f"child compact manifest path is not frozen: {name}")
 
     statistical = raw["statistical_formulations"]
     if not isinstance(statistical, dict):
@@ -2673,10 +2729,274 @@ def _json_depth(value: Any) -> int:
     return 0
 
 
+def _declared_partition_paths(
+    root: Path,
+    manifest_relative_path: str,
+    manifest: Mapping[str, Any],
+    *,
+    identity_field: str,
+) -> list[str]:
+    """Validate the R2 compact part tree without importing runtime from application."""
+    relative_manifest = PurePosixPath(manifest_relative_path)
+    if (
+        relative_manifest.is_absolute()
+        or ".." in relative_manifest.parts
+        or str(relative_manifest) != manifest_relative_path
+        or root.is_symlink()
+    ):
+        raise ValueError("unsafe manifest path")
+    root_resolved = root.resolve(strict=True)
+    references_value: object = manifest["parts"]
+    total_rows_value: object = manifest["row_count"]
+    if (
+        not isinstance(references_value, list)
+        or not isinstance(total_rows_value, int)
+        or isinstance(total_rows_value, bool)
+        or total_rows_value < 0
+    ):
+        raise ValueError("malformed compact manifest parts")
+    references = cast(list[object], references_value)
+    total_rows = total_rows_value
+    part_prefix = f"{manifest_relative_path}.parts"
+    declared: list[str] = []
+    expected_rows = 0
+    for expected_index, reference_value in enumerate(references):
+        if not isinstance(reference_value, Mapping):
+            raise ValueError("malformed compact part reference")
+        reference = cast(Mapping[str, object], reference_value)
+        if set(reference) != {
+            "path",
+            "sha256",
+            "row_count",
+            "part_index",
+        }:
+            raise ValueError("malformed compact part reference")
+        relative = reference["path"]
+        row_count = reference["row_count"]
+        digest = reference["sha256"]
+        if (
+            not isinstance(relative, str)
+            or not isinstance(row_count, int)
+            or isinstance(row_count, bool)
+            or row_count <= 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or reference["part_index"] != expected_index
+            or relative != f"{part_prefix}/part-{expected_index:06d}.json"
+        ):
+            raise ValueError("non-canonical compact part reference")
+        relative_path = PurePosixPath(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError("unsafe compact part path")
+        candidate = root.joinpath(*relative_path.parts)
+        current = root
+        for component in relative_path.parts:
+            current = current / component
+            if current.is_symlink():
+                raise ValueError("symlink in compact part path")
+        if not candidate.resolve(strict=False).is_relative_to(root_resolved):
+            raise ValueError("compact part escapes root")
+        if candidate.stat().st_size > _MAX_PART_BYTES:
+            raise ValueError(f"compact part exceeds the 64 MiB limit: {relative}")
+        declared.append(relative)
+        expected_rows += row_count
+    if expected_rows != total_rows:
+        raise ValueError("compact part row count mismatch")
+    if total_rows and not references:
+        raise ValueError("compact manifest has rows but no parts")
+    if not total_rows and references:
+        raise ValueError("compact empty manifest must not declare parts")
+    if manifest.get("identity_field") != identity_field:
+        raise ValueError("compact manifest identity field mismatch")
+    part_root = root.joinpath(*PurePosixPath(part_prefix).parts)
+    if not part_root.is_dir() or part_root.is_symlink():
+        if declared:
+            raise ValueError("compact part directory is missing or unsafe")
+        return declared
+    for entry in part_root.rglob("*"):
+        if entry.is_symlink() or not entry.is_file():
+            raise ValueError("compact part tree contains an unsafe entry")
+        if entry.relative_to(root).as_posix() not in declared:
+            raise ValueError("compact part tree contains an undeclared file")
+    return declared
+
+
+def _open_partitioned_json_document(
+    path: Path, limits: Mapping[str, Any]
+) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
+    """Open one authoritative R2 compact manifest without materialising its parts."""
+    root = Path(cast(str, limits["manifest_root"]))
+    manifest_relative = cast(str, limits["manifest_relative_path"])
+    if path != root / PurePosixPath(manifest_relative):
+        raise FreezeError("retained manifest path differs from frozen preparation root")
+    if not path.is_file() or path.is_symlink():
+        raise FreezeError("retained compact manifest is missing or unsafe")
+    raw_bytes = path.read_bytes()
+    if len(raw_bytes) > int(limits["max_source_bytes"]):
+        raise FreezeError("retained child exceeds frozen source-byte bound")
+    wrapper_hash = hashlib.sha256(raw_bytes).hexdigest()
+    expected_wrapper_hash = limits.get("expected_wrapper_sha256")
+    if expected_wrapper_hash is not None and wrapper_hash != expected_wrapper_hash:
+        raise FreezeError("retained wrapper byte hash mismatch")
+    try:
+        payload: object = cast(object, json.loads(raw_bytes))
+    except json.JSONDecodeError as exc:
+        raise FreezeError("retained compact manifest is not valid JSON") from exc
+    if (
+        not isinstance(payload, dict)
+        or _canonical_bytes(cast(dict[str, Any], payload)) != raw_bytes
+    ):
+        raise FreezeError("retained compact manifest is not canonical JSON")
+    metadata = cast(dict[str, Any], payload)
+    required_keys = set(cast(Sequence[str], limits["physical_required_keys"]))
+    if set(metadata) != required_keys:
+        raise FreezeError("retained compact manifest fields are incomplete")
+    if metadata.get("storage") != _PARTITIONED_ROWS_STORAGE:
+        raise FreezeError("retained compact manifest storage differs from R2 contract")
+    identity_field = cast(str, limits["expected_identity_field"])
+    if metadata.get("contract") != limits["expected_wrapper_contract"]:
+        raise FreezeError("retained wrapper contract mismatch")
+    expected_wrapper_identity = limits.get("expected_wrapper_identity")
+    if (
+        expected_wrapper_identity is not None
+        and metadata.get(identity_field) != expected_wrapper_identity
+    ):
+        raise FreezeError("retained wrapper identity mismatch")
+    if metadata.get("identity_field") != identity_field:
+        raise FreezeError("retained compact manifest identity field mismatch")
+    physical_fields = {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    header = {key: value for key, value in metadata.items() if key not in physical_fields}
+    if metadata.get("header_sha256") != hashlib.sha256(_canonical_bytes(header)).hexdigest():
+        raise FreezeError("retained compact manifest header digest mismatch")
+    if metadata.get("partition_row_field") != limits["partition_row_field"]:
+        raise FreezeError("retained compact manifest row register mismatch")
+    if tuple(cast(Sequence[str], metadata.get("partition_fields"))) != tuple(
+        cast(Sequence[str], limits["partition_fields"])
+    ):
+        raise FreezeError("retained compact manifest field register mismatch")
+    if tuple(cast(Sequence[str], metadata.get("partition_mapping_fields"))) != tuple(
+        cast(Sequence[str], limits["partition_mapping_fields"])
+    ):
+        raise FreezeError("retained compact manifest mapping register mismatch")
+    references_value = metadata.get("parts")
+    if not isinstance(references_value, list):
+        raise FreezeError("retained compact manifest parts are malformed")
+    references = cast(list[Mapping[str, Any]], references_value)
+    try:
+        declared_paths = _declared_partition_paths(
+            root, manifest_relative, metadata, identity_field=identity_field
+        )
+    except (OSError, ValueError) as exc:
+        raise FreezeError("retained compact manifest part declarations are invalid") from exc
+    if len(declared_paths) > int(limits["max_consumed_parts"]):
+        raise FreezeError("retained compact manifest exceeds frozen part bound")
+    expected_record_keys = cast(Sequence[str], limits["required_record_keys"])
+    outcome_tags = set(cast(Sequence[str], limits.get("partition_fields", ())))
+
+    def iter_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
+        started = time.monotonic()
+        for expected_index, (reference_raw, relative) in enumerate(
+            zip(references, declared_paths, strict=True)
+        ):
+            if time.monotonic() - started > float(limits["max_elapsed_seconds"]):
+                raise FreezeError("retained child exceeds elapsed-time bound")
+            reference = reference_raw
+            if set(reference) != {"path", "sha256", "row_count", "part_index"}:
+                raise FreezeError("retained compact part reference fields are incomplete")
+            if reference["path"] != relative or reference["part_index"] != expected_index:
+                raise FreezeError("retained compact part reference is non-canonical")
+            part_path = root / PurePosixPath(relative)
+            if not part_path.is_file() or part_path.is_symlink():
+                raise FreezeError("retained compact part is missing or unsafe")
+            try:
+                part_size = part_path.stat().st_size
+            except OSError as exc:
+                raise FreezeError("retained compact part is missing or unsafe") from exc
+            if part_size > _MAX_PART_BYTES:
+                raise FreezeError("retained compact part exceeds the 64 MiB limit")
+            part_bytes = part_path.read_bytes()
+            if hashlib.sha256(part_bytes).hexdigest() != reference["sha256"]:
+                raise FreezeError("retained compact part byte hash mismatch")
+            try:
+                envelope_value: object = cast(object, json.loads(part_bytes))
+            except json.JSONDecodeError as exc:
+                raise FreezeError("retained compact part is not valid JSON") from exc
+            if (
+                not isinstance(envelope_value, dict)
+                or _canonical_bytes(cast(dict[str, Any], envelope_value)) != part_bytes
+            ):
+                raise FreezeError("retained compact part is not canonical JSON")
+            envelope = cast(dict[str, Any], envelope_value)
+            envelope_keys = {
+                "contract",
+                "schema_version",
+                "parent_contract",
+                "parent_semantic_id",
+                "part_index",
+                "rows",
+            }
+            if set(envelope) != envelope_keys:
+                raise FreezeError("retained compact part envelope fields are incomplete")
+            if (
+                envelope["contract"] != "qtrad-r2-partitioned-json-row-part-v1"
+                or envelope["schema_version"] != 1
+                or envelope["parent_contract"] != metadata["contract"]
+                or envelope["parent_semantic_id"] != metadata[identity_field]
+                or envelope["part_index"] != expected_index
+            ):
+                raise FreezeError("retained compact part lineage mismatch")
+            physical_rows_value = envelope["rows"]
+            if not isinstance(physical_rows_value, list):
+                raise FreezeError("retained compact part row count mismatch")
+            physical_rows = cast(list[object], physical_rows_value)
+            if len(physical_rows) != reference["row_count"]:
+                raise FreezeError("retained compact part row count mismatch")
+            if len(physical_rows) > int(limits["max_part_rows"]):
+                raise FreezeError("retained compact part exceeds row bound")
+            logical_rows: list[Mapping[str, Any]] = []
+            for physical_row in physical_rows:
+                if not isinstance(physical_row, Mapping):
+                    raise FreezeError("retained compact part row must be an object")
+                physical = cast(Mapping[str, Any], physical_row)
+                if outcome_tags == {"expected_target_ids", "source_row_ids", "outcomes"}:
+                    if set(physical) != {"field", "value"} or physical["field"] not in outcome_tags:
+                        raise FreezeError("retained outcome partition row is malformed")
+                    if physical["field"] != "outcomes":
+                        continue
+                    value = physical["value"]
+                else:
+                    if set(physical) != {"value"}:
+                        raise FreezeError("retained forecast partition row is malformed")
+                    value = physical["value"]
+                if not isinstance(value, Mapping):
+                    raise FreezeError("retained logical row is malformed")
+                logical_rows.append(dict(cast(Mapping[str, Any], value)))
+            _validate_part_rows(
+                logical_rows, {**limits, "required_record_keys": expected_record_keys}
+            )
+            yield (
+                {
+                    "path": relative,
+                    "sha256": reference["sha256"],
+                    "rows": len(logical_rows),
+                    "physical_rows": len(physical_rows),
+                    "bytes": len(part_bytes),
+                    "part_index": expected_index,
+                },
+                logical_rows,
+                len(part_bytes),
+            )
+
+    return metadata, iter_parts(), len(raw_bytes), wrapper_hash
+
+
 def _open_json_document(
     path: Path, limits: Mapping[str, Any]
 ) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
     """Validate a wrapper immediately, then decode one declared part per iteration."""
+    if "physical_required_keys" in limits:
+        return _open_partitioned_json_document(path, limits)
     if not path.is_file():
         raise FreezeError(f"retained child path does not exist: {path}")
     size = path.stat().st_size
@@ -2873,33 +3193,15 @@ def _validate_child_metadata(
         raise FreezeError(f"{name} child identity mismatch")
     required = set(cast(Sequence[str], declaration["required_keys"]))
     actual = set(metadata)
-    allowed_wrapper_keys = required | {"parts"}
-    if actual - allowed_wrapper_keys:
-        raise FreezeError(f"{name} child metadata has unknown fields")
-    if not fixture and actual - {"parts"} != required:
+    if "physical_required_keys" in declaration:
+        physical_required = set(cast(Sequence[str], declaration["physical_required_keys"]))
+        if actual != physical_required:
+            raise FreezeError(f"{name} compact manifest fields are incomplete")
+        return
+    if actual != required:
         raise FreezeError(f"{name} child metadata fields are incomplete")
     if name in {"selection", "consumed"} and "parts" in metadata:
         raise FreezeError(f"{name} marker must not declare data parts")
-    parts = metadata.get("parts")
-    if parts is not None:
-        if not isinstance(parts, list) or not parts:
-            raise FreezeError(f"{name} parts metadata is malformed")
-        for part_raw in cast(list[Any], parts):
-            if not isinstance(part_raw, dict):
-                raise FreezeError(f"{name} part metadata is malformed")
-            part = cast(Mapping[str, Any], part_raw)
-            expected_part_keys = {
-                "locator",
-                "contract",
-                "identity",
-                "sha256",
-                "byte_size",
-                "row_count",
-            }
-            if set(part) != expected_part_keys:
-                raise FreezeError(f"{name} part descriptor fields are incomplete")
-            if not isinstance(part["sha256"], str) or len(part["sha256"]) != 64:
-                raise FreezeError(f"{name} part hash is missing")
 
 
 def load_retained_rows(
@@ -2934,6 +3236,7 @@ def load_retained_rows(
             "max_source_rows": streaming["max_source_rows"],
             "max_source_bytes": streaming["max_source_bytes"],
             "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+            "max_consumed_parts": streaming["max_consumed_parts"],
         }
     )
     opened: dict[
@@ -2948,6 +3251,7 @@ def load_retained_rows(
     for name in child_names:
         declaration = cast(Mapping[str, Any], wrappers[name])
         child_limits = dict(limits)
+        physical = "physical_required_keys" in declaration
         child_limits.update(
             {
                 **(
@@ -2965,6 +3269,22 @@ def load_retained_rows(
                     if name not in {"selection", "consumed"}
                     else declaration["required_keys"]
                 ),
+                **(
+                    {
+                        "physical_required_keys": declaration["physical_required_keys"],
+                        "manifest_relative_path": declaration["manifest_relative_path"],
+                        "manifest_root": str(
+                            Path(actual_locators["selection"]).parent
+                            if _fixture
+                            else Path(cast(str, loader["manifest_root"]))
+                        ),
+                        "partition_row_field": declaration["partition_row_field"],
+                        "partition_fields": declaration["partition_fields"],
+                        "partition_mapping_fields": declaration["partition_mapping_fields"],
+                    }
+                    if physical
+                    else {}
+                ),
             }
         )
         opened[name] = _open_json_document(Path(actual_locators[name]), child_limits)
@@ -2980,11 +3300,11 @@ def load_retained_rows(
     for descriptor, part_rows, _ in selection_parts:
         consumed_part_receipts["selection"].append(descriptor)
         selection_records.extend(part_rows)
-        source_rows += len(part_rows)
+        source_rows += int(descriptor.get("physical_rows", len(part_rows)))
     for descriptor, part_rows, _ in consumed_parts:
         consumed_part_receipts["consumed"].append(descriptor)
         consumed_records.extend(part_rows)
-        source_rows += len(part_rows)
+        source_rows += int(descriptor.get("physical_rows", len(part_rows)))
     if source_rows > int(streaming["max_source_rows"]) or source_bytes > int(
         streaming["max_source_bytes"]
     ):
@@ -3029,7 +3349,9 @@ def load_retained_rows(
         consumed_part_receipts[name].append(dict(descriptor))
         source_parts += 1
         source_bytes += part_size
-        source_rows += len(part_rows)
+        source_rows += int(descriptor.get("physical_rows", len(part_rows)))
+        if source_parts > int(streaming["max_consumed_parts"]):
+            raise FreezeError("retained aggregate part bound exceeded")
         if source_rows > int(streaming["max_source_rows"]):
             raise FreezeError("retained aggregate row bound exceeded")
         if source_bytes > int(streaming["max_source_bytes"]):
@@ -3234,9 +3556,11 @@ def load_fixture_rows(
             }
             values["contract"] = declaration["contract"]
             values["schema_version"] = 1
-            values[cast(str, declaration["identity_field"])] = f"fixture-{name}-identity"
+            values[cast(str, declaration["identity_field"])] = hashlib.sha256(
+                name.encode()
+            ).hexdigest()
             if name == "consumed" and "selection_manifest_id" in values:
-                values["selection_manifest_id"] = "fixture-selection-identity"
+                values["selection_manifest_id"] = hashlib.sha256(b"selection").hexdigest()
             for key in values:
                 if key.endswith("_ids") or key in {
                     "questions",
@@ -3293,30 +3617,73 @@ def load_fixture_rows(
             record[period_field] = f"{record[period_field]}-late"
         part_records.append(late_records)
         for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence"):
-            descriptors: list[dict[str, Any]] = []
-            for part_index, part_records_value in enumerate(part_records):
-                part_path = root / f"{name}-part-{part_index}.json"
-                part_bytes = json.dumps(
-                    part_records_value, sort_keys=True, separators=(",", ":")
-                ).encode()
-                part_path.write_bytes(part_bytes)
-                descriptors.append(
+            declaration = cast(Mapping[str, Any], declarations[name])
+            wrapper = metadata_for(name)
+            for partition_field in cast(Sequence[str], declaration["partition_fields"]):
+                wrapper.pop(partition_field, None)
+            row_field = cast(str, declaration["partition_row_field"])
+            wrapper["partition_row_field"] = row_field
+            wrapper["partition_fields"] = declaration["partition_fields"]
+            wrapper["partition_mapping_fields"] = declaration["partition_mapping_fields"]
+            if name == "outcome_evidence":
+                physical_rows: list[Mapping[str, object]] = [
+                    tagged
+                    for records in part_records
+                    for record in records
+                    for tagged in (
+                        {"field": "expected_target_ids", "value": record[mappings["target_id"]]},
+                        {"field": "source_row_ids", "value": record[mappings["target_id"]]},
+                        {"field": "outcomes", "value": record},
+                    )
+                ]
+            else:
+                physical_rows = [
+                    {"value": record} for records in part_records for record in records
+                ]
+            manifest_relative = cast(str, declaration["manifest_relative_path"])
+            identity_field = cast(str, declaration["identity_field"])
+            compact: dict[str, object] = {
+                **wrapper,
+                "header_sha256": hashlib.sha256(_canonical_bytes(wrapper)).hexdigest(),
+                "storage": _PARTITIONED_ROWS_STORAGE,
+                "identity_field": identity_field,
+                "row_count": len(physical_rows),
+                "parts": [],
+            }
+            multiplier = 3 if name == "outcome_evidence" else 1
+            offsets = [0]
+            for records in part_records:
+                offsets.append(offsets[-1] + len(records) * multiplier)
+            references: list[dict[str, object]] = []
+            for part_index, (start, end) in enumerate(pairwise(offsets)):
+                encoded = _canonical_bytes(
                     {
-                        "locator": part_path.name,
-                        "contract": cast(Mapping[str, Any], declarations[name])["contract"],
-                        "identity": f"fixture-{name}-part-{part_index}",
-                        "sha256": hashlib.sha256(part_bytes).hexdigest(),
-                        "byte_size": len(part_bytes),
-                        "row_count": len(part_records_value),
+                        "contract": _PARTITIONED_PART_CONTRACT,
+                        "schema_version": 1,
+                        "parent_contract": declaration["contract"],
+                        "parent_semantic_id": wrapper[declaration["identity_field"]],
+                        "part_index": part_index,
+                        "rows": physical_rows[start:end],
                     }
                 )
-            wrapper = metadata_for(name)
-            wrapper["parts"] = descriptors
-            wrapper_path = root / f"{name}.json"
-            wrapper_path.write_text(
-                json.dumps(wrapper, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-            )
-            locators[name] = str(wrapper_path)
+                relative = f"{manifest_relative}.parts/part-{part_index:06d}.json"
+                part_path = root / relative
+                part_path.parent.mkdir(parents=True, exist_ok=True)
+                part_path.write_bytes(encoded)
+                references.append(
+                    {
+                        "path": relative,
+                        "sha256": hashlib.sha256(encoded).hexdigest(),
+                        "row_count": end - start,
+                        "part_index": part_index,
+                    }
+                )
+            compact["parts"] = references
+            compact["row_count"] = len(physical_rows)
+            manifest_path = root / manifest_relative
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(_canonical_bytes(compact))
+            locators[name] = str(manifest_path)
         return load_retained_rows(config, locators=locators, _fixture=True)
 
 
