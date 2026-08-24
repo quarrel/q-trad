@@ -234,44 +234,44 @@ class DecisionClosure:
             raise ValueError("decision reporting currency is required")
         _digest(self.decision_input_identity, "decision input identity")
         _digest(self.parent_verification_identity, "parent verification identity")
-        if self.rounded_target is not None:
-            if self.target_verification_identity == "":
-                raise ValueError("rounded target verification identity is required")
-            _digest(self.target_verification_identity, "target verification identity")
-            target = self.rounded_target
+        if self.rounded_target is None:
+            raise ValueError("decision closure requires rounded target receipt")
+        if self.target_verification_identity == "":
+            raise ValueError("rounded target verification identity is required")
+        _digest(self.target_verification_identity, "target verification identity")
+        target = self.rounded_target
+        if (
+            target.source_class is not self.source_class
+            or target.evidence_purpose is not self.evidence_purpose
+            or target.asset_order != assets
+            or target.current_position != self.current_position
+            or target.target_position != self.target_position
+            or target.physical_delta != self.physical_delta
+            or target.decision_input_identity != self.decision_input_identity
+            or dict(target.expected_costs) != dict(self.expected_costs)
+        ):
+            raise ValueError("decision closure does not bind rounded target")
+        if self.parent_verification_identity != self.target_verification_identity:
+            raise ValueError("decision parent must be the rounded-target receipt")
+        if not self.attributions or not target.attributions:
+            raise ValueError("decision requires rounded target attributions")
+        if any(item.key is None for item in self.attributions):
+            raise ValueError("decision attributions require full sleeve keys")
+        expected_attributions = {item.key.canonical_tuple: item for item in target.attributions}
+        actual_attributions = {actual.canonical_key: actual for actual in self.attributions}
+        if set(expected_attributions) != set(actual_attributions):
+            raise ValueError("decision attributions do not bind rounded target")
+        for key, item in expected_attributions.items():
+            actual = actual_attributions[key]
             if (
-                target.source_class is not self.source_class
-                or target.evidence_purpose is not self.evidence_purpose
-                or target.asset_order != assets
-                or target.current_position != self.current_position
-                or target.target_position != self.target_position
-                or target.physical_delta != self.physical_delta
-                or target.decision_input_identity != self.decision_input_identity
-                or dict(target.expected_costs) != dict(self.expected_costs)
+                actual.key != item.key
+                or actual.requested_delta != item.requested_delta
+                or actual.internal_cross_quantity != item.internal_cross_quantity
+                or actual.external_delta_share != item.external_delta_share
+                or actual.repair_delta != item.repair_delta
+                or actual.reason_codes != item.reason_codes
             ):
-                raise ValueError("decision closure does not bind rounded target")
-            if self.parent_verification_identity != self.target_verification_identity:
-                raise ValueError("decision parent must be the rounded-target receipt")
-            expected_attributions = {item.key.canonical_tuple: item for item in target.attributions}
-            actual_attributions = {
-                actual.key.canonical_tuple
-                if actual.key is not None
-                else actual.canonical_key: actual
-                for actual in self.attributions
-            }
-            if set(expected_attributions) != set(actual_attributions):
-                raise ValueError("decision attributions do not bind rounded target")
-            for key, item in expected_attributions.items():
-                actual = actual_attributions[key]
-                if (
-                    actual.key != item.key
-                    or actual.requested_delta != item.requested_delta
-                    or actual.internal_cross_quantity != item.internal_cross_quantity
-                    or actual.external_delta_share != item.external_delta_share
-                    or actual.repair_delta != item.repair_delta
-                    or actual.reason_codes != item.reason_codes
-                ):
-                    raise ValueError("decision attribution differs from rounded target")
+                raise ValueError("decision attribution differs from rounded target")
         if self.risk_state is not None and (
             self.risk_state.source_class is not self.source_class
             or self.risk_state.evidence_purpose is not self.evidence_purpose
@@ -461,6 +461,8 @@ class OutcomeClosure:
     contract: str = OUTCOME_CONTRACT
     physical_delta: Decimal = Decimal("0")
     closure_identity: str = ""
+    decision_reference: QuoteEvidence | None = None
+    reference_to_entry_latency: timedelta | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.decision_time, "outcome decision time")
@@ -470,6 +472,37 @@ class OutcomeClosure:
             raise ValueError("outcome times are invalid")
         if type(self.disposition) is not EvaluationDisposition:
             raise ValueError("outcome disposition must be a declared enum")
+        reference = self.decision_reference
+        if reference is not None:
+            if reference.asset_id != self.asset_id:
+                raise ValueError("decision reference asset mismatch")
+            if (
+                reference.received_time > self.decision_time
+                or not reference.healthy
+                or not reference.session_open
+                or not reference.complete
+                or reference.midpoint is None
+            ):
+                raise ValueError("decision reference quote is not valid")
+            for quote in (self.entry, self.exit):
+                if quote is not None and (
+                    quote.source_class is not reference.source_class
+                    or quote.evidence_purpose is not reference.evidence_purpose
+                    or quote.price_basis is not reference.price_basis
+                ):
+                    raise ValueError("decision reference source/evidence mismatch")
+            if self.entry is not None:
+                bridge = self.entry.received_time - reference.received_time
+                if bridge < self.latency:
+                    raise ValueError("entry quote precedes decision reference latency boundary")
+                if self.reference_to_entry_latency is None:
+                    object.__setattr__(self, "reference_to_entry_latency", bridge)
+                elif self.reference_to_entry_latency != bridge:
+                    raise ValueError("decision reference latency bridge does not bind entry")
+            elif self.reference_to_entry_latency is not None:
+                raise ValueError("decision reference latency bridge requires entry evidence")
+        elif self.reference_to_entry_latency is not None:
+            raise ValueError("decision reference latency bridge requires reference evidence")
         if (
             self.disposition is EvaluationDisposition.ACCEPTED
             and (self.entry is None or self.exit is None)
@@ -481,6 +514,12 @@ class OutcomeClosure:
             )
         ):
             raise ValueError("accepted nonzero outcome requires entry and exit evidence")
+        if (
+            self.disposition is EvaluationDisposition.ACCEPTED
+            and self.physical_delta != Decimal("0")
+            and reference is None
+        ):
+            raise ValueError("accepted nonzero outcome requires decision reference evidence")
         if self.disposition is not EvaluationDisposition.ACCEPTED and not self.reason_codes:
             raise ValueError("unavailable or blocked outcome requires a reason")
         if self.entry is not None and self.entry.asset_id != self.asset_id:
@@ -522,6 +561,10 @@ class OutcomeClosure:
             "target_time": self.target_time,
             "latency": self.latency,
             "physical_delta": self.physical_delta,
+            "decision_reference": self.decision_reference.canonical_payload
+            if self.decision_reference
+            else None,
+            "reference_to_entry_latency": self.reference_to_entry_latency,
             "entry": self.entry.canonical_payload if self.entry else None,
             "exit": self.exit.canonical_payload if self.exit else None,
             "disposition": self.disposition,
@@ -915,6 +958,16 @@ class EvaluationReport:
                 raise ValueError(f"{name} keys must match canonical asset order")
             for value in mapping.values():
                 _decimal(value, f"report {name} value")
+        if any(self.physical_notional[asset] <= 0 for asset in asset_ids):
+            raise ValueError("report physical notional must be finite and strictly positive")
+        if any(
+            self.gross_expected_contribution[asset]
+            != self.gross_forecast[asset] * self.physical_notional[asset]
+            for asset in asset_ids
+        ):
+            raise ValueError(
+                "report gross contribution must equal gross forecast return times physical notional"
+            )
         object.__setattr__(self, "gross_forecast", mappings["gross forecast"])
         object.__setattr__(self, "physical_notional", mappings["physical notional"])
         object.__setattr__(self, "expected_cost", mappings["expected cost"])
@@ -1623,6 +1676,7 @@ def evaluate_independently(
                 )
             )
             continue
+        reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
         entry, entry_reasons = _select_quote(
             quotes,
             asset_id=asset,
@@ -1640,7 +1694,10 @@ def evaluate_independently(
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
         )
-        reasons = tuple(dict.fromkeys((*entry_reasons, *exit_reasons)))
+        missing_reference = (
+            (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,) if reference is None else ()
+        )
+        reasons = tuple(dict.fromkeys((*missing_reference, *entry_reasons, *exit_reasons)))
         if entry is None or exit_quote is None:
             outcome = OutcomeClosure(
                 asset,
@@ -1652,6 +1709,7 @@ def evaluate_independently(
                 EvaluationDisposition.UNAVAILABLE,
                 reasons,
                 physical_delta=decision.physical_delta[index],
+                decision_reference=reference,
             )
             unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1677,7 +1735,6 @@ def evaluate_independently(
         ):
             raise ValueError("complete quote lost bid/ask during evaluation")
         quantity = abs(decision.physical_delta[index])
-        reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
         if reference is None or reference.midpoint is None:
             outcome = OutcomeClosure(
                 asset,
@@ -1687,8 +1744,9 @@ def evaluate_independently(
                 entry,
                 exit_quote,
                 EvaluationDisposition.UNAVAILABLE,
-                (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,),
+                reasons,
                 physical_delta=decision.physical_delta[index],
+                decision_reference=reference,
             )
             unavailable_outcome_ids.append(outcome.semantic_identity)
             assets.append(
@@ -1698,7 +1756,7 @@ def evaluate_independently(
                     Decimal("0"),
                     expected[asset],
                     None,
-                    (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,),
+                    reasons,
                     outcome_identity=outcome.semantic_identity,
                 )
             )
@@ -1729,6 +1787,8 @@ def evaluate_independently(
             exit_quote,
             EvaluationDisposition.ACCEPTED,
             physical_delta=decision.physical_delta[index],
+            decision_reference=reference,
+            reference_to_entry_latency=entry.received_time - reference.received_time,
         )
         outcome_ids.append(outcome.semantic_identity)
         assets.append(
@@ -1847,6 +1907,7 @@ def build_outcome_closures(
                 )
             )
             continue
+        reference = _decision_reference_quote(quotes, decision=decision, asset_id=asset)
         entry, entry_reasons = _select_quote(
             quotes,
             asset_id=asset,
@@ -1864,7 +1925,10 @@ def build_outcome_closures(
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
         )
-        reasons = tuple(dict.fromkeys((*entry_reasons, *exit_reasons)))
+        missing_reference = (
+            (EvaluationReasonCode.MISSING_DECISION_REFERENCE.value,) if reference is None else ()
+        )
+        reasons = tuple(dict.fromkeys((*missing_reference, *entry_reasons, *exit_reasons)))
         outcomes.append(
             OutcomeClosure(
                 asset,
@@ -1874,10 +1938,16 @@ def build_outcome_closures(
                 entry,
                 exit_quote,
                 EvaluationDisposition.ACCEPTED
-                if entry is not None and exit_quote is not None
+                if entry is not None and exit_quote is not None and reference is not None
                 else EvaluationDisposition.UNAVAILABLE,
                 reasons,
                 physical_delta=decision.physical_delta[index],
+                decision_reference=reference,
+                reference_to_entry_latency=(
+                    entry.received_time - reference.received_time
+                    if entry is not None and reference is not None
+                    else None
+                ),
             )
         )
     return tuple(outcomes)
