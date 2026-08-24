@@ -497,17 +497,27 @@ class MicroRun:
 
 
 def _report_semantic_payload(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the stable semantic projection of a canonical analysis report."""
+    """Return the report's semantic identity projection, excluding physical provenance."""
 
-    raw_payload = _thaw_value(report)
-    if not isinstance(raw_payload, dict):
-        raise FreezeError("report must be an object")
-    payload = cast(dict[str, Any], raw_payload)
-    payload.pop("code_provenance", None)
-    work_raw = payload.get("work")
-    if isinstance(work_raw, dict):
-        work = cast(dict[str, Any], work_raw)
-        work.pop("measurement", None)
+    semantic_fields = (
+        "contract",
+        "schema_version",
+        "config_semantic_identity",
+        "source_class",
+        "price_basis",
+        "evidence_class",
+        "claims",
+        "target_group_resolution",
+        "economic",
+        "statistical",
+        "graph",
+        "work",
+        "result_classification",
+        "no_post_result_expansion",
+    )
+    payload = {field: _thaw_value(report[field]) for field in semantic_fields}
+    work = cast(dict[str, Any], payload["work"])
+    work.pop("measurement", None)
     return payload
 
 
@@ -519,24 +529,39 @@ def canonical_report_semantic_identity(report: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _render_section(title: str, value: Any) -> str:
-    rendered = json.dumps(_thaw_value(value), sort_keys=True, indent=2)
-    fence = chr(96) * 3
-    return f"## {title}\n\n{fence}json\n{rendered}\n{fence}\n"
+def _require_report_mapping(
+    report: Mapping[str, Any], section: str, required_keys: frozenset[str]
+) -> Mapping[str, Any]:
+    value = report[section]
+    if not isinstance(value, Mapping):
+        raise FreezeError(f"renderer report section {section} must be an object")
+    mapping = cast(Mapping[str, Any], value)
+    missing = required_keys - set(mapping)
+    if missing:
+        raise FreezeError(
+            f"renderer report section {section} is missing keys: {', '.join(sorted(missing))}"
+        )
+    return mapping
 
 
-def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
-    """Render the frozen canonical R3.H report as deterministic final Markdown."""
+def _require_report_sequence(report: Mapping[str, Any], section: str) -> Sequence[Any]:
+    value = report[section]
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise FreezeError(f"renderer report section {section} must be an array")
+    return cast(Sequence[Any], value)
 
-    report = result.report
+
+def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig) -> None:
     required_sections = {
         "contract",
+        "schema_version",
         "config_semantic_identity",
         "source_class",
         "price_basis",
         "evidence_class",
         "claims",
         "code_provenance",
+        "target_group_resolution",
         "retained_parents",
         "selection",
         "loader_contract",
@@ -551,7 +576,7 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
     }
     if not required_sections <= set(report):
         raise FreezeError("report is missing required R3.H renderer sections")
-    if report["contract"] != REPORT_CONTRACT:
+    if report["contract"] != REPORT_CONTRACT or report["schema_version"] != 1:
         raise FreezeError("renderer received an unsupported report contract")
     if report["config_semantic_identity"] != config.semantic_identity:
         raise FreezeError("renderer report/config semantic identity mismatch")
@@ -561,8 +586,82 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
         raise FreezeError("renderer requires MIDPOINT-only report")
     if report["evidence_class"] != "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE":
         raise FreezeError("renderer requires historical exploratory evidence")
-    if not {"economic", "statistical", "graph"} <= set(report):
-        raise FreezeError("report is missing a required research component")
+    if report["claims"] != list(_NON_EXECUTABLE_CLAIMS):
+        raise FreezeError("renderer requires the complete non-executable claim set")
+    if not isinstance(report["no_post_result_expansion"], bool):
+        raise FreezeError("renderer requires a boolean no_post_result_expansion")
+    _require_report_sequence(report, "claims")
+    _require_report_mapping(
+        report,
+        "code_provenance",
+        frozenset({"application_contract", "module_sha256", "python_version"}),
+    )
+    _require_report_mapping(
+        report,
+        "retained_parents",
+        frozenset(
+            {
+                "paths",
+                "identities",
+                "role_bindings",
+                "terminal_authentication",
+                "authentication_performed",
+                "outcome_decode_performed",
+            }
+        ),
+    )
+    _require_report_mapping(
+        report, "target_group_resolution", frozenset({"target_ids", "group_ids"})
+    )
+    _require_report_mapping(report, "selection", frozenset({"selected_rows"}))
+    _require_report_mapping(report, "loader_contract", frozenset({"manifest_contract"}))
+    _require_report_mapping(report, "scale_projection", frozenset({"retained_row_count"}))
+    _require_report_mapping(
+        report, "observation_contract", frozenset({"event_aware", "resource_limits"})
+    )
+    _require_report_mapping(
+        report,
+        "economic",
+        frozenset({"asset", "horizon", "period", "all_in_cost_sensitivity", "configurations"}),
+    )
+    statistical = _require_report_mapping(
+        report,
+        "statistical",
+        frozenset({"oof", "candidates", "simple_controls", "post_result_selection"}),
+    )
+    if not isinstance(statistical["candidates"], Sequence) or isinstance(
+        statistical["candidates"], str
+    ):
+        raise FreezeError("renderer statistical candidates must be an array")
+    graph = _require_report_mapping(report, "graph", frozenset({"controls"}))
+    if not isinstance(graph["controls"], Sequence) or isinstance(graph["controls"], str):
+        raise FreezeError("renderer graph controls must be an array")
+    _require_report_mapping(
+        report,
+        "work",
+        frozenset({"rows", "candidate_count", "fit_count", "fit_executions", "within_hard_limits"}),
+    )
+    classification = _require_report_mapping(
+        report, "result_classification", frozenset({"negative", "failed", "inconclusive"})
+    )
+    for status in ("negative", "failed", "inconclusive"):
+        if isinstance(classification[status], str) or not isinstance(
+            classification[status], Sequence
+        ):
+            raise FreezeError(f"renderer classification {status} must be an array")
+
+
+def _render_section(title: str, value: Any) -> str:
+    rendered = json.dumps(_thaw_value(value), sort_keys=True, indent=2)
+    fence = chr(96) * 3
+    return f"## {title}\n\n{fence}json\n{rendered}\n{fence}\n"
+
+
+def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
+    """Render the frozen canonical R3.H report as deterministic final Markdown."""
+
+    report = result.report
+    _validate_renderable_report(report, config)
 
     semantic_report = _report_semantic_payload(report)
     semantic_identity = canonical_report_semantic_identity(report)
@@ -593,7 +692,7 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
         _render_section("Machine-readable report identity", metadata),
         _render_section(
             "Terminal authority and consumed child identities",
-            semantic_report["retained_parents"],
+            report["retained_parents"],
         ),
         _render_section(
             "Frozen configuration and code identity",
@@ -606,10 +705,10 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
         _render_section(
             "Loader, selection, resources, and work counts",
             {
-                "selection": semantic_report["selection"],
-                "loader_contract": semantic_report["loader_contract"],
-                "scale_projection": semantic_report["scale_projection"],
-                "observation_contract": semantic_report["observation_contract"],
+                "selection": report["selection"],
+                "loader_contract": report["loader_contract"],
+                "scale_projection": report["scale_projection"],
+                "observation_contract": report["observation_contract"],
                 "work": semantic_report["work"],
             },
         ),

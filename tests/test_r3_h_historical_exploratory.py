@@ -657,6 +657,23 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
     assert canonical_report_semantic_identity(result.report) == (
         canonical_report_semantic_identity(second_result.report)
     )
+
+    provenance_changed = dict(result.report)
+    changed_parents = dict(result.report["retained_parents"])
+    changed_paths = dict(changed_parents["paths"])
+    changed_paths["terminal_report"] = "/relocated/report.md"
+    changed_parents["paths"] = changed_paths
+    provenance_changed["retained_parents"] = changed_parents
+    assert canonical_report_semantic_identity(result.report) == canonical_report_semantic_identity(
+        provenance_changed
+    )
+    semantic_changed = dict(result.report)
+    changed_economic = dict(result.report["economic"])
+    changed_economic["trace_id"] = "changed"
+    semantic_changed["economic"] = changed_economic
+    assert canonical_report_semantic_identity(result.report) != canonical_report_semantic_identity(
+        semantic_changed
+    )
     assert canonical_report_semantic_identity(result.report) in rendered
     for heading in (
         "Machine-readable report identity",
@@ -691,6 +708,16 @@ def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
     ):
         assert label in rendered
     assert json.loads(result.canonical_json())["contract"] == result.report["contract"]
+
+    for section, malformed_value in (
+        ("economic", None),
+        ("claims", "not-a-list"),
+        ("work", []),
+    ):
+        malformed = dict(result.report)
+        malformed[section] = malformed_value
+        with pytest.raises(FreezeError, match="renderer"):
+            render_markdown(MicroRun(malformed, result.work_count), config)
 
     with pytest.raises(FreezeError, match="missing required"):
         render_markdown(MicroRun({}, {}), config)
