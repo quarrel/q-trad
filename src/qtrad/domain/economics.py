@@ -792,8 +792,6 @@ class ExpectedCostState:
             raise ValueError("expected cost version and provenance are required")
         _require_nonnegative(self.internal_cross_quantity, "internal cross quantity")
         delta = abs(self.target_quantity - self.current_quantity)
-        if self.internal_cross_quantity > delta:
-            raise ValueError("internal cross quantity cannot exceed physical delta")
         if tuple(component.component for component in self.components) != _COMPONENT_ORDER:
             raise ValueError("expected cost components must use canonical component order")
         for component in self.components:

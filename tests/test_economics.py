@@ -1,7 +1,10 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib.metadata import version as package_version
 
+import cvxpy as cp
+import numpy as np
 import pytest
 
 from qtrad.domain.economics import (
@@ -333,3 +336,76 @@ def test_component_cost_requires_reconciling_conversion_evidence() -> None:
             version="component-v1",
             provenance="fixture",
         )
+
+
+def test_internal_crosses_can_exceed_final_physical_delta() -> None:
+    # Sleeve intents +10 and -9 net to a physical target delta of +1.
+    state = replace(
+        _cost_state(target="1"),
+        internal_cross_quantity=Decimal("19"),
+    )
+    assert state.physical_delta == Decimal("1")
+    assert state.internal_cross_quantity == Decimal("19")
+    assert state.expected_total_reporting == Decimal("6")
+
+
+def test_solver_capability_exact_convex_form() -> None:
+    assert package_version("cvxpy") == "1.7.3"
+    assert package_version("clarabel") == "0.11.1"
+    physical_target = cp.Variable(3, name="physical_target")
+    previous_target = cp.Constant([0.10, -0.05, 0.02])
+    expected_return = cp.Constant([0.03, 0.02, -0.01])
+    covariance = cp.Constant(
+        np.array(
+            [
+                [0.08, 0.01, 0.00],
+                [0.01, 0.06, 0.005],
+                [0.00, 0.005, 0.05],
+            ]
+        )
+    )
+    risk = cp.quad_form(physical_target, covariance)
+    turnover = cp.norm1(physical_target - previous_target)
+    constraints = [
+        physical_target >= -0.4,
+        physical_target <= 0.4,
+        physical_target[0] + physical_target[1] <= 0.45,
+        physical_target[0] + physical_target[1] >= -0.45,
+        physical_target[0] + physical_target[2] <= 0.45,
+        physical_target[0] + physical_target[2] >= -0.45,
+        cp.norm1(physical_target) <= 0.9,
+        cp.sum(physical_target) <= 0.3,
+        cp.sum(physical_target) >= -0.3,
+        risk <= 0.04,
+    ]
+    objective = cp.Minimize(
+        -expected_return @ physical_target + 0.01 * turnover + 0.10 * risk
+    )
+    problem = cp.Problem(objective, constraints)
+    objective_value = problem.solve(
+        solver="CLARABEL",
+        warm_start=False,
+        max_iter=1000,
+        tol_gap_abs=1e-8,
+        tol_feas=1e-8,
+        tol_gap_rel=1e-8,
+    )
+    assert problem.status == cp.OPTIMAL
+    assert problem.solver_stats.solver_name == "CLARABEL"
+    assert objective_value is not None
+    assert physical_target.value is not None
+    values = tuple(
+        float(value) for value in np.asarray(physical_target.value, dtype=np.float64).tolist()
+    )
+    risk_value = float(np.asarray(risk.value, dtype=np.float64).item())
+    residual = max(max(0.0, -0.4 - value) for value in values)
+    residual = max(
+        residual,
+        *(max(0.0, value - 0.4) for value in values),
+        max(0.0, abs(values[0] + values[1]) - 0.45),
+        max(0.0, abs(values[0] + values[2]) - 0.45),
+        max(0.0, sum(abs(value) for value in values) - 0.9),
+        max(0.0, abs(sum(values)) - 0.3),
+        max(0.0, risk_value - 0.04),
+    )
+    assert residual <= 1e-7

@@ -73,14 +73,17 @@ R3.A freezes `DEFAULT_SOLVER_POLICY` for the first 15-minute convex slice:
 | Tolerances | absolute/relative `1e-8`; max 1000 iterations |
 | Variable order | canonical tuple beginning with `physical_target` |
 
-The decision was reproduced on Python 3.13 with `uvx --from cvxpy==1.7.3` using
-CLARABEL 0.11.1 and `warm_start=False`.  The deterministic form had three
-`physical_target` variables, quadratic covariance risk, convex L1 turnover cost,
-hard per-asset, group, currency, gross, net and quadratic risk-cap constraints;
-it returned `status=optimal`, objective `0.0126693550`, 8 iterations and maximum
-constraint residual `7.392e-15`.  CVXPY and CLARABEL reported Apache-2.0 licences.
-The dependency is intentionally not added to `pyproject.toml` in R3.A; R3.C owns
-the first runtime dependency change.
+The exact capability is a focused deterministic regression,
+`tests/test_economics.py::test_solver_capability_exact_convex_form`, run under Python 3.13
+with the direct project pins `cvxpy==1.7.3` and `clarabel==0.11.1`.  The test constructs
+three `physical_target` variables, quadratic covariance risk, convex L1 turnover cost,
+and hard per-asset, group, currency, gross, net and quadratic risk-cap constraints.  It
+invokes CLARABEL with `warm_start=False`, absolute/relative tolerances `1e-8` and at
+most 1000 iterations, accepts exactly `optimal`, and independently recomputes all
+constraint residuals.  The reproducible run returned `status=optimal`, objective
+`-0.0073599998`, 7 iterations, maximum residual `0.000e+00`, and confirmed CVXPY 1.7.3
+/ CLARABEL 0.11.1.  CVXPY and CLARABEL report Apache-2.0 licences.  The direct pins
+are retained so this capability test and its solver evidence cannot silently drift.
 
 ## Identity classification
 
