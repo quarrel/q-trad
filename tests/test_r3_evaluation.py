@@ -11,9 +11,13 @@ from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
     EvaluationDisposition,
     OutcomeClosure,
+    VerificationReceipt,
     build_outcome_closures,
     evaluate_independently,
+    identity,
+    reconcile_positions,
 )
+from qtrad.domain.r3_rounding import cost_states_identity
 
 
 def test_fixture_persists_authenticated_report_create_only(tmp_path):
@@ -189,3 +193,88 @@ def test_outcome_rejects_non_mid_quote():
             decision_reference=reference,
             reference_to_entry_latency=entry.received_time - reference.received_time,
         )
+
+
+def test_verification_receipt_rejects_forged_identity():
+    receipt = VerificationReceipt(
+        artefact_contract="fixture-artifact-v1",
+        semantic_identity=identity({"semantic": "fixture"}),
+        closure_identity=identity({"closure": "fixture"}),
+        parent_verification_identity=identity({"parent": "fixture"}),
+        verifier_contract="fixture-verifier-v1",
+        checks=("canonical-bytes",),
+    )
+    assert receipt.receipt_identity == identity(receipt.canonical_payload)
+    with pytest.raises(ValueError, match="canonical payload"):
+        replace(receipt, receipt_identity="0" * 64)
+
+
+def test_nonzero_r3d_repair_reconciles_and_reports_allocations():
+    decision, quotes = build_fixture_inputs()
+    target = decision.rounded_target
+    assert target is not None
+    target_quantity = Decimal("0.6")
+    model = decision.cost_models["ASSET_A"]
+    expected_state = model.evaluate(
+        current_quantity=decision.current_position[0],
+        target_quantity=target_quantity,
+        decision_time=decision.decision_time,
+        internal_cross_quantity=Decimal("0.5"),
+    )
+    expected_costs = {"ASSET_A": expected_state}
+    financing = next(
+        component.reporting_amount
+        for component in expected_state.components
+        if component.component.value == "FINANCING"
+    )
+    if financing is None:
+        raise AssertionError("fixture financing component has no total")
+    total_cost = expected_state.require_total_reporting()
+    if total_cost is None:
+        raise AssertionError("fixture cost state has no total")
+    long_target = replace(
+        target.attributions[0],
+        external_delta_share=Decimal("0.6"),
+        repair_delta=Decimal("0.1"),
+    )
+    short_target = replace(
+        target.attributions[1], external_delta_share=Decimal("0"), repair_delta=Decimal("0")
+    )
+    repaired_target = replace(
+        target,
+        target_position=(target_quantity,),
+        physical_delta=(target_quantity,),
+        expected_costs=expected_costs,
+        expected_cost_reporting=total_cost - financing,
+        expected_financing_reporting=financing,
+        attributions=(long_target, short_target),
+        cost_state_identity=cost_states_identity(expected_costs),
+    )
+    repaired_attributions = (
+        replace(
+            decision.attributions[0],
+            external_delta_share=Decimal("0.6"),
+            repair_delta=Decimal("0.1"),
+        ),
+        replace(
+            decision.attributions[1],
+            external_delta_share=Decimal("0"),
+            repair_delta=Decimal("0"),
+        ),
+    )
+    repaired_decision = replace(
+        decision,
+        target_position=(target_quantity,),
+        physical_delta=(target_quantity,),
+        expected_costs=expected_costs,
+        attributions=repaired_attributions,
+        rounded_target=repaired_target,
+    )
+
+    assert reconcile_positions(repaired_decision) == {"ASSET_A": Decimal("0")}
+    report = evaluate_independently(repaired_decision, quotes, latency=timedelta(seconds=1))
+    allocations = {item.sleeve_id: item for item in report.sleeve_allocations}
+    assert allocations["long"].physical_delta == Decimal("0.6")
+    assert allocations["long"].repair_delta == Decimal("0.1")
+    assert allocations["short"].physical_delta == Decimal("0")
+    assert allocations["short"].repair_delta == Decimal("0")

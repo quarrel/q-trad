@@ -1194,10 +1194,13 @@ class VerificationReceipt:
             _digest(value, name)
         if not self.artefact_contract or not self.verifier_contract or not self.checks:
             raise ValueError("receipt contract and check set are required")
+        expected_identity = identity(self.canonical_payload)
         if not self.receipt_identity:
-            object.__setattr__(self, "receipt_identity", identity(self.canonical_payload))
+            object.__setattr__(self, "receipt_identity", expected_identity)
         else:
             _digest(self.receipt_identity, "receipt identity")
+            if self.receipt_identity != expected_identity:
+                raise ValueError("receipt identity does not bind canonical payload")
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -1453,16 +1456,16 @@ def reconcile_positions(decision: DecisionClosure) -> dict[str, Decimal]:
             if decision.rounded_target is not None
             else crosses
         )
-        # Every internal match is represented once per sleeve and therefore cancels pairwise.
-        if crosses != expected_crosses or requested != expected_delta + sum(
-            item.repair_delta for item in attributions
-        ):
+        # Repair deltas describe final external movement minus the original movement.
+        # Reconcile requests against the pre-repair external movement, then require the
+        # final external movement to equal the target physical delta.
+        repair_delta = sum((item.repair_delta for item in attributions), Decimal("0"))
+        original_external = external - repair_delta
+        if crosses != expected_crosses or requested != original_external:
             raise ValueError(f"position attribution does not reconcile for {asset}")
-        if external != expected_delta + sum(item.repair_delta for item in attributions):
+        if external != expected_delta:
             raise ValueError(f"external movement does not reconcile for {asset}")
-        residuals[asset] = expected_delta - (
-            external - sum(item.repair_delta for item in attributions)
-        )
+        residuals[asset] = expected_delta - external
     if any(value != 0 for value in residuals.values()):
         raise ValueError("position reconciliation residual is non-zero")
     return residuals
