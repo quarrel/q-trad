@@ -817,11 +817,16 @@ def _strict_metric(
         raise FreezeError(f"renderer {label}.coverage is outside [0, 1]")
     _strict_integer(metric["support"], f"{label}.support", minimum=0)
     trace = _strict_sequence(metric["prediction_trace"], f"{label}.prediction_trace")
-    for index, item in enumerate(trace):
-        _strict_number(item, f"{label}.prediction_trace[{index}]", nullable=True)
     mask = _strict_sequence(metric["prediction_mask"], f"{label}.prediction_mask")
     if len(mask) != len(trace) or any(not isinstance(item, bool) for item in mask):
         raise FreezeError(f"renderer {label}.prediction_mask is not aligned booleans")
+    for index, (item, selected) in enumerate(zip(trace, mask, strict=True)):
+        if selected:
+            _strict_number(item, f"{label}.prediction_trace[{index}]")
+        elif item is not None:
+            raise FreezeError(
+                f"renderer {label}.prediction_trace[{index}] must be null when mask is false"
+            )
     _strict_integer(metric["fit_executions"], f"{label}.fit_executions", minimum=0)
     if "training_rows" in metric:
         _strict_integer(metric["training_rows"], f"{label}.training_rows", minimum=0)
@@ -955,8 +960,29 @@ def _reconcile_economic_view(
         raise FreezeError(f"{label}.position_trace must not be empty")
     gross_total = Decimal("0")
     turnover = Decimal("0")
-    for index, item in enumerate(trace):
-        entry = _strict_mapping(item, f"{label}.position_trace[{index}]")
+    entries = [
+        _strict_mapping(item, f"{label}.position_trace[{index}]")
+        for index, item in enumerate(trace)
+    ]
+    target_ids = [
+        _strict_text(entry["target_id"], f"{label}.position_trace[{index}].target_id")
+        for index, entry in enumerate(entries)
+    ]
+    decision_times = [
+        _strict_text(entry["decision_time"], f"{label}.position_trace[{index}].decision_time")
+        for index, entry in enumerate(entries)
+    ]
+    full_trace = len(set(target_ids)) < len(target_ids)
+    ordered_indices = sorted(
+        range(len(entries)), key=lambda index: (decision_times[index], target_ids[index])
+    )
+    prior_positions: dict[str, Decimal] = {}
+    for index in ordered_indices:
+        entry = entries[index]
+        target_id = target_ids[index]
+        position = _report_decimal(
+            entry["target_position"], f"{label}.position_trace[{index}].target_position"
+        )
         realised = _report_decimal(
             entry["realised_gross"], f"{label}.position_trace[{index}].realised_gross"
         )
@@ -964,7 +990,14 @@ def _reconcile_economic_view(
             entry["target_position_change"],
             f"{label}.position_trace[{index}].target_position_change",
         )
-        assert realised is not None and change is not None
+        assert position is not None and realised is not None and change is not None
+        if full_trace or target_id in prior_positions:
+            expected_change = _qdecimal(position - prior_positions.get(target_id, Decimal("0")))
+            if change != expected_change:
+                raise FreezeError(
+                    f"renderer {label}.position_trace[{index}] change does not reconcile"
+                )
+        prior_positions[target_id] = position
         gross_total += realised
         turnover += abs(change)
     count = Decimal(len(trace))
@@ -1019,12 +1052,8 @@ def _reconcile_economic_view(
             nullable=True,
         )
         assert cost is not None
-        if cost < 0 or (
-            net_mean is not None
-            and not _decimal_matches(
-                net_mean, _qdecimal(gross_total / count - cost * turnover / count)
-            )
-        ):
+        expected_net_mean = _qdecimal(gross_total / count - cost * turnover / count)
+        if cost < 0 or net_mean is None or not _decimal_matches(net_mean, expected_net_mean):
             raise FreezeError(
                 f"renderer {label}.all_in_cost_sensitivity[{index}] does not reconcile"
             )
@@ -3484,6 +3513,28 @@ def _economic_views(
         rendered_changes = {
             index: _qdecimal(Decimal(str(round(changes[index], 12)))) for index in indices
         }
+        trace_keys = [
+            (rows[index].target_id, rows[index].asset, rows[index].horizon_minutes)
+            for index in indices
+        ]
+        if len(set(trace_keys)) < len(trace_keys):
+            ordered_indices = sorted(
+                indices,
+                key=lambda index: (
+                    rows[index].decision_time,
+                    rows[index].period,
+                    rows[index].target_id,
+                    rows[index].asset,
+                    rows[index].horizon_minutes,
+                ),
+            )
+            prior_positions: dict[tuple[str, str, int], Decimal] = {}
+            rendered_changes = {}
+            for index in ordered_indices:
+                key = (rows[index].target_id, rows[index].asset, rows[index].horizon_minutes)
+                previous = prior_positions.get(key, Decimal("0"))
+                rendered_changes[index] = _qdecimal(rendered_positions[index] - previous)
+                prior_positions[key] = rendered_positions[index]
         rendered_gross = {
             index: _qdecimal(Decimal(str(round(gross_values[index], 12)))) for index in indices
         }

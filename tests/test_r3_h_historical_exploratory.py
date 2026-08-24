@@ -851,6 +851,28 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
             report["graph"]["tiny_learned_graph"]["walk_forward_fit_executions"] + 1,
         ),
         lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", 61.0),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("net_mean", None),
+        lambda report: report["economic"]["configurations"]["linear_ridge"]["position_trace"][
+            0
+        ].__setitem__(
+            "target_position_change",
+            report["economic"]["configurations"]["linear_ridge"]["position_trace"][0][
+                "target_position_change"
+            ]
+            + 1.0,
+        ),
+        lambda report: report["statistical"]["candidates"][0]["prediction_trace"].__setitem__(
+            next(
+                index
+                for index, selected in enumerate(
+                    report["statistical"]["candidates"][0]["prediction_mask"]
+                )
+                if selected
+            ),
+            None,
+        ),
     ]
     for mutate in mutations:
         malformed = json.loads(result.canonical_json())
