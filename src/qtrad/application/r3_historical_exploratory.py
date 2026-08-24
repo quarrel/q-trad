@@ -1211,6 +1211,7 @@ def analyse_fixture(
     if fits > limits["max_fits"]:
         raise FreezeError("fixture analysis exceeded frozen fit limits")
     graph_masks = {control_id: all_mask for control_id in _GRAPH_CONTROL_IDS}
+    graph_masks["pooled_non_graph"] = evaluation_mask
     graph_masks["tiny_learned_graph"] = evaluation_mask
     graph_metrics = {
         control_id: _metrics(

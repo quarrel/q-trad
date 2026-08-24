@@ -323,6 +323,7 @@ def test_causal_model_diagnostics_mask_prefit_rows() -> None:
     report = analyse_fixture(synthetic_fixture(), FreezeConfig.from_path(CONFIG)).report
     candidates = {item["id"]: item for item in report["statistical"]["candidates"]}
     controls = {item["id"]: item for item in report["statistical"]["simple_controls"]}
+    graph_controls = {item["id"]: item for item in report["graph"]["controls"]}
     assert set(candidates) == {"linear_ridge", "linear_zero_return", "nonlinear_huber"}
     assert {
         "status",
@@ -344,6 +345,13 @@ def test_causal_model_diagnostics_mask_prefit_rows() -> None:
     assert controls["pooled_local_ridge"]["support"] == 12
     assert controls["pooled_local_ridge"]["coverage"] == pytest.approx(2 / 3)
     assert controls["pooled_local_ridge"]["prediction_trace"][:6] == [None] * 6
+    pooled_graph = graph_controls["pooled_non_graph"]
+    assert pooled_graph["support"] == 12
+    assert pooled_graph["coverage"] == pytest.approx(2 / 3)
+    assert pooled_graph["prediction_trace"][:6] == [None] * 6
+    assert pooled_graph["prediction_mask"] == [False] * 6 + [True] * 12
+    assert pooled_graph["mse"] == controls["pooled_local_ridge"]["mse"]
+    assert pooled_graph["rank_correlation"] == controls["pooled_local_ridge"]["rank_correlation"]
 
 
 def test_future_maturity_mutation_does_not_rewrite_earlier_predictions() -> None:
