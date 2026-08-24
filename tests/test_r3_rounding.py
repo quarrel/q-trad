@@ -6,7 +6,6 @@ from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 
 import pytest
-from test_r3_portfolio import _key, _netting_for, _target_inputs
 
 from qtrad.application.r3_portfolio import solve_continuous_target
 from qtrad.application.r3_rounding import _repaired_attributions, round_and_repair_target
@@ -15,6 +14,7 @@ from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.portfolio import AssetNetting, NettingResult, SleeveAttribution
 from qtrad.domain.r3_rounding import RoundingDisposition, RoundingPolicy, RoundingReasonCode
 from qtrad.domain.risk import RiskCaps
+from tests.test_r3_portfolio import _key, _netting_for, _target_inputs
 
 
 def _target(inputs, values: tuple[float, ...]):
