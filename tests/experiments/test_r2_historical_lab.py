@@ -12,6 +12,7 @@ from experiments.r2_historical_lab.features import add_pooled_features
 from experiments.r2_historical_lab.harness import (
     MANIFEST_CONTRACT,
     append_attempt,
+    authenticate_manifest,
     evaluate_against_zero,
     freeze_finalists,
     load_parts,
@@ -20,10 +21,7 @@ from experiments.r2_historical_lab.lab import _features, _fold_rows, _targets, _
 
 
 def _source() -> pl.DataFrame:
-    ends = [
-        datetime(2026, 2, 2, 0, minute, tzinfo=UTC)
-        for minute in (1, 2, 3, 4, 5, 6, 8)
-    ]
+    ends = [datetime(2026, 2, 2, 0, minute, tzinfo=UTC) for minute in (1, 2, 3, 4, 5, 6, 8)]
     return pl.DataFrame(
         {
             "instrument_id": ["fx:eur-usd"] * len(ends),
@@ -69,9 +67,9 @@ def test_targets_require_exact_endpoints_and_preserve_opportunities() -> None:
     assert valid["target_valid"] is True
     assert len(valid["target_id"]) == 64
     assert valid["target_revision_policy"] == "PROVISIONAL_CONSERVATIVE"
-    missing = targets.filter(
-        pl.col("decision_time") == start + timedelta(minutes=1)
-    ).row(0, named=True)
+    missing = targets.filter(pl.col("decision_time") == start + timedelta(minutes=1)).row(
+        0, named=True
+    )
     assert missing["target_valid"] is False
     assert targets.height == 7
 
@@ -110,17 +108,12 @@ def test_fold_rows_use_retained_fold_boundaries() -> None:
         "TERMINAL_FORMER_HOLDOUT",
     ]
     assert rows.height == 16
-    maturity = rows.filter(pl.col("horizon_minutes") == 60)[
-        "target_maturity_seconds"
-    ].unique()
+    maturity = rows.filter(pl.col("horizon_minutes") == 60)["target_maturity_seconds"].unique()
     assert maturity.item() == 3900
 
 
 def test_features_use_production_time_population_and_activity_semantics() -> None:
-    ends = [
-        datetime(2026, 2, 2, 0, minute, tzinfo=UTC)
-        for minute in range(1, 7)
-    ]
+    ends = [datetime(2026, 2, 2, 0, minute, tzinfo=UTC) for minute in range(1, 7)]
     closes = [1.0, 2.0, 2.0, 4.0, 8.0, 8.0]
     source = pl.DataFrame(
         {
@@ -136,9 +129,9 @@ def test_features_use_production_time_population_and_activity_semantics() -> Non
         ((datetime(2026, 2, 2, 0, 0, tzinfo=UTC), datetime(2026, 2, 2, 0, 20, tzinfo=UTC)),),
         "fx:eur-usd",
     )
-    row = features.filter(
-        pl.col("decision_time") == datetime(2026, 2, 2, 0, 11, tzinfo=UTC)
-    ).row(0, named=True)
+    row = features.filter(pl.col("decision_time") == datetime(2026, 2, 2, 0, 11, tzinfo=UTC)).row(
+        0, named=True
+    )
     returns = [log(2.0), 0.0, log(2.0), log(2.0), 0.0]
     mean = sum(returns) / len(returns)
     population_std = (sum((value - mean) ** 2 for value in returns) / len(returns)) ** 0.5
@@ -191,7 +184,6 @@ def test_pooled_features_exclude_self_and_use_market_group() -> None:
     assert row["cross_market_available_count"] == 2.0
 
 
-
 def test_common_evaluator_compares_directly_with_zero() -> None:
     times = [
         datetime(2026, 6, 1, tzinfo=UTC),
@@ -200,9 +192,7 @@ def test_common_evaluator_compares_directly_with_zero() -> None:
     instruments = ["fx:eur-usd", "fx:aud-usd"]
     targets = pl.DataFrame(
         {
-            "instrument_id": [
-                instruments[0], instruments[0], instruments[1], instruments[1]
-            ],
+            "instrument_id": [instruments[0], instruments[0], instruments[1], instruments[1]],
             "decision_time": times * 2,
             "horizon_minutes": [15] * 4,
             "target_return": [1.0, 2.0, -1.0, -2.0],
@@ -210,9 +200,9 @@ def test_common_evaluator_compares_directly_with_zero() -> None:
             "block": ["DEV_1", "DEV_2"] * 2,
         }
     )
-    predictions = targets.select(
-        "instrument_id", "decision_time", "horizon_minutes"
-    ).with_columns(pl.Series("expected_return", [1.0, 1.0, -1.0, -1.0]))
+    predictions = targets.select("instrument_id", "decision_time", "horizon_minutes").with_columns(
+        pl.Series("expected_return", [1.0, 1.0, -1.0, -1.0])
+    )
 
     result = evaluate_against_zero(predictions, targets, model_name="TEST_MODEL")
 
@@ -230,19 +220,25 @@ def test_common_evaluator_compares_directly_with_zero() -> None:
     assert spearman > 0.8
     assert result["best_instrument_contribution"] == 0.5
     assert result["best_period_contribution"] == 0.75
+    assert result["evaluated_blocks"] == ["DEV_1", "DEV_2"]
+    assert result["terminal_block_accessed"] is False
+
 
 def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) -> None:
     dev_time = datetime(2026, 6, 15, tzinfo=UTC)
     terminal_time = datetime(2026, 7, 1, tzinfo=UTC)
     part = tmp_path / "targets.parquet"
-    pl.DataFrame(
+    target_rows = pl.DataFrame(
         {
             "instrument_id": ["fx:eur-usd", "fx:eur-usd"],
             "decision_time": [dev_time, terminal_time],
             "horizon_minutes": [15, 15],
+            "target_return": [0.1, 0.2],
+            "target_valid": [True, True],
             "block": ["DEV_1", "TERMINAL_FORMER_HOLDOUT"],
         }
-    ).write_parquet(part)
+    )
+    target_rows.write_parquet(part)
     feature_part = tmp_path / "features.parquet"
     pl.DataFrame(
         {
@@ -273,6 +269,19 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
                 "preprocessing_abs": 1e-12,
                 "coefficient_abs": 1e-8,
                 "intercept_abs": 1e-9,
+            },
+            "retained_oof_manifest": {
+                "path": (
+                    "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/"
+                    "oof/manifest.json"
+                ),
+                "sha256": ("ff0bd89fb97448beda6e70565191bb512458c4d3124ec0dc17476b2d43859819"),
+                "contract": "qtrad-r2-oof-bundle-v2",
+                "schema_version": 2,
+                "source_class": SOURCE_CLASS,
+                "evidence_class": "CONFIRMATORY",
+                "oof_id": ("c31dddc528936d1a415c4a5af009e59a43eefe27909b7a16267712f9671dfa65"),
+                "closure_id": ("d911eea62786f7e0d99719b78c93da80cd6574118e706812107dd949d2fcd6a6"),
             },
         },
         "instruments": ["fx:eur-usd"],
@@ -325,6 +334,20 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
         encoding="utf-8",
     )
     manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    authenticate_manifest(manifest_path, manifest_sha)
+
+    unbound_manifest = json.loads(json.dumps(manifest))
+    unbound_manifest["baseline_reconstruction"]["retained_oof_manifest"]["sha256"] = "0" * 64
+    unbound_path = tmp_path / "unbound-lab-manifest.json"
+    unbound_path.write_text(
+        json.dumps(unbound_manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exact retained OOF parent binding"):
+        authenticate_manifest(
+            unbound_path,
+            hashlib.sha256(unbound_path.read_bytes()).hexdigest(),
+        )
 
     dev_features = load_parts(
         manifest_path,
@@ -332,6 +355,20 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
         kind="feature",
     ).collect()
     assert dev_features["decision_time"].to_list() == [dev_time]
+    with pytest.raises(ValueError, match="selected lab part set is empty"):
+        load_parts(
+            manifest_path,
+            manifest_sha,
+            kind="feature",
+            instruments=(),
+        )
+    with pytest.raises(ValueError, match="selected lab part set is empty"):
+        load_parts(
+            manifest_path,
+            manifest_sha,
+            kind="target",
+            horizons=(),
+        )
 
     with pytest.raises(ValueError, match="authenticated finalist freeze"):
         load_parts(
@@ -351,11 +388,20 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
 
     register = tmp_path / "attempts.jsonl"
     configuration = {"alpha": 1.0}
+    dev_targets = target_rows.filter(pl.col("block") == "DEV_1")
+    dev_predictions = dev_targets.select(
+        "instrument_id", "decision_time", "horizon_minutes"
+    ).with_columns(pl.lit(0.0).alias("expected_return"))
+    dev_result = evaluate_against_zero(
+        dev_predictions,
+        dev_targets,
+        model_name="TEST_MODEL",
+    )
     configuration_id = append_attempt(
         register,
         workstream="LAB-TEST",
         configuration=configuration,
-        result={"skill": -0.1},
+        result=dev_result,
         manifest_sha256=manifest_sha,
     )
     freeze_path = tmp_path / "finalists.json"
@@ -378,3 +424,46 @@ def test_terminal_loader_requires_authenticated_finalist_freeze(tmp_path: Path) 
         configuration_id=configuration_id,
     ).collect()
     assert loaded.height == 1
+
+    terminal_targets = target_rows.filter(pl.col("block") == "TERMINAL_FORMER_HOLDOUT")
+    terminal_predictions = terminal_targets.select(
+        "instrument_id", "decision_time", "horizon_minutes"
+    ).with_columns(pl.lit(0.0).alias("expected_return"))
+    terminal_result = evaluate_against_zero(
+        terminal_predictions,
+        terminal_targets,
+        model_name="TEST_MODEL",
+    )
+    assert terminal_result["terminal_block_accessed"] is True
+    append_attempt(
+        register,
+        workstream="LAB-TEST",
+        configuration=configuration,
+        result=terminal_result,
+        manifest_sha256=manifest_sha,
+    )
+    with pytest.raises(ValueError, match="successful development-only"):
+        freeze_finalists(
+            register,
+            tmp_path / "terminal-tainted-finalists.json",
+            workstream="LAB-TEST",
+            finalist_configuration_ids=[configuration_id],
+            manifest_sha256=manifest_sha,
+        )
+
+    failed_configuration = {"alpha": 2.0}
+    failed_configuration_id = append_attempt(
+        register,
+        workstream="LAB-TEST",
+        configuration=failed_configuration,
+        result={"status": "FAILED", "failure": "fit did not complete"},
+        manifest_sha256=manifest_sha,
+    )
+    with pytest.raises(ValueError, match="successful development-only"):
+        freeze_finalists(
+            register,
+            tmp_path / "failed-finalists.json",
+            workstream="LAB-TEST",
+            finalist_configuration_ids=[failed_configuration_id],
+            manifest_sha256=manifest_sha,
+        )

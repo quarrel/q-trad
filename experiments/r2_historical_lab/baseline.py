@@ -22,6 +22,8 @@ EXPECTED_BASELINE = {
     "LOCAL_RIDGE": 0.0000028481068080631273,
 }
 EXPECTED_REPORT_SHA256 = "195015509cc9dd43b94815ad659dacd04470c849a63c5e51ab4a535c4dbb1a02"
+EXPECTED_OOF_MANIFEST_SHA256 = "ff0bd89fb97448beda6e70565191bb512458c4d3124ec0dc17476b2d43859819"
+EXPECTED_OOF_MANIFEST_CONTRACT = "qtrad-r2-oof-bundle-v2"
 EXPECTED_HOLDOUT_START = datetime(2026, 6, 26, 14, 6, tzinfo=UTC)
 METRIC_ABS_TOLERANCE = 1e-14
 PREPROCESSING_ABS_TOLERANCE = 1e-12
@@ -85,21 +87,33 @@ def _load_baseline_rows(root: Path) -> pl.DataFrame:
         .join(own, on=["instrument_id", "decision_time"], how="left")
         .with_columns(
             (
-                pl.col("_total_available").fill_null(0.0)
-                - pl.col("_own_available").fill_null(0.0)
+                pl.col("_total_available").fill_null(0.0) - pl.col("_own_available").fill_null(0.0)
             ).alias("cross_market_available_count")
         )
         .drop("_total_available", "_own_available")
     )
-    return (
-        targets.join(features, on=["instrument_id", "decision_time"], how="inner")
-        .sort("decision_time", "instrument_id")
+    return targets.join(features, on=["instrument_id", "decision_time"], how="inner").sort(
+        "decision_time", "instrument_id"
     )
 
 
-def _fit_references(terminal_root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _fit_references(
+    terminal_root: Path,
+) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, object]]:
     oof_root = terminal_root / "oof"
-    manifest = _read_json(oof_root / "manifest.json")
+    manifest_path = oof_root / "manifest.json"
+    manifest_sha256 = _sha256(manifest_path)
+    if manifest_sha256 != EXPECTED_OOF_MANIFEST_SHA256:
+        raise ValueError("retained OOF manifest bytes changed")
+    manifest = _read_json(manifest_path)
+    expected_fields = {
+        "contract": EXPECTED_OOF_MANIFEST_CONTRACT,
+        "schema_version": 2,
+        "source_class": SOURCE_CLASS,
+        "evidence_class": "CONFIRMATORY",
+    }
+    if {key: manifest[key] for key in expected_fields} != expected_fields:
+        raise ValueError("retained OOF manifest crosses its frozen evidence boundary")
     report_path = oof_root / "evaluation/report.json"
     if _sha256(report_path) != EXPECTED_REPORT_SHA256:
         raise ValueError("retained evaluation report bytes changed")
@@ -115,7 +129,14 @@ def _fit_references(terminal_root: Path) -> tuple[dict[str, dict[str, Any]], set
     }
     if set(references) != wanted:
         raise ValueError("retained OOF manifest does not bind every evaluated baseline fit")
-    return references, wanted
+    binding: dict[str, object] = {
+        "path": str(manifest_path),
+        "sha256": manifest_sha256,
+        **expected_fields,
+        "oof_id": manifest["oof_id"],
+        "closure_id": manifest["closure_id"],
+    }
+    return references, wanted, binding
 
 
 def _weights(frame: pl.DataFrame, pooled: bool) -> np.ndarray:
@@ -137,9 +158,7 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     ordered_values = values[order]
     ordered_weights = weights[order]
     cutoff = float(ordered_weights.sum()) / 2
-    return float(
-        ordered_values[np.searchsorted(np.cumsum(ordered_weights), cutoff, side="left")]
-    )
+    return float(ordered_values[np.searchsorted(np.cumsum(ordered_weights), cutoff, side="left")])
 
 
 def _fit_preprocessing(
@@ -256,9 +275,7 @@ def _maximum_state_delta(state: dict[str, object], retained: dict[str, Any]) -> 
 
 def _instrument_balanced_mse(frame: pl.DataFrame, prediction: str) -> float:
     values = (
-        frame.with_columns(
-            ((pl.col(prediction) - pl.col("target_return")) ** 2).alias("_se")
-        )
+        frame.with_columns(((pl.col(prediction) - pl.col("target_return")) ** 2).alias("_se"))
         .group_by("instrument_id")
         .agg(pl.col("_se").mean().alias("_mse"))
     )
@@ -274,7 +291,7 @@ def reconstruct_baseline(
 
     rows = _load_baseline_rows(output_root)
     fold_by_id = {fold["fold_id"]: fold for fold in retained_folds}
-    references, wanted = _fit_references(terminal_root)
+    references, wanted, retained_oof_manifest = _fit_references(terminal_root)
     oof_root = terminal_root / "oof"
     predictions: list[pl.DataFrame] = []
     fit_checks: list[dict[str, object]] = []
@@ -322,9 +339,7 @@ def reconstruct_baseline(
         )
         state_delta = _maximum_state_delta(state, retained_preprocessing)
         x_validation = _transform(validation_matrix, state)
-        coefficient_names = list(
-            cast(list[str], state["active_feature_names"])
-        )
+        coefficient_names = list(cast(list[str], state["active_feature_names"]))
         if pooled:
             identity_names = [
                 name
@@ -358,9 +373,7 @@ def reconstruct_baseline(
             sample_weight=np.asarray(state["weights"], dtype=float),
         )
         retained_coefficients = np.asarray(fit["coefficients"], dtype=float)
-        coefficient_delta = float(
-            np.max(np.abs(np.asarray(model.coef_) - retained_coefficients))
-        )
+        coefficient_delta = float(np.max(np.abs(np.asarray(model.coef_) - retained_coefficients)))
         intercept_delta = abs(float(model.intercept_) - float(fit["intercept"]))
         prediction = model.predict(x_validation)
         predictions.append(
@@ -427,11 +440,7 @@ def reconstruct_baseline(
         abs(float(observed[key]) - float(EXPECTED_BASELINE[key]))
         for key in ("ZERO_RETURN", "POOLED_LOCAL_RIDGE", "LOCAL_RIDGE")
     )
-    ordering = (
-        observed["ZERO_RETURN"]
-        < observed["POOLED_LOCAL_RIDGE"]
-        < observed["LOCAL_RIDGE"]
-    )
+    ordering = observed["ZERO_RETURN"] < observed["POOLED_LOCAL_RIDGE"] < observed["LOCAL_RIDGE"]
     exact_support = observed["support"] == EXPECTED_BASELINE["support"]
     maximum_preprocessing_delta = max(
         cast(float, item["preprocessing_max_abs_delta"]) for item in fit_checks
@@ -439,9 +448,7 @@ def reconstruct_baseline(
     maximum_coefficient_delta = max(
         cast(float, item["coefficient_max_abs_delta"]) for item in fit_checks
     )
-    maximum_intercept_delta = max(
-        cast(float, item["intercept_abs_delta"]) for item in fit_checks
-    )
+    maximum_intercept_delta = max(cast(float, item["intercept_abs_delta"]) for item in fit_checks)
     if (
         not exact_support
         or maximum_metric_delta > METRIC_ABS_TOLERANCE
@@ -484,4 +491,5 @@ def reconstruct_baseline(
         ),
         "fit_checks": fit_checks,
         "retained_evaluation_report_sha256": EXPECTED_REPORT_SHA256,
+        "retained_oof_manifest": retained_oof_manifest,
     }

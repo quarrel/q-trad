@@ -19,9 +19,12 @@ six-target, 15-minute OOF reconstruction before publishing a complete manifest.
 
 Downstream workstreams must call
 `experiments.r2_historical_lab.harness.load_parts` with the exact manifest SHA-256. The loader
-authenticates only selected parts and defaults every feature, context, and target read to
-`DEV_1` through `DEV_3`. Request `TRAINING_ONLY` explicitly for chronological fitting. Register
-every configuration and result with `append_attempt`, freeze a small finalist set with
-`freeze_finalists`, and supply the exact freeze SHA-256 and configuration ID for the single
-`TERMINAL_FORMER_HOLDOUT` read. Compare every candidate directly with `ZERO_RETURN` using
-`evaluate_against_zero`.
+authenticates only selected parts, rejects explicit empty selections, and defaults every feature,
+context, and target read to `DEV_1` through `DEV_3`. Request `TRAINING_ONLY` explicitly for
+chronological fitting. Evaluate every completed candidate directly against `ZERO_RETURN` with
+`evaluate_against_zero`, then register that exact provenance-bearing result with `append_attempt`.
+An explicit `{"status": "FAILED", ...}` result remains registerable but is never finalist-eligible.
+Freeze a small finalist set with `freeze_finalists`, and supply the exact freeze SHA-256 and
+configuration ID for the single `TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt
+failed or evaluated the terminal block, that configuration is permanently ineligible for a later
+freeze in the same workstream and manifest.
