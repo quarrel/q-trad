@@ -15,6 +15,7 @@ from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
 from experiments.r2_historical_lab.features import positive_contribution_share
 
 MANIFEST_CONTRACT = "qtrad-r2-historical-lab-manifest-v2"
+EVALUATION_CONTRACT = "qtrad-r2-historical-lab-evaluation-v1"
 TERMINAL_BLOCK = "TERMINAL_FORMER_HOLDOUT"
 
 
@@ -49,21 +50,34 @@ def authenticate_manifest(path: Path, expected_sha256: str) -> dict[str, Any]:
         "DEV_3",
         "TERMINAL_FORMER_HOLDOUT",
     }
-    if set(block_by_name) != required_blocks or block_by_name[TERMINAL_BLOCK][
-        "selection_prohibited"
-    ] is not True:
+    if (
+        set(block_by_name) != required_blocks
+        or block_by_name[TERMINAL_BLOCK]["selection_prohibited"] is not True
+    ):
         raise ValueError("lab manifest does not bind the required development blocks")
     baseline = value["baseline_reconstruction"]
     tolerances = baseline["tolerances"]
+    retained_oof_manifest = baseline["retained_oof_manifest"]
+    if retained_oof_manifest != {
+        "path": (
+            "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/oof/manifest.json"
+        ),
+        "sha256": "ff0bd89fb97448beda6e70565191bb512458c4d3124ec0dc17476b2d43859819",
+        "contract": "qtrad-r2-oof-bundle-v2",
+        "schema_version": 2,
+        "source_class": SOURCE_CLASS,
+        "evidence_class": "CONFIRMATORY",
+        "oof_id": "c31dddc528936d1a415c4a5af009e59a43eefe27909b7a16267712f9671dfa65",
+        "closure_id": "d911eea62786f7e0d99719b78c93da80cd6574118e706812107dd949d2fcd6a6",
+    }:
+        raise ValueError("lab manifest lacks the exact retained OOF parent binding")
     if (
-        baseline["contract"]
-        != "qtrad-r2-historical-lab-baseline-reconstruction-v2"
+        baseline["contract"] != "qtrad-r2-historical-lab-baseline-reconstruction-v2"
         or baseline["support_exact"] is not True
         or baseline["ordering_zero_pooled_local"] is not True
         or baseline["fit_count"] != 21
         or baseline["maximum_metric_abs_delta"] > tolerances["metric_abs"]
-        or baseline["maximum_preprocessing_abs_delta"]
-        > tolerances["preprocessing_abs"]
+        or baseline["maximum_preprocessing_abs_delta"] > tolerances["preprocessing_abs"]
         or baseline["maximum_coefficient_abs_delta"] > tolerances["coefficient_abs"]
         or baseline["maximum_intercept_abs_delta"] > tolerances["intercept_abs"]
     ):
@@ -81,11 +95,11 @@ def _selected_references(
 ) -> list[dict[str, Any]]:
     if kind not in {"feature", "context", "target"}:
         raise ValueError(f"unsupported lab part kind: {kind}")
-    selected_instruments = set(instruments or manifest["instruments"])
+    selected_instruments = set(manifest["instruments"] if instruments is None else instruments)
     unknown_instruments = selected_instruments - set(manifest["instruments"])
     if unknown_instruments:
         raise ValueError(f"unknown selected instruments: {sorted(unknown_instruments)}")
-    selected_horizons = set(horizons or manifest["horizons_minutes"])
+    selected_horizons = set(manifest["horizons_minutes"] if horizons is None else horizons)
     unknown_horizons = selected_horizons - set(manifest["horizons_minutes"])
     if kind == "target" and unknown_horizons:
         raise ValueError(f"unknown selected horizons: {sorted(unknown_horizons)}")
@@ -96,10 +110,7 @@ def _selected_references(
         for item in manifest["parts"]
         if item["kind"] == kind
         and item.get("instrument_id") in selected_instruments
-        and (
-            kind != "target"
-            or int(item["horizon_minutes"]) in selected_horizons
-        )
+        and (kind != "target" or int(item["horizon_minutes"]) in selected_horizons)
     ]
     if not references:
         raise ValueError("selected lab part set is empty")
@@ -173,8 +184,7 @@ def load_parts(
             or configuration_id is None
         ):
             raise ValueError(
-                "terminal loading requires an authenticated finalist freeze "
-                "and configuration ID"
+                "terminal loading requires an authenticated finalist freeze and configuration ID"
             )
         if _sha256(finalist_freeze) != expected_finalist_freeze_sha256:
             raise ValueError("finalist freeze SHA-256 differs")
@@ -252,11 +262,14 @@ def evaluate_against_zero(
         pl.corr("expected_return", "target_return", method="spearman").alias("spearman"),
     ).row(0, named=True)
     variance = calibration["forecast_variance"]
+    evaluated_blocks = sorted(str(value) for value in scored["block"].unique().to_list())
     return {
-        "contract": "qtrad-r2-historical-lab-evaluation-v1",
+        "contract": EVALUATION_CONTRACT,
         "evidence_label": LABEL,
         "source_class": SOURCE_CLASS,
         "model_name": model_name,
+        "evaluated_blocks": evaluated_blocks,
+        "terminal_block_accessed": TERMINAL_BLOCK in evaluated_blocks,
         "support": joined.height,
         "forecast_coverage": joined.height / valid_targets.height,
         "zero_return_instrument_balanced_mse": zero_mse,
@@ -277,16 +290,12 @@ def evaluate_against_zero(
             else None
         ),
         "spearman_correlation": (
-            float(calibration["spearman"])
-            if calibration["spearman"] is not None
-            else None
+            float(calibration["spearman"]) if calibration["spearman"] is not None else None
         ),
         "best_instrument_contribution": positive_contribution_share(
             instrument["contribution"].to_list()
         ),
-        "best_period_contribution": positive_contribution_share(
-            blocks["contribution"].to_list()
-        ),
+        "best_period_contribution": positive_contribution_share(blocks["contribution"].to_list()),
     }
 
 
@@ -303,6 +312,25 @@ def append_attempt(
     manifest_sha256: str,
 ) -> str:
     identifier = configuration_id(configuration)
+    if result.get("contract") == EVALUATION_CONTRACT:
+        if result["evidence_label"] != LABEL or result["source_class"] != SOURCE_CLASS:
+            raise ValueError("evaluation result crosses the exploratory source boundary")
+        evaluated_blocks = result["evaluated_blocks"]
+        terminal_block_accessed = result["terminal_block_accessed"]
+        if (
+            not isinstance(evaluated_blocks, list)
+            or not evaluated_blocks
+            or not all(isinstance(block, str) for block in evaluated_blocks)
+            or not isinstance(terminal_block_accessed, bool)
+            or terminal_block_accessed != (TERMINAL_BLOCK in evaluated_blocks)
+        ):
+            raise ValueError("evaluation result has inconsistent block provenance")
+        attempt_status = "SUCCEEDED"
+    elif result.get("status") == "FAILED":
+        attempt_status = "FAILED"
+        terminal_block_accessed = None
+    else:
+        raise ValueError("attempt result must be a lab evaluation or explicit failure")
     entry = {
         "recorded_at": datetime.now(UTC).isoformat(),
         "workstream": workstream,
@@ -310,7 +338,8 @@ def append_attempt(
         "configuration": configuration,
         "result": result,
         "manifest_sha256": manifest_sha256,
-        "terminal_block_accessed": False,
+        "attempt_status": attempt_status,
+        "terminal_block_accessed": terminal_block_accessed,
         "evidence_label": LABEL,
     }
     register_path.parent.mkdir(parents=True, exist_ok=True)
@@ -334,16 +363,27 @@ def freeze_finalists(
         for line in register_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    attempted = {
-        entry["configuration_id"]
+    matching_entries = [
+        entry
         for entry in entries
-        if entry["workstream"] == workstream
-        and entry["manifest_sha256"] == manifest_sha256
-        and entry["terminal_block_accessed"] is False
+        if entry["workstream"] == workstream and entry["manifest_sha256"] == manifest_sha256
+    ]
+    successful_development = {
+        entry["configuration_id"]
+        for entry in matching_entries
+        if entry["attempt_status"] == "SUCCEEDED" and entry["terminal_block_accessed"] is False
     }
+    disqualified = {
+        entry["configuration_id"]
+        for entry in matching_entries
+        if entry["attempt_status"] != "SUCCEEDED" or entry["terminal_block_accessed"] is not False
+    }
+    eligible = successful_development - disqualified
     finalists = tuple(finalist_configuration_ids)
-    if not finalists or not set(finalists).issubset(attempted):
-        raise ValueError("every finalist must be a registered development-only attempt")
+    if not finalists or not set(finalists).issubset(eligible):
+        raise ValueError(
+            "every finalist must have only successful development-only registered attempts"
+        )
     value = {
         "contract": "qtrad-r2-historical-lab-finalist-freeze-v1",
         "created_at": datetime.now(UTC).isoformat(),

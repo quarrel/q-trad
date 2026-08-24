@@ -1,4 +1,4 @@
-# LAB-0-v2 independent-review candidate
+# LAB-0-v2 remediated independent-review candidate
 
 STATUS: COMPLETE — EXPLORATORY_POST_HOC_ONLY
 
@@ -8,9 +8,9 @@ This is reusable exploratory infrastructure, not a confirmatory result, promotio
 
 - Branch: agent/r2-lab-foundation
 - Authorised base: f31cf4731fc233726f45f67f54064c40965d01d7
-- Output: /workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-2
-- Manifest: /workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-2/lab-manifest.json
-- Manifest SHA-256: 0c61a3373432e4c12cf3ee49b1a46e01df7bf8ebb763f1cdd7f92431b8e2f296
+- Output: /workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-3
+- Manifest: /workspace/tmp/qtrad-r2-lab/LAB-0-v2-review-candidate-3/lab-manifest.json
+- Manifest SHA-256: a02b39ae9454b86d87b539dc137457ab3507395b4cd9ee38d61d63745f5f7799
 - Parts: 723; all declared file hashes rechecked
 - Rows: 3,378,933 feature; 3,378,933 context; 13,515,732 target
 
@@ -40,7 +40,7 @@ The small numerical discrepancy is attributable to decoding retained decimal-str
 - Eight focused tests passed.
 - One end-to-end smoke passed.
 - The complete 20-instrument build passed.
-- The downstream harness authenticated the final manifest, rechecked all parts, and returned DEV-only rows by default for feature, context, and target reads.
+- The downstream harness authenticates the final manifest and exact retained OOF parent `ff0bd89fb97448beda6e70565191bb512458c4d3124ec0dc17476b2d43859819`, rechecks selected parts, rejects explicit empty selections, and returns DEV-only rows by default for feature, context, and target reads.
 
 ## Failed and superseded attempts
 
