@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from experiments.r2_historical_lab.tabular import (
+    _development_targets,
     _qualifies,
     configuration_id,
     evaluate,
@@ -45,6 +46,40 @@ def test_evaluate_compares_directly_with_zero_and_balances_instruments() -> None
     assert result["calibration_slope"] == pytest.approx(2.0)
     assert result["best_instrument_contribution"] == 0.5
     assert result["best_period_contribution"] == 0.75
+
+
+def test_development_targets_use_retained_membership_not_adjacent_block_rows() -> None:
+    times = [
+        datetime(2026, 5, 16, tzinfo=UTC),
+        datetime(2026, 5, 30, tzinfo=UTC),
+        datetime(2026, 6, 13, tzinfo=UTC),
+        datetime(2026, 6, 25, tzinfo=UTC),
+    ]
+    rows = pl.DataFrame(
+        {
+            "target_id": ["keep-1", "keep-2", "keep-3", "timestamp-only"],
+            "instrument_id": ["commodity:spot-gold"] * 4,
+            "decision_time": times,
+            "target_available_at": times,
+            "target_return": [0.1, 0.2, 0.3, 0.4],
+            "target_valid": [True] * 4,
+            "block": ["DEV_1", "DEV_2", "DEV_3", "DEV_3"],
+        }
+    )
+    membership = {
+        "DEV_1": ([], ["keep-1"]),
+        "DEV_2": ([], ["keep-2"]),
+        "DEV_3": ([], ["keep-3"]),
+    }
+
+    selected = _development_targets(
+        rows,
+        membership,
+        ("commodity:spot-gold",),
+        datetime(2026, 6, 26, 14, 6, tzinfo=UTC),
+    )
+
+    assert selected["target_id"].to_list() == ["keep-1", "keep-2", "keep-3"]
 
 
 def test_advancement_requires_broad_positive_pre_holdout_evidence() -> None:

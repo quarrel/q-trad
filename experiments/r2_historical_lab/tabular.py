@@ -171,6 +171,55 @@ def authenticate_manifest(path: Path, expected_sha256: str) -> dict[str, Any]:
     return manifest
 
 
+def authenticate_fold_membership(
+    manifest: dict[str, Any],
+) -> dict[str, tuple[list[str], list[str]]]:
+    authority = manifest["terminal_foundation"]
+    foundation_path = Path(str(authority["path"])).resolve()
+    if _sha256(foundation_path) != authority["file_sha256"]:
+        raise ValueError("terminal foundation bytes differ from the LAB-0 manifest")
+    document = json.loads(foundation_path.read_bytes())
+    if document["source_class"] != SOURCE_CLASS:
+        raise ValueError("terminal foundation source class differs from LAB-T")
+    references = document["payload"]["children"]["folds"]
+    if [reference["file_sha256"] for reference in references] != authority["fold_child_sha256"]:
+        raise ValueError("terminal fold children differ from the LAB-0 manifest")
+
+    root = foundation_path.parent.resolve()
+    payloads: list[dict[str, Any]] = []
+    for reference in references:
+        path = (root / reference["file"]).resolve()
+        if root not in path.parents or _sha256(path) != reference["file_sha256"]:
+            raise ValueError(f"terminal fold child bytes differ from LAB-0: {path}")
+        payloads.extend(
+            json.loads(payload)
+            for payload in pl.read_parquet(path, columns=["payload"])["payload"].to_list()
+        )
+    if len(payloads) != len(DEVELOPMENT_BLOCKS):
+        raise ValueError("LAB-0 authority does not contain exactly three development folds")
+
+    named = {str(item["name"]): item for item in manifest["fold_blocks"]}
+    membership: dict[str, tuple[list[str], list[str]]] = {}
+    for block, payload in zip(
+        DEVELOPMENT_BLOCKS,
+        sorted(payloads, key=lambda item: str(item["validation_start"])),
+        strict=True,
+    ):
+        if (
+            datetime.fromisoformat(str(payload["validation_start"]))
+            != datetime.fromisoformat(str(named[block]["start"]))
+            or datetime.fromisoformat(str(payload["validation_end"]))
+            != datetime.fromisoformat(str(named[block]["end"]))
+            or payload["holdout_excluded"] is not True
+        ):
+            raise ValueError(f"retained fold membership differs from LAB-0 block {block}")
+        membership[block] = (
+            cast(list[str], payload["training_target_ids"]),
+            cast(list[str], payload["validation_target_ids"]),
+        )
+    return membership
+
+
 def _authorise_terminal(
     freeze_path: Path,
     expected_sha256: str,
@@ -684,9 +733,68 @@ def _result_row(
     }
 
 
+def _development_targets(
+    rows: pl.DataFrame,
+    fold_membership: dict[str, tuple[list[str], list[str]]],
+    instruments: Sequence[str],
+    terminal_start: datetime,
+) -> pl.DataFrame:
+    valid = (
+        pl.col("target_valid")
+        & pl.col("target_return").is_not_null()
+        & pl.col("target_available_at").is_not_null()
+        & (pl.col("target_available_at") < terminal_start)
+    )
+    if set(instruments).issubset(CORE_6):
+        frames = [
+            rows.filter(
+                pl.col("target_id").is_in(fold_membership[block][1])
+                & (pl.col("block") == block)
+                & valid
+            )
+            for block in DEVELOPMENT_BLOCKS
+        ]
+        targets = pl.concat(frames)
+    else:
+        targets = rows.filter(pl.col("block").is_in(DEVELOPMENT_BLOCKS) & valid)
+    return targets.sort("decision_time", "instrument_id", "target_id")
+
+
+def _training_for_block(
+    rows: pl.DataFrame,
+    fold_membership: dict[str, tuple[list[str], list[str]]],
+    instruments: Sequence[str],
+    block: str,
+    validation_start: datetime,
+) -> pl.DataFrame:
+    candidates = (
+        rows.filter(pl.col("target_id").is_in(fold_membership[block][0]))
+        if set(instruments).issubset(CORE_6)
+        else rows
+    )
+    return _training_rows(candidates, validation_start)
+
+
+def _assert_core_trust(
+    targets: pl.DataFrame,
+    manifest: dict[str, Any],
+) -> None:
+    observed = manifest["baseline_reconstruction"]["observed"]
+    evaluation = evaluate(_zero_predictions(targets), targets, model_name="ZERO_RETURN")
+    if evaluation["support"] != observed["support"]:
+        raise ValueError(
+            "LAB-T CORE_6 development support differs from the authenticated baseline: "
+            f"{evaluation['support']} != {observed['support']}"
+        )
+    if abs(cast(float, evaluation["zero_mse"]) - float(observed["ZERO_RETURN"])) > 1e-14:
+        raise ValueError("LAB-T CORE_6 zero MSE differs from the authenticated baseline")
+
+
 def _predictions_for_configuration(
     rows: pl.DataFrame,
+    targets: pl.DataFrame,
     manifest: dict[str, Any],
+    fold_membership: dict[str, tuple[list[str], list[str]]],
     instruments: Sequence[str],
     configuration: dict[str, object],
     *,
@@ -703,10 +811,20 @@ def _predictions_for_configuration(
     frames: list[pl.DataFrame] = []
     importances: list[dict[str, object]] = []
     for block in blocks:
-        validation = rows.filter(pl.col("block") == block)
+        validation = targets.filter(pl.col("block") == block)
         if smoke:
             validation = validation.head(512)
-        training = _training_rows(rows, block_starts[block])
+        training = (
+            _training_rows(rows, block_starts[block])
+            if terminal
+            else _training_for_block(
+                rows,
+                fold_membership,
+                instruments,
+                block,
+                block_starts[block],
+            )
+        )
         if smoke:
             training = training.tail(5000)
         if training.height < 100 or validation.is_empty():
@@ -885,7 +1003,7 @@ def _write_result(
                 f"({configuration_id(item)})"
             )
     else:
-        lines.append("None: no nonlinear P0 configuration met every advancement criterion.")
+        lines.append("None: no nonlinear P0 or P1 configuration met every advancement criterion.")
     lines.extend(("", "## Former-holdout finalist results", ""))
     terminal = results.filter(pl.col("split") == "FORMER_HOLDOUT_POST_HOC")
     if terminal.is_empty():
@@ -937,6 +1055,7 @@ def _run_configuration(
     rows: pl.DataFrame,
     targets: pl.DataFrame,
     manifest: dict[str, Any],
+    fold_membership: dict[str, tuple[list[str], list[str]]],
     instruments: Sequence[str],
     universe_name: str,
     configuration: dict[str, object],
@@ -948,7 +1067,9 @@ def _run_configuration(
     try:
         predictions, importance = _predictions_for_configuration(
             rows,
+            targets,
             manifest,
+            fold_membership,
             instruments,
             configuration,
             terminal=split == "FORMER_HOLDOUT_POST_HOC",
@@ -1006,15 +1127,24 @@ def run(config: TabularConfig, *, smoke: bool = False) -> dict[str, object]:
     if output_root.exists():
         raise FileExistsError(f"LAB-T output is create-only: {output_root}")
     manifest = authenticate_manifest(config.manifest_path, config.manifest_sha256)
+    fold_membership = authenticate_fold_membership(manifest)
+    terminal_start = datetime.fromisoformat(
+        str(
+            next(item for item in manifest["fold_blocks"] if item["name"] == TERMINAL_BLOCK)[
+                "start"
+            ]
+        )
+    )
     all_20 = tuple(str(item) for item in manifest["instruments"])
     universes: tuple[tuple[str, tuple[str, ...]], ...] = (
-        (("CORE_6_SMOKE" if smoke else "CORE_6"), (CORE_6[:2] if smoke else CORE_6)),
+        (("CORE_6_SMOKE" if smoke else "CORE_6"), CORE_6),
         *(() if smoke else (("ALL_20", all_20),)),
     )
     register = output_root / "run-register.jsonl"
     results: list[dict[str, object]] = []
     importance_rows: list[dict[str, object]] = []
     development_rows: dict[str, pl.DataFrame] = {}
+    development_targets: dict[str, pl.DataFrame] = {}
     configurations = MODEL_CONFIGURATIONS[:3:2] if smoke else MODEL_CONFIGURATIONS
 
     for universe_name, instruments in universes:
@@ -1025,7 +1155,10 @@ def run(config: TabularConfig, *, smoke: bool = False) -> dict[str, object]:
             blocks=(*DEVELOPMENT_BLOCKS, "TRAINING_ONLY"),
         )
         development_rows[universe_name] = rows
-        targets = rows.filter(pl.col("block").is_in(DEVELOPMENT_BLOCKS))
+        targets = _development_targets(rows, fold_membership, instruments, terminal_start)
+        development_targets[universe_name] = targets
+        if tuple(instruments) == CORE_6:
+            _assert_core_trust(targets, manifest)
         zero_configuration: dict[str, object] = {
             "model_family": "ZERO_RETURN",
             "variant": "DIRECT",
@@ -1056,6 +1189,7 @@ def run(config: TabularConfig, *, smoke: bool = False) -> dict[str, object]:
                 rows=rows,
                 targets=targets,
                 manifest=manifest,
+                fold_membership=fold_membership,
                 instruments=instruments,
                 universe_name=universe_name,
                 configuration=configuration,
@@ -1090,11 +1224,12 @@ def run(config: TabularConfig, *, smoke: bool = False) -> dict[str, object]:
             secondary_configurations.append(p1_configuration)
             for universe_name, instruments in universes:
                 rows = development_rows[universe_name]
-                targets = rows.filter(pl.col("block").is_in(DEVELOPMENT_BLOCKS))
+                targets = development_targets[universe_name]
                 row, fold_importance = _run_configuration(
                     rows=rows,
                     targets=targets,
                     manifest=manifest,
+                    fold_membership=fold_membership,
                     instruments=instruments,
                     universe_name=universe_name,
                     configuration=p1_configuration,
@@ -1186,6 +1321,7 @@ def run(config: TabularConfig, *, smoke: bool = False) -> dict[str, object]:
                     rows=terminal_rows,
                     targets=terminal_targets,
                     manifest=manifest,
+                    fold_membership=fold_membership,
                     instruments=instruments,
                     universe_name=universe_name,
                     configuration=configuration,
