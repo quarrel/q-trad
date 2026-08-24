@@ -496,6 +496,140 @@ class MicroRun:
         return json.dumps(_thaw_value(self.report), sort_keys=True, indent=2) + "\n"
 
 
+def _report_semantic_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the stable semantic projection of a canonical analysis report."""
+
+    raw_payload = _thaw_value(report)
+    if not isinstance(raw_payload, dict):
+        raise FreezeError("report must be an object")
+    payload = cast(dict[str, Any], raw_payload)
+    payload.pop("code_provenance", None)
+    work_raw = payload.get("work")
+    if isinstance(work_raw, dict):
+        work = cast(dict[str, Any], work_raw)
+        work.pop("measurement", None)
+    return payload
+
+
+def canonical_report_semantic_identity(report: Mapping[str, Any]) -> str:
+    """Hash the stable, machine-verifiable semantic report projection."""
+
+    payload = _report_semantic_payload(report)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _render_section(title: str, value: Any) -> str:
+    rendered = json.dumps(_thaw_value(value), sort_keys=True, indent=2)
+    fence = chr(96) * 3
+    return f"## {title}\n\n{fence}json\n{rendered}\n{fence}\n"
+
+
+def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
+    """Render the frozen canonical R3.H report as deterministic final Markdown."""
+
+    report = result.report
+    required_sections = {
+        "contract",
+        "config_semantic_identity",
+        "source_class",
+        "price_basis",
+        "evidence_class",
+        "claims",
+        "code_provenance",
+        "retained_parents",
+        "selection",
+        "loader_contract",
+        "scale_projection",
+        "observation_contract",
+        "economic",
+        "statistical",
+        "graph",
+        "work",
+        "result_classification",
+        "no_post_result_expansion",
+    }
+    if not required_sections <= set(report):
+        raise FreezeError("report is missing required R3.H renderer sections")
+    if report["contract"] != REPORT_CONTRACT:
+        raise FreezeError("renderer received an unsupported report contract")
+    if report["config_semantic_identity"] != config.semantic_identity:
+        raise FreezeError("renderer report/config semantic identity mismatch")
+    if report["source_class"] != "IBKR_HISTORICAL_RESEARCH":
+        raise FreezeError("renderer requires IBKR historical research source")
+    if report["price_basis"] != "MIDPOINT_OHLC":
+        raise FreezeError("renderer requires MIDPOINT-only report")
+    if report["evidence_class"] != "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE":
+        raise FreezeError("renderer requires historical exploratory evidence")
+    if not {"economic", "statistical", "graph"} <= set(report):
+        raise FreezeError("report is missing a required research component")
+
+    semantic_report = _report_semantic_payload(report)
+    semantic_identity = canonical_report_semantic_identity(report)
+    metadata = {
+        "markdown_contract": "qtrad-r3-historical-exploratory-markdown-v1",
+        "canonical_report_contract": report["contract"],
+        "canonical_report_semantic_identity": semantic_identity,
+        "stage": "R3.H",
+        "evidence_class": "HISTORICAL_EXPLORATORY",
+        "source_class": report["source_class"],
+        "price_basis": report["price_basis"],
+        "configuration_semantic_identity": config.semantic_identity,
+        "no_post_result_expansion": report["no_post_result_expansion"],
+    }
+    claim_boundary = {
+        "claims": semantic_report["claims"],
+        "no_effectiveness_claim": True,
+        "no_executable_alpha_claim": True,
+        "no_profitability_claim": True,
+        "no_native_validity_claim": True,
+        "no_promotion_claim": True,
+        "no_order_claim": True,
+    }
+    sections = [
+        "# R3.H Historical Exploratory Report\n",
+        "This is machine-readably labelled historical, MIDPOINT-only implementation evidence. "
+        "It is not executable evidence or a recommendation.\n",
+        _render_section("Machine-readable report identity", metadata),
+        _render_section(
+            "Terminal authority and consumed child identities",
+            semantic_report["retained_parents"],
+        ),
+        _render_section(
+            "Frozen configuration and code identity",
+            {
+                "configuration_semantic_identity": config.semantic_identity,
+                "code_provenance": report["code_provenance"],
+                "report_contract": report["contract"],
+            },
+        ),
+        _render_section(
+            "Loader, selection, resources, and work counts",
+            {
+                "selection": semantic_report["selection"],
+                "loader_contract": semantic_report["loader_contract"],
+                "scale_projection": semantic_report["scale_projection"],
+                "observation_contract": semantic_report["observation_contract"],
+                "work": semantic_report["work"],
+            },
+        ),
+        _render_section(
+            "Economic break-even and turnover sensitivity", semantic_report["economic"]
+        ),
+        _render_section(
+            "Chronological statistical and bounded nonlinear comparison",
+            semantic_report["statistical"],
+        ),
+        _render_section("Tiny graph/GNN feasibility and controls", semantic_report["graph"]),
+        _render_section(
+            "Negative, failed, and inconclusive outcomes",
+            semantic_report["result_classification"],
+        ),
+        _render_section("Claim boundary", claim_boundary),
+    ]
+    return "\n".join(sections)
+
+
 def _reject_unknown(value: Mapping[str, Any], allowed: frozenset[str], label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:

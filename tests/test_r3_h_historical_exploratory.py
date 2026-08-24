@@ -16,7 +16,10 @@ from qtrad.application.r3_historical_exploratory import (
     FixtureMeasurement,
     FreezeConfig,
     FreezeError,
+    MicroRun,
     analyse_fixture,
+    canonical_report_semantic_identity,
+    render_markdown,
     synthetic_fixture,
 )
 
@@ -641,3 +644,53 @@ def test_role_swapped_retained_locator_fails_closed() -> None:
     )
     with pytest.raises(FreezeError):
         FreezeConfig.from_mapping(_rehashed(candidate))
+
+
+def test_markdown_renderer_is_deterministic_complete_and_fail_closed() -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    rendered = render_markdown(result, config)
+
+    second_result = analyse_fixture(synthetic_fixture(), config)
+    assert rendered == render_markdown(result, config)
+    assert rendered == render_markdown(second_result, config)
+    assert canonical_report_semantic_identity(result.report) == (
+        canonical_report_semantic_identity(second_result.report)
+    )
+    assert canonical_report_semantic_identity(result.report) in rendered
+    for heading in (
+        "Machine-readable report identity",
+        "Terminal authority and consumed child identities",
+        "Frozen configuration and code identity",
+        "Loader, selection, resources, and work counts",
+        "Economic break-even and turnover sensitivity",
+        "Chronological statistical and bounded nonlinear comparison",
+        "Tiny graph/GNN feasibility and controls",
+        "Negative, failed, and inconclusive outcomes",
+        "Claim boundary",
+    ):
+        assert f"## {heading}" in rendered
+    for label in (
+        "HISTORICAL_EXPLORATORY",
+        "IBKR_HISTORICAL_RESEARCH",
+        "MIDPOINT_OHLC",
+        "nonlinear_huber",
+        "local_non_graph",
+        "pooled_non_graph",
+        "fixed_graph",
+        "shuffled_graph",
+        "NEGATIVE",
+        "FAILED",
+        "INCONCLUSIVE",
+        "no_effectiveness_claim",
+        "no_executable_alpha_claim",
+        "no_profitability_claim",
+        "no_native_validity_claim",
+        "no_promotion_claim",
+        "no_order_claim",
+    ):
+        assert label in rendered
+    assert json.loads(result.canonical_json())["contract"] == result.report["contract"]
+
+    with pytest.raises(FreezeError, match="missing required"):
+        render_markdown(MicroRun({}, {}), config)
