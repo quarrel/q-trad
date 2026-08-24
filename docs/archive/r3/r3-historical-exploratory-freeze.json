@@ -1,0 +1,60 @@
+{
+  "contract": "qtrad-r3-historical-exploratory-freeze-v1",
+  "schema_version": 1,
+  "stage": "R3.H",
+  "evidence_class": "HISTORICAL_EXPLORATORY",
+  "source_class": "IBKR_HISTORICAL_RESEARCH",
+  "price_basis": "MIDPOINT_OHLC",
+  "primary_horizon_minutes": 15,
+  "targets": ["target_1", "target_2", "target_3", "target_4", "target_5", "target_6"],
+  "groups": ["group_1", "group_2", "group_3"],
+  "retained_parents": {
+    "stage7_manifest": "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3/provider-history-v3/manifest.json",
+    "stage7_receipt": "/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3/provider-history-v3-verification-receipt.json",
+    "stage7_semantic_id": "2c1951f2fd7fd9c7186cec23855d36272c41a746cc2af1ae14c2e75d6ad468fc",
+    "stage7_dataset_id": "b77a0f9a7192ed756b7958666f89baa6ce16a741056fd32a3a710cdb1ba65bd3",
+    "stage7_closure_id": "11bae2bee78227d0d5b66e2553da5e8515f1b12b53a5ebd9332ace2fd65e8ac",
+    "stage7_verification_id": "766ed962331e37cb2e2fdd275a39a03905a83f879ebe025bbe7e3a895234bbfd",
+    "terminal_report_sha256": "4fdc08e2e37135200f974f14ba28669e73aa4f57f51860731741f6a2ddea2b30",
+    "terminal_approval_sha256": "278830aed74a28c9d8ca79b3695b652137e131609e40b530e019f048063bcaa6",
+    "stage8_promotion_id": "1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5"
+  },
+  "cost_grid": [
+    {"name": "zero", "value": 0.0, "unit": "fraction_of_notional"},
+    {"name": "five_bp", "value": 0.0005, "unit": "fraction_of_notional"},
+    {"name": "ten_bp", "value": 0.001, "unit": "fraction_of_notional"},
+    {"name": "twenty_bp", "value": 0.002, "unit": "fraction_of_notional"}
+  ],
+  "turnover_definition": "physical_turnover=sum(abs(target_position-change)); one unit is one notional unit traded",
+  "statistical_formulations": {
+    "oof": "chronological folds with dependency-derived purge and embargo; no outcome-blind selection after scoring",
+    "controls": ["zero_return", "local_ridge", "pooled_local_ridge"],
+    "metrics": ["mse", "rank_correlation", "coverage", "support"],
+    "views": ["asset", "horizon", "period"]
+  },
+  "nonlinear_candidates": [
+    {"id": "linear_ridge", "family": "ridge", "degree": 1, "enabled": true},
+    {"id": "linear_zero_return", "family": "constant_zero", "degree": 0, "enabled": true},
+    {"id": "nonlinear_huber", "family": "bounded_huber", "degree": 2, "enabled": true}
+  ],
+  "tiny_graph_candidate": {"id": "tiny_learned_graph", "family": "gnn", "layers": 1, "hidden_units": 4, "enabled": true},
+  "graph_controls": [
+    {"id": "local_non_graph", "kind": "non_graph_local", "enabled": true},
+    {"id": "pooled_non_graph", "kind": "non_graph_pooled", "enabled": true},
+    {"id": "fixed_graph", "kind": "fixed_graph", "enabled": true},
+    {"id": "shuffled_graph", "kind": "shuffled_graph", "enabled": true}
+  ],
+  "compute_limits": {
+    "max_rows": 64,
+    "max_fits": 4,
+    "max_candidates": 3,
+    "max_elapsed_seconds": 60,
+    "max_memory_mb": 512
+  },
+  "output_contract": {
+    "report_contract": "qtrad-r3-historical-exploratory-report-v1",
+    "create_only": true,
+    "post_result_expansion": false
+  },
+  "semantic_identity": "482e941019fbeffc9396bff5b8a947bcef9b8fba71e30ef854722a96cab5c4d8"
+}
