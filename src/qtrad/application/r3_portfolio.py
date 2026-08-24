@@ -173,10 +173,18 @@ def _evaluate_costs(
     total = Decimal(0)
     financing = Decimal(0)
     for index, asset in enumerate(inputs.asset_order):
+        internal_cross_quantity = Decimal("0")
+        if inputs.netting is not None:
+            internal_cross_quantity = next(
+                item.internal_cross_quantity
+                for item in inputs.netting.assets
+                if item.asset_id == asset
+            )
         state = inputs.continuous_costs[asset].evaluate(
             current_quantity=inputs.current_position[index],
             target_quantity=target[index],
             decision_time=inputs.decision_time,
+            internal_cross_quantity=internal_cross_quantity,
         )
         if (
             state.current_quantity != inputs.current_position[index]
@@ -220,6 +228,15 @@ def _blocked(
         expected_costs={},
         disposition=DecisionDisposition.BLOCKED,
         reason_codes=reasons,
+        requested_position=inputs.requested_target,
+        decision_time=inputs.decision_time,
+        cost_model_identities={
+            asset: inputs.continuous_costs[asset].semantic_identity for asset in inputs.asset_order
+        },
+        reporting_currencies={
+            asset: inputs.continuous_costs[asset].reporting_currency for asset in inputs.asset_order
+        },
+        netting=inputs.netting,
     )
 
 
@@ -267,10 +284,19 @@ def solve_continuous_target(
         physical_delta=delta,
         expected_cost_reporting=expected_total,
         expected_financing_reporting=expected_financing,
-        solver_status=status,
+        solver_status=SolverResultStatus.OPTIMAL.value,
         feasibility_residual=residual,
         solver_policy_identity=inputs.solver_policy.semantic_identity,
         expected_costs=states,
+        requested_position=inputs.requested_target,
+        decision_time=inputs.decision_time,
+        cost_model_identities={
+            asset: inputs.continuous_costs[asset].semantic_identity for asset in inputs.asset_order
+        },
+        reporting_currencies={
+            asset: inputs.continuous_costs[asset].reporting_currency for asset in inputs.asset_order
+        },
+        netting=inputs.netting,
     )
 
 

@@ -1,5 +1,6 @@
 """Focused R3.C one-horizon virtual/physical target checks."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -22,8 +23,11 @@ from qtrad.domain.economics import (
 )
 from qtrad.domain.portfolio import (
     ONE_HORIZON,
+    AssetNetting,
     ContinuousTargetInputs,
     DecisionDisposition,
+    NettingResult,
+    SleeveAttribution,
     SleeveKey,
     VirtualPosition,
     VirtualPositionTransition,
@@ -209,6 +213,7 @@ def _target_inputs(
     alpha: tuple[Decimal, Decimal] = (Decimal("1"), Decimal("0")),
     requested_target: tuple[Decimal, Decimal] = (Decimal("1"), Decimal("0")),
     unit_amount: str = "1",
+    netting: NettingResult | None = None,
 ) -> ContinuousTargetInputs:
     return ContinuousTargetInputs(
         asset_order=ASSETS,
@@ -225,6 +230,7 @@ def _target_inputs(
         },
         risk=_risk_state(),
         solver_policy=DEFAULT_SOLVER_POLICY,
+        netting=netting,
     )
 
 
@@ -411,3 +417,121 @@ def test_decimal_component_money_is_reconciled_without_float_artifact() -> None:
     assert target.disposition is DecisionDisposition.ACCEPTED
     assert target.expected_cost_reporting == Decimal("1.50")
     assert target.expected_financing_reporting == Decimal("3")
+
+
+def test_virtual_position_rejects_non_intrinsic_identity() -> None:
+    key = _key("EURUSD")
+    with pytest.raises(ValueError, match="does not match"):
+        VirtualPosition(key, Decimal("1"), "0" * 64)
+
+
+def test_blocked_transition_cannot_change_position() -> None:
+    key = _key("EURUSD")
+    with pytest.raises(ValueError, match="blocked transition"):
+        VirtualPositionTransition(
+            key=key,
+            prior_quantity=Decimal("0"),
+            next_quantity=Decimal("1"),
+            gross_forecast=_forecast("1"),
+            decision_time=NOW,
+            expiry_time=NOW + ONE_HORIZON,
+            model_identity="model",
+            risk_policy_identity="risk",
+            cost_policy_identity="cost",
+            prior_state_identity=VirtualPosition(key, Decimal("0")).state_identity,
+            successor_state_identity=VirtualPosition(key, Decimal("1")).state_identity,
+            external_delta_share=Decimal("1"),
+            disposition=DecisionDisposition.BLOCKED,
+            reason_codes=("blocked",),
+        )
+
+
+def test_netting_cross_is_bound_to_final_cost_states() -> None:
+    attribution_a = (
+        SleeveAttribution(_key("asset:a", source="A"), Decimal("2"), Decimal("2"), Decimal("0")),
+        SleeveAttribution(_key("asset:a", source="B"), Decimal("2"), Decimal("0"), Decimal("2")),
+    )
+    netting = NettingResult(
+        assets=(
+            AssetNetting("asset:a", Decimal("2"), Decimal("2"), Decimal("1"), attribution_a),
+            AssetNetting("asset:b", Decimal("0"), Decimal("0"), Decimal("0"), ()),
+        ),
+        sleeves=attribution_a,
+    )
+    target = solve_continuous_target(
+        _target_inputs(
+            netting=netting,
+            requested_target=(Decimal("2"), Decimal("0")),
+            alpha=(Decimal("1"), Decimal("0")),
+        ),
+        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+    )
+    assert target.disposition is DecisionDisposition.ACCEPTED
+    assert target.netting == netting
+    assert target.expected_costs["asset:a"].internal_cross_quantity == Decimal("1")
+    assert target.expected_costs["asset:a"].components[0].quantity_basis == Decimal("1")
+
+
+def test_target_identity_binds_model_and_component_semantics() -> None:
+    target = solve_continuous_target(
+        _target_inputs(),
+        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+    )
+    assert target.disposition is DecisionDisposition.ACCEPTED
+    changed_model = replace(
+        _target_inputs().continuous_costs["asset:a"],
+        provenance="different-provenance",
+    )
+    malformed = replace(
+        target,
+        cost_model_identities={
+            "asset:a": changed_model.semantic_identity,
+            "asset:b": target.cost_model_identities["asset:b"],
+        },
+    )
+    assert malformed.semantic_identity != target.semantic_identity
+
+
+def test_target_rejects_mismatched_final_cost_state() -> None:
+    inputs = _target_inputs()
+    target = solve_continuous_target(
+        inputs,
+        runner=lambda _inputs: ("optimal", (1.0, 0.0)),
+    )
+    alternate = inputs.continuous_costs["asset:a"].evaluate(
+        current_quantity=Decimal("0"),
+        target_quantity=Decimal("2"),
+        decision_time=NOW,
+    )
+    costs = dict(target.expected_costs)
+    costs["asset:a"] = alternate
+    with pytest.raises(ValueError, match="binding mismatch"):
+        replace(target, expected_costs=costs)
+
+
+def test_positive_minimum_cost_is_rejected_before_solver() -> None:
+    economics = _economics("asset:a")
+    commission = CostSchedule.available(
+        currency="AUD",
+        per_quantity=Decimal("1"),
+        minimum=Decimal("5"),
+        basis=CostBasis.PHYSICAL_DELTA,
+        version="commission-v2",
+        provenance="fixture",
+    )
+    with pytest.raises(ValueError, match="minimum"):
+        ContinuousTargetInputs(
+            asset_order=ASSETS,
+            current_position=(Decimal("0"), Decimal("0")),
+            requested_target=(Decimal("1"), Decimal("0")),
+            alpha_return=(Decimal("1"), Decimal("0")),
+            gross_sleeve_value=Decimal("100"),
+            decision_time=NOW,
+            economics={
+                "asset:a": replace(economics, commission=commission),
+                "asset:b": _economics("asset:b"),
+            },
+            continuous_costs={asset: _continuous_model(asset) for asset in ASSETS},
+            risk=_risk_state(),
+            solver_policy=DEFAULT_SOLVER_POLICY,
+        )
