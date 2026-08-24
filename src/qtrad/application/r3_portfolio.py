@@ -8,7 +8,7 @@ from typing import Any, Protocol, cast
 
 import cvxpy as cp
 
-from qtrad.domain.economics import CostComponentKind
+from qtrad.domain.economics import CostBasis, CostComponentKind
 from qtrad.domain.portfolio import (
     ContinuousTarget,
     ContinuousTargetInputs,
@@ -27,72 +27,39 @@ class SolverRunner(Protocol):
         ...
 
 
-def _cp_sum(value: Any) -> cp.Expression:
-    result = cp.sum(value)  # pyright: ignore[reportUnknownMemberType]
-    return cast(cp.Expression, result)
-
-
-def _cp_multiply(left: Any, right: Any) -> cp.Expression:
-    result = cp.multiply(left, right)  # pyright: ignore[reportUnknownMemberType]
-    return cast(cp.Expression, result)
-
-
 def _cp_quad_form(vector: Any, matrix: Any) -> cp.Expression:
-    result = cp.quad_form(vector, matrix, assume_PSD=True)  # pyright: ignore[reportUnknownMemberType]
-    return cast(cp.Expression, result)
+    return cast(
+        cp.Expression,
+        cp.quad_form(vector, matrix, assume_PSD=True),  # pyright: ignore[reportUnknownMemberType]
+    )
 
 
-def _cp_sum_squares(value: Any) -> cp.Expression:
-    result = cp.sum_squares(value)  # pyright: ignore[reportUnknownMemberType]
-    return cast(cp.Expression, result)
-
-
-def _cost_rates(inputs: ContinuousTargetInputs) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    transaction: list[float] = []
-    financing: list[float] = []
-    for asset, current, requested in zip(
-        inputs.asset_order,
-        inputs.current_position,
-        inputs.requested_target,
-        strict=True,
-    ):
-        state = inputs.expected_costs[asset]
-        total = state.require_total_reporting()
-        financing_amount = Decimal("0")
-        for component in state.components:
-            if component.component is CostComponentKind.FINANCING:
-                amount = component.reporting_amount
-                if amount is None:
-                    raise ValueError("financing cost reporting amount is required")
-                financing_amount += amount
-        transaction_amount = total - financing_amount
-        requested_delta = abs(requested - current)
-        transaction_rate = (
-            transaction_amount / requested_delta if requested_delta != 0 else Decimal("0")
+def _piecewise_cost(model: Any, quantity: Any) -> cp.Expression:
+    """Build the exact convex piecewise-linear expression for one model."""
+    expression = float(model.slopes[0]) * quantity
+    previous_slope = model.slopes[0]
+    for breakpoint, slope in zip(model.breakpoints, model.slopes[1:], strict=True):
+        expression += float(slope - previous_slope) * cp.pos(  # pyright: ignore[reportUnknownMemberType]
+            quantity - float(breakpoint)
         )
-        holding_base = abs(requested)
-        financing_rate = financing_amount / holding_base if holding_base != 0 else Decimal("0")
-        transaction.append(float(transaction_rate))
-        financing.append(float(financing_rate))
-    return tuple(transaction), tuple(financing)
+        previous_slope = slope
+    return cast(cp.Expression, expression * float(model.conversion_rate))
 
 
 def _run_cvxpy(inputs: ContinuousTargetInputs) -> tuple[str, Sequence[float] | None]:
     n = len(inputs.asset_order)
     target = cp.Variable(n, name=inputs.solver_policy.variable_order[0])
     current = tuple(float(value) for value in inputs.current_position)
-    requested = tuple(float(value) for value in inputs.requested_target)
     alpha = tuple(float(value) for value in inputs.alpha_return)
-    transaction_rate, financing_rate = _cost_rates(inputs)
-    gross = _cp_sum(cp.abs(target))
     constraints: list[cp.Constraint] = []
     caps = inputs.risk.caps
+    gross = cp.sum(cp.abs(target))  # pyright: ignore[reportUnknownMemberType]
     constraints.extend(
         [
             cast(cp.Constraint, cp.abs(target) <= cp.Constant(caps.asset_caps)),
             cast(cp.Constraint, gross <= caps.gross_cap),
-            cast(cp.Constraint, _cp_sum(target) <= caps.net_cap),
-            cast(cp.Constraint, _cp_sum(target) >= -caps.net_cap),
+            cast(cp.Constraint, cp.sum(target) <= caps.net_cap),  # pyright: ignore[reportUnknownMemberType]
+            cast(cp.Constraint, cp.sum(target) >= -caps.net_cap),  # pyright: ignore[reportUnknownMemberType]
             cast(
                 cp.Constraint,
                 _cp_quad_form(target, cp.Constant(inputs.risk.covariance))
@@ -103,40 +70,51 @@ def _run_cvxpy(inputs: ContinuousTargetInputs) -> tuple[str, Sequence[float] | N
     if caps.concentration_cap < 1:
         for index in range(n):
             constraints.append(
-                cast(
-                    cp.Constraint,
-                    cp.abs(target[index]) <= caps.concentration_cap * gross,
-                )
+                cast(cp.Constraint, cp.abs(target[index]) <= caps.concentration_cap * gross)
             )
-    if inputs.risk.group_exposure_matrix:
-        for row, cap in zip(
-            inputs.risk.group_exposure_matrix,
-            inputs.risk.group_caps,
-            strict=True,
-        ):
-            constraints.append(cast(cp.Constraint, cp.abs(row @ target) <= cap))
-    if inputs.risk.currency_exposure_matrix:
-        for row, cap in zip(
-            inputs.risk.currency_exposure_matrix,
-            inputs.risk.currency_caps,
-            strict=True,
-        ):
-            constraints.append(cast(cp.Constraint, cp.abs(row @ target) <= cap))
+    for row, cap in zip(
+        inputs.risk.group_exposure_matrix,
+        inputs.risk.group_caps,
+        strict=True,
+    ):
+        constraints.append(cast(cp.Constraint, cp.abs(row @ target) <= cap))
+    for row, cap in zip(
+        inputs.risk.currency_exposure_matrix,
+        inputs.risk.currency_caps,
+        strict=True,
+    ):
+        constraints.append(cast(cp.Constraint, cp.abs(row @ target) <= cap))
     for index, (current_value, alpha_value) in enumerate(zip(current, alpha, strict=True)):
         if alpha_value == 0:
             if current_value == 0:
                 constraints.append(cast(cp.Constraint, target[index] == 0))
             elif current_value > 0:
-                constraints.append(cast(cp.Constraint, target[index] >= 0))
-                constraints.append(cast(cp.Constraint, target[index] <= current_value))
+                constraints.extend(
+                    [
+                        cast(cp.Constraint, target[index] >= 0),
+                        cast(cp.Constraint, target[index] <= current_value),
+                    ]
+                )
             else:
-                constraints.append(cast(cp.Constraint, target[index] <= 0))
-                constraints.append(cast(cp.Constraint, target[index] >= current_value))
-    turnover = _cp_sum(_cp_multiply(transaction_rate, cp.abs(target - current)))
-    holding = _cp_sum(_cp_multiply(financing_rate, cp.abs(target)))
-    forecast_value = float(inputs.gross_sleeve_value) * _cp_sum(_cp_multiply(alpha, target))
+                constraints.extend(
+                    [
+                        cast(cp.Constraint, target[index] <= 0),
+                        cast(cp.Constraint, target[index] >= current_value),
+                    ]
+                )
+    cost_terms: list[cp.Expression] = []
+    for index, asset in enumerate(inputs.asset_order):
+        model = inputs.continuous_costs[asset]
+        delta_quantity = cp.abs(target[index] - current[index])
+        holding_quantity = cp.abs(target[index])
+        for component in model.components:
+            quantity = (
+                delta_quantity if component.basis is CostBasis.PHYSICAL_DELTA else holding_quantity
+            )
+            cost_terms.append(_piecewise_cost(component, quantity))
     objective = cp.Maximize(
-        forecast_value - turnover - holding - 1e-12 * _cp_sum_squares(target - requested)
+        float(inputs.gross_sleeve_value) * cp.sum(cp.multiply(alpha, target))  # pyright: ignore[reportUnknownMemberType]
+        - cp.sum(cost_terms)  # pyright: ignore[reportUnknownMemberType]
     )
     problem = cp.Problem(objective, constraints)
     try:
@@ -157,6 +135,72 @@ def _run_cvxpy(inputs: ContinuousTargetInputs) -> tuple[str, Sequence[float] | N
     return str(problem.status), tuple(float(value) for value in values)
 
 
+def _normalise_target(
+    values: Sequence[float],
+    inputs: ContinuousTargetInputs,
+) -> tuple[Decimal, ...]:
+    tolerance = max(
+        inputs.solver_policy.absolute_tolerance,
+        inputs.solver_policy.relative_tolerance,
+    )
+    result: list[Decimal] = []
+    for value, current, requested in zip(
+        values,
+        inputs.current_position,
+        inputs.requested_target,
+        strict=True,
+    ):
+        candidate = Decimal(str(value))
+        if not candidate.is_finite():
+            raise ValueError("solver target is non-finite")
+        scale = max(Decimal(1), abs(current), abs(requested))
+        threshold = tolerance * scale
+        if abs(candidate) <= threshold:
+            candidate = Decimal(0)
+        elif abs(candidate - current) <= threshold:
+            candidate = current
+        elif abs(candidate - requested) <= threshold:
+            candidate = requested
+        result.append(candidate)
+    return tuple(result)
+
+
+def _evaluate_costs(
+    target: tuple[Decimal, ...],
+    inputs: ContinuousTargetInputs,
+) -> tuple[dict[str, Any], Decimal, Decimal]:
+    states: dict[str, Any] = {}
+    total = Decimal(0)
+    financing = Decimal(0)
+    for index, asset in enumerate(inputs.asset_order):
+        state = inputs.continuous_costs[asset].evaluate(
+            current_quantity=inputs.current_position[index],
+            target_quantity=target[index],
+            decision_time=inputs.decision_time,
+        )
+        if (
+            state.current_quantity != inputs.current_position[index]
+            or state.target_quantity != target[index]
+            or state.decision_time != inputs.decision_time
+            or state.holding_interval != inputs.risk.horizon
+            or not state.complete
+        ):
+            raise ValueError("continuous model returned a mismatched or incomplete point state")
+        expected = state.require_total_reporting()
+        financing_component = next(
+            component
+            for component in state.components
+            if component.component is CostComponentKind.FINANCING
+        )
+        financing_amount = financing_component.reporting_amount
+        if financing_amount is None:
+            raise ValueError("financing cost reporting amount is required")
+        states[asset] = state
+        total += expected
+        financing += financing_amount
+    return states, total - financing, financing
+
+
 def _blocked(
     inputs: ContinuousTargetInputs,
     *,
@@ -173,6 +217,7 @@ def _blocked(
         solver_status=status,
         feasibility_residual=Decimal("0"),
         solver_policy_identity=inputs.solver_policy.semantic_identity,
+        expected_costs={},
         disposition=DecisionDisposition.BLOCKED,
         reason_codes=reasons,
     )
@@ -183,12 +228,7 @@ def solve_continuous_target(
     *,
     runner: SolverRunner | None = None,
 ) -> ContinuousTarget:
-    """Solve one continuous physical target or return an explicit blocked result.
-
-    The runner seam is intentionally small so tests can inject non-optimal,
-    inaccurate and infeasible outcomes without touching CVXPY.
-    """
-
+    """Solve and independently validate one continuous physical target."""
     solve = runner or _run_cvxpy
     try:
         status, values = solve(inputs)
@@ -196,50 +236,30 @@ def solve_continuous_target(
         return _blocked(inputs, status=SolverResultStatus.ERROR.value, reasons=("SOLVER_ERROR",))
     normalised_status = status.lower()
     if normalised_status != SolverResultStatus.OPTIMAL.value:
-        if "inaccurate" in normalised_status:
-            reason = "SOLVER_INACCURATE"
-        elif "infeasible" in normalised_status:
-            reason = "SOLVER_INFEASIBLE"
-        elif normalised_status in {"error", "solver_error"}:
-            reason = "SOLVER_ERROR"
-        else:
-            reason = "SOLVER_NON_OPTIMAL"
+        reason = (
+            "SOLVER_INACCURATE"
+            if "inaccurate" in normalised_status
+            else "SOLVER_INFEASIBLE"
+            if "infeasible" in normalised_status
+            else "SOLVER_ERROR"
+            if normalised_status in {"error", "solver_error"}
+            else "SOLVER_NON_OPTIMAL"
+        )
         return _blocked(inputs, status=status, reasons=(reason,))
     if values is None or len(values) != len(inputs.asset_order):
         return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID",))
     try:
-        target = tuple(Decimal(str(float(value))) for value in values)
-        if target != inputs.requested_target:
-            return _blocked(
-                inputs,
-                status=status,
-                reasons=("SOLVER_TARGET_COST_BINDING_MISMATCH",),
-            )
+        target = _normalise_target(values, inputs)
         feasible, residual, reasons = independent_continuous_feasibility(target, inputs)
+        if not feasible:
+            return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID", *reasons))
+        states, expected_total, expected_financing = _evaluate_costs(target, inputs)
     except (ArithmeticError, RuntimeError, TypeError, ValueError, OverflowError):
         return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID",))
-    if not feasible:
-        return _blocked(inputs, status=status, reasons=("SOLVER_RESULT_INVALID", *reasons))
     delta = tuple(
         target_value - current
         for target_value, current in zip(target, inputs.current_position, strict=True)
     )
-    expected_total = Decimal("0")
-    expected_financing = Decimal("0")
-    for asset in inputs.asset_order:
-        state = inputs.expected_costs[asset]
-        financing_amount = Decimal("0")
-        for component in state.components:
-            if component.component is CostComponentKind.FINANCING:
-                if component.reporting_amount is None:
-                    return _blocked(
-                        inputs,
-                        status=status,
-                        reasons=("MISSING_FINANCING_REPORTING_AMOUNT",),
-                    )
-                financing_amount += component.reporting_amount
-        expected_financing += financing_amount
-        expected_total += state.require_total_reporting() - financing_amount
     return ContinuousTarget(
         asset_order=inputs.asset_order,
         current_position=inputs.current_position,
@@ -250,8 +270,8 @@ def solve_continuous_target(
         solver_status=status,
         feasibility_residual=residual,
         solver_policy_identity=inputs.solver_policy.semantic_identity,
+        expected_costs=states,
     )
 
 
-# Explicit noun-first alias for application callers.
 construct_continuous_target = solve_continuous_target

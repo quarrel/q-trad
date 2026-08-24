@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -18,6 +18,7 @@ from math import isfinite
 from typing import Final, cast
 
 from qtrad.domain.economics import (
+    ContinuousCostModel,
     ExpectedCostState,
     GrossForecast,
     ProductEconomics,
@@ -651,9 +652,14 @@ class ContinuousTargetInputs:
     gross_sleeve_value: Decimal
     decision_time: datetime
     economics: Mapping[str, ProductEconomics]
-    expected_costs: Mapping[str, ExpectedCostState]
+    continuous_costs: Mapping[str, ContinuousCostModel]
     risk: RiskState
     solver_policy: SolverPolicy
+    # Legacy point states are retained only as an output/reference surface.  The
+    # optimiser never consumes them.
+    expected_costs: Mapping[str, ExpectedCostState] = field(
+        default_factory=lambda: dict[str, ExpectedCostState]()
+    )
 
     def __post_init__(self) -> None:
         ordered = tuple(sorted(self.asset_order))
@@ -678,26 +684,24 @@ class ContinuousTargetInputs:
             raise ValueError("target risk state order does not match target assets")
         if set(self.economics) != set(self.asset_order):
             raise ValueError("target economics keys do not match asset order")
-        if set(self.expected_costs) != set(self.asset_order):
+        if set(self.continuous_costs) != set(self.asset_order):
+            raise ValueError("target continuous-cost keys do not match asset order")
+        if self.expected_costs and set(self.expected_costs) != set(self.asset_order):
             raise ValueError("target expected-cost keys do not match asset order")
-        for index, asset in enumerate(self.asset_order):
+        for _index, asset in enumerate(self.asset_order):
             economics = self.economics[asset]
-            cost_state = self.expected_costs[asset]
+            model = self.continuous_costs[asset]
             eligibility = economics.eligibility(decision_time=self.decision_time)
             if not eligibility.eligible:
                 raise ValueError(f"asset {asset} economics are not eligible: {eligibility.reasons}")
-            if not cost_state.complete:
-                raise ValueError(f"asset {asset} expected cost is incomplete")
-            if cost_state.reporting_currency != economics.reporting_currency:
+            if model.asset_id != asset:
+                raise ValueError(f"asset {asset} continuous model identity mismatch")
+            if model.reporting_currency != economics.reporting_currency:
                 raise ValueError(f"asset {asset} cost reporting currency mismatch")
-            if cost_state.decision_time != self.decision_time:
-                raise ValueError(f"asset {asset} expected cost decision time mismatch")
-            if cost_state.current_quantity != self.current_position[index]:
-                raise ValueError(f"asset {asset} expected cost current quantity mismatch")
-            if cost_state.target_quantity != self.requested_target[index]:
-                raise ValueError(f"asset {asset} expected cost requested target mismatch")
-            if cost_state.holding_interval != self.risk.horizon:
-                raise ValueError(f"asset {asset} expected cost holding interval mismatch")
+            if model.horizon != self.risk.horizon:
+                raise ValueError(f"asset {asset} continuous cost horizon mismatch")
+            if model.horizon != ONE_HORIZON:
+                raise ValueError(f"asset {asset} continuous cost horizon must be 15m")
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +717,7 @@ class ContinuousTarget:
     solver_status: str
     feasibility_residual: Decimal
     solver_policy_identity: str
+    expected_costs: Mapping[str, ExpectedCostState]
     disposition: DecisionDisposition = DecisionDisposition.ACCEPTED
     reason_codes: tuple[str, ...] = ()
 
@@ -747,6 +752,18 @@ class ContinuousTarget:
                 "solver_status": self.solver_status,
                 "feasibility_residual": self.feasibility_residual,
                 "solver_policy_identity": self.solver_policy_identity,
+                "expected_costs": tuple(
+                    (
+                        asset,
+                        self.expected_costs[asset].target_quantity,
+                        self.expected_costs[asset].require_total_reporting()
+                        if self.expected_costs[asset].complete
+                        else None,
+                        self.expected_costs[asset].version,
+                    )
+                    for asset in self.asset_order
+                    if asset in self.expected_costs
+                ),
                 "disposition": self.disposition,
                 "reason_codes": self.reason_codes,
             }

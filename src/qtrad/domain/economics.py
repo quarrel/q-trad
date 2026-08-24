@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from math import floor
-from typing import Final
+from typing import Final, cast
 
 from qtrad.domain.time import require_utc
 
@@ -1053,3 +1054,257 @@ def _require_nonnegative(value: Decimal, field_name: str) -> None:
     _require_finite(value, field_name)
     if value < 0:
         raise ValueError(f"{field_name} must be non-negative")
+
+
+# R3.C continuous-cost model -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousCostComponent:
+    """A convex linear or piecewise-linear cost curve for one component."""
+
+    component: CostComponentKind
+    basis: CostBasis
+    native_currency: str
+    reporting_currency: str
+    conversion_rate: Decimal
+    conversion_source: str
+    conversion_version: str
+    slopes: tuple[Decimal, ...]
+    breakpoints: tuple[Decimal, ...] = ()
+    form: str = "LINEAR"
+    version: str = "r3c-continuous-cost-v1"
+    provenance: str = "declared"
+    status: InputStatus = InputStatus.AVAILABLE
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.component) is not CostComponentKind:
+            raise ValueError("continuous cost component is invalid")
+        if type(self.status) is not InputStatus:
+            raise ValueError("continuous cost status is invalid")
+        if self.basis not in (CostBasis.PHYSICAL_DELTA, CostBasis.PHYSICAL_HOLDING):
+            raise ValueError("continuous costs support only physical delta or holding basis")
+        if not self.native_currency or not self.reporting_currency:
+            raise ValueError("continuous cost currencies are required")
+        _finite_decimal(self.conversion_rate, "continuous conversion rate")
+        if self.conversion_rate <= 0:
+            raise ValueError("continuous conversion rate must be positive")
+        if not self.slopes:
+            raise ValueError("continuous cost slopes are required")
+        if self.form not in {"LINEAR", "PIECEWISE_LINEAR"}:
+            raise ValueError(f"unsupported continuous cost form: {self.form}")
+        if self.form == "LINEAR" and (self.breakpoints or len(self.slopes) != 1):
+            raise ValueError("linear cost form requires one slope and no breakpoints")
+        if len(self.slopes) != len(self.breakpoints) + 1:
+            raise ValueError("piecewise slopes must have one terminal slope")
+        previous = Decimal(0)
+        for breakpoint in self.breakpoints:
+            _finite_decimal(breakpoint, "continuous breakpoint")
+            if breakpoint <= previous:
+                raise ValueError("continuous breakpoints must increase")
+            previous = breakpoint
+        previous_slope = Decimal(0)
+        for slope in self.slopes:
+            _finite_decimal(slope, "continuous slope")
+            if slope < 0 or slope < previous_slope:
+                raise ValueError("continuous slopes must be non-negative and convex")
+            previous_slope = slope
+        if self.status in (InputStatus.MISSING, InputStatus.UNSUPPORTED) and not self.reason:
+            raise ValueError("missing or unsupported continuous cost requires a reason")
+        if self.status is InputStatus.DOCUMENTED_ZERO and any(self.slopes):
+            raise ValueError("documented-zero continuous cost must have zero slopes")
+
+    @property
+    def semantic_identity(self) -> str:
+        return _continuous_identity(
+            {
+                "component": self.component,
+                "basis": self.basis,
+                "native_currency": self.native_currency,
+                "reporting_currency": self.reporting_currency,
+                "conversion_rate": self.conversion_rate,
+                "conversion_source": self.conversion_source,
+                "conversion_version": self.conversion_version,
+                "slopes": self.slopes,
+                "breakpoints": self.breakpoints,
+                "form": self.form,
+                "version": self.version,
+                "provenance": self.provenance,
+                "status": self.status,
+                "reason": self.reason,
+            }
+        )
+
+    def evaluate(self, quantity: Decimal) -> Decimal:
+        """Evaluate native cost for a non-negative physical quantity."""
+        _finite_decimal(quantity, "continuous cost quantity")
+        if quantity < 0:
+            raise ValueError("continuous cost quantity must be non-negative")
+        remaining = quantity
+        lower = Decimal(0)
+        total = Decimal(0)
+        for upper, slope in zip(self.breakpoints, self.slopes[:-1], strict=True):
+            width = min(max(remaining - lower, Decimal(0)), upper - lower)
+            total += width * slope
+            lower = upper
+        total += max(remaining - lower, Decimal(0)) * self.slopes[-1]
+        return total
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousCostModel:
+    """Complete six-component convex cost model for one asset and horizon."""
+
+    asset_id: str
+    horizon: timedelta
+    reporting_currency: str
+    components: tuple[ContinuousCostComponent, ...]
+    version: str = "r3c-continuous-cost-v1"
+    provenance: str = "declared"
+
+    def __post_init__(self) -> None:
+        if not self.asset_id or self.horizon <= timedelta(0):
+            raise ValueError("continuous cost asset and horizon are required")
+        if not self.reporting_currency:
+            raise ValueError("continuous cost reporting currency is required")
+        if self.horizon != timedelta(minutes=15):
+            raise ValueError("R3.C continuous costs require a frozen 15m horizon")
+        if tuple(c.component for c in self.components) != _COMPONENT_ORDER:
+            raise ValueError("continuous costs must contain all six components canonically")
+        if len(set(c.component for c in self.components)) != len(self.components):
+            raise ValueError("continuous cost components must be unique")
+        for component in self.components:
+            if component.reporting_currency != self.reporting_currency:
+                raise ValueError("continuous component reporting currency mismatch")
+
+    @property
+    def semantic_identity(self) -> str:
+        return _continuous_identity(
+            {
+                "asset_id": self.asset_id,
+                "horizon": self.horizon,
+                "reporting_currency": self.reporting_currency,
+                "components": tuple(component.semantic_identity for component in self.components),
+                "version": self.version,
+                "provenance": self.provenance,
+            }
+        )
+
+    def component(self, kind: CostComponentKind) -> ContinuousCostComponent:
+        for component in self.components:
+            if component.component is kind:
+                return component
+        raise ValueError(f"continuous cost component missing: {kind.value}")
+
+    def evaluate(
+        self,
+        *,
+        current_quantity: Decimal,
+        target_quantity: Decimal,
+        decision_time: datetime,
+        internal_cross_quantity: Decimal = Decimal(0),
+    ) -> ExpectedCostState:
+        """Evaluate costs and bind a new complete point state to the final target."""
+        _finite_decimal(current_quantity, "continuous current quantity")
+        _finite_decimal(target_quantity, "continuous target quantity")
+        _finite_decimal(internal_cross_quantity, "continuous internal cross quantity")
+        if internal_cross_quantity < 0:
+            raise ValueError("continuous internal cross quantity must be non-negative")
+        require_utc(decision_time, "continuous cost decision time")
+        if any(
+            component.status in (InputStatus.MISSING, InputStatus.UNSUPPORTED)
+            for component in self.components
+        ):
+            raise ValueError("continuous cost model has missing or unsupported input")
+        delta = abs(target_quantity - current_quantity)
+        costs: list[ComponentCost] = []
+        for kind in _COMPONENT_ORDER:
+            model = self.component(kind)
+            quantity = delta if model.basis is CostBasis.PHYSICAL_DELTA else abs(target_quantity)
+            native_amount = model.evaluate(quantity)
+            reporting_amount = native_amount * model.conversion_rate
+            quantity_basis = quantity if model.basis is CostBasis.PHYSICAL_DELTA else None
+            holding_interval = self.horizon if model.basis is CostBasis.PHYSICAL_HOLDING else None
+            if model.status is InputStatus.DOCUMENTED_ZERO:
+                costs.append(
+                    ComponentCost.documented_zero(
+                        component=kind,
+                        basis=model.basis,
+                        currency=model.native_currency,
+                        reporting_currency=model.reporting_currency,
+                        version=model.version,
+                        provenance=model.provenance,
+                        conversion_rate=model.conversion_rate,
+                        conversion_source=model.conversion_source,
+                        conversion_version=model.conversion_version,
+                        quantity_basis=quantity_basis,
+                        holding_interval=holding_interval,
+                    )
+                )
+            else:
+                costs.append(
+                    ComponentCost.supported(
+                        component=kind,
+                        basis=model.basis,
+                        native_amount=native_amount,
+                        native_currency=model.native_currency,
+                        reporting_amount=reporting_amount,
+                        reporting_currency=model.reporting_currency,
+                        conversion_rate=model.conversion_rate,
+                        conversion_source=model.conversion_source,
+                        conversion_version=model.conversion_version,
+                        version=model.version,
+                        provenance=model.provenance,
+                        quantity_basis=quantity_basis,
+                        holding_interval=holding_interval,
+                    )
+                )
+        return ExpectedCostState(
+            decision_time=decision_time,
+            current_quantity=current_quantity,
+            target_quantity=target_quantity,
+            holding_interval=self.horizon,
+            reporting_currency=self.reporting_currency,
+            components=tuple(costs),
+            version=self.version,
+            provenance=self.provenance,
+            internal_cross_quantity=internal_cross_quantity,
+        )
+
+    evaluate_at = evaluate
+
+
+def _finite_decimal(value: Decimal, name: str) -> Decimal:
+    if type(value) is not Decimal or not value.is_finite():
+        raise ValueError(f"{name} must be a finite Decimal")
+    return value
+
+
+def _continuous_json(value: object) -> object:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, (tuple, list)):
+        sequence = cast(tuple[object, ...] | list[object], value)
+        return [_continuous_json(item) for item in sequence]
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {
+            str(key): _continuous_json(item)
+            for key, item in sorted(mapping.items(), key=lambda pair: str(pair[0]))
+        }
+    return value
+
+
+def _continuous_identity(value: object) -> str:
+    payload = json.dumps(
+        _continuous_json(value),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

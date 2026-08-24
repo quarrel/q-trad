@@ -9,6 +9,8 @@ from qtrad.application.r3_portfolio import solve_continuous_target
 from qtrad.domain.economics import (
     DEFAULT_SOLVER_POLICY,
     ComponentCost,
+    ContinuousCostComponent,
+    ContinuousCostModel,
     CostBasis,
     CostComponentKind,
     CostSchedule,
@@ -136,6 +138,42 @@ def _cost_state(
     )
 
 
+def _continuous_model(asset: str, unit_amount: str = "1") -> ContinuousCostModel:
+    components = tuple(
+        ContinuousCostComponent(
+            component=component,
+            basis=(
+                CostBasis.PHYSICAL_HOLDING
+                if component is CostComponentKind.FINANCING
+                else CostBasis.PHYSICAL_DELTA
+            ),
+            native_currency="AUD",
+            reporting_currency="AUD",
+            conversion_rate=Decimal("1"),
+            conversion_source="fixture-fx",
+            conversion_version="fx-v1",
+            slopes=(
+                (
+                    Decimal("1")
+                    if component is CostComponentKind.FINANCING
+                    else Decimal(unit_amount),
+                )
+            ),
+            version="continuous-v1",
+            provenance="fixture",
+        )
+        for component in CostComponentKind
+    )
+    return ContinuousCostModel(
+        asset_id=asset,
+        horizon=ONE_HORIZON,
+        reporting_currency="AUD",
+        components=components,
+        version="continuous-model-v1",
+        provenance="fixture",
+    )
+
+
 def _risk_state():
     config = RiskEstimatorConfig(
         horizon=ONE_HORIZON,
@@ -180,6 +218,7 @@ def _target_inputs(
         gross_sleeve_value=Decimal("100"),
         decision_time=NOW,
         economics={asset: _economics(asset) for asset in ASSETS},
+        continuous_costs={asset: _continuous_model(asset, unit_amount) for asset in ASSETS},
         expected_costs={
             asset: _cost_state(target=str(requested_target[index]), unit_amount=unit_amount)
             for index, asset in enumerate(ASSETS)
@@ -310,6 +349,7 @@ def test_zero_forecast_target_is_flat_and_missing_inputs_fail_closed() -> None:
             gross_sleeve_value=Decimal("100"),
             decision_time=NOW,
             economics={asset: _economics(asset) for asset in ASSETS},
+            continuous_costs={asset: _continuous_model(asset) for asset in ASSETS},
             expected_costs={"asset:a": _cost_state()},
             risk=_risk_state(),
             solver_policy=DEFAULT_SOLVER_POLICY,
@@ -353,26 +393,13 @@ def test_transition_binds_state_identity_and_zero_forecast() -> None:
         )
 
 
-def test_expected_cost_binding_and_final_target_mismatch_fail_closed() -> None:
-    inputs = _target_inputs()
-    mismatched_cost = inputs.expected_costs["asset:a"]
-    with pytest.raises(ValueError, match="requested target"):
-        ContinuousTargetInputs(
-            asset_order=inputs.asset_order,
-            current_position=inputs.current_position,
-            requested_target=(Decimal("2"), Decimal("0")),
-            alpha_return=inputs.alpha_return,
-            gross_sleeve_value=inputs.gross_sleeve_value,
-            decision_time=inputs.decision_time,
-            economics=inputs.economics,
-            expected_costs={**inputs.expected_costs, "asset:a": mismatched_cost},
-            risk=inputs.risk,
-            solver_policy=inputs.solver_policy,
-        )
-    blocked = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (2.0, 0.0)))
-    assert blocked.disposition is DecisionDisposition.BLOCKED
-    assert blocked.target_position == ()
-    assert "SOLVER_TARGET_COST_BINDING_MISMATCH" in blocked.reason_codes
+def test_native_target_not_bound_to_requested_cost_state() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    accepted = solve_continuous_target(inputs, runner=lambda inputs: ("optimal", (2.0, 0.0)))
+    assert accepted.disposition is DecisionDisposition.ACCEPTED
+    assert accepted.target_position == (Decimal("2"), Decimal("0"))
+    assert accepted.expected_costs["asset:a"].target_quantity == Decimal("2")
+    assert accepted.expected_costs["asset:a"].current_quantity == Decimal("0")
 
 
 def test_decimal_component_money_is_reconciled_without_float_artifact() -> None:
