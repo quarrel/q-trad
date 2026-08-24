@@ -780,6 +780,22 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
         lambda report: report["economic"]["configurations"]["linear_ridge"][
             "all_in_cost_sensitivity"
         ].pop(),
+        lambda report: report["statistical"]["candidates"][0]["execution_receipt"].__setitem__(
+            "role_binding", {"dataset_id": "bad"}
+        ),
+        lambda report: report["retained_parents"]["role_bindings"].__setitem__("UNKNOWN", {}),
+        lambda report: report["graph"]["tiny_learned_graph"]["algorithm"].__setitem__("unknown", 1),
+        lambda report: report["work"]["fit_executions"].__setitem__("unknown", 1),
+        lambda report: report["statistical"]["oof"]["prediction_mask"].pop(),
+        lambda report: report["result_classification"]["inconclusive"].append(
+            report["result_classification"]["negative"][0]
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"].__setitem__(
+            "turnover", -1.0
+        ),
+        lambda report: report["economic"]["configurations"]["linear_ridge"][
+            "all_in_cost_sensitivity"
+        ][0].__setitem__("cost", -1.0),
     ]
     for mutate in mutations:
         malformed = json.loads(result.canonical_json())

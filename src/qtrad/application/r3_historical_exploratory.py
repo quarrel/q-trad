@@ -763,6 +763,18 @@ def _strict_number(value: Any, label: str, *, nullable: bool = False) -> float |
     return value
 
 
+def _strict_role_binding(value: Any, label: str) -> Mapping[str, Any]:
+    binding = _strict_mapping(
+        value,
+        label,
+        frozenset({"dataset_id", "config_id", "wrapper_sha256"}),
+    )
+    _strict_hash(binding["dataset_id"], f"{label}.dataset_id")
+    _strict_hash(binding["config_id"], f"{label}.config_id")
+    _strict_hash(binding["wrapper_sha256"], f"{label}.wrapper_sha256")
+    return binding
+
+
 def _strict_receipt(value: Any, label: str, expected: frozenset[str]) -> Mapping[str, Any]:
     receipt = _strict_mapping(value, label)
     keys = frozenset(receipt)
@@ -775,7 +787,7 @@ def _strict_receipt(value: Any, label: str, expected: frozenset[str]) -> Mapping
     for key, item in receipt.items():
         if key == "role_binding":
             if item is not None:
-                _strict_mapping(item, f"{label}.role_binding")
+                _strict_role_binding(item, f"{label}.role_binding")
         elif key.endswith("_sha256"):
             _strict_hash(item, f"{label}.{key}")
         elif isinstance(item, bool):
@@ -846,7 +858,11 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
     view = _strict_mapping(value, label, keys)
     for key in ("gross_total", "gross_mean", "turnover"):
         _strict_number(view[key], f"{label}.{key}")
+    if view["turnover"] < 0:
+        raise FreezeError(f"renderer {label}.turnover must be non-negative")
     _strict_number(view["break_even_cost"], f"{label}.break_even_cost", nullable=True)
+    if view["break_even_cost"] is not None and view["break_even_cost"] < 0:
+        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
     sensitivity = _strict_sequence(
         view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
     )
@@ -855,6 +871,10 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
             item, f"{label}.all_in_cost_sensitivity[{index}]", _ECONOMIC_SENSITIVITY_KEYS
         )
         _strict_number(entry["cost"], f"{label}.all_in_cost_sensitivity[{index}].cost")
+        if entry["cost"] < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].cost must be non-negative"
+            )
         _strict_text(entry["unit"], f"{label}.all_in_cost_sensitivity[{index}].unit")
         _strict_number(
             entry["net_mean"], f"{label}.all_in_cost_sensitivity[{index}].net_mean", nullable=True
@@ -864,6 +884,11 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
             f"{label}.all_in_cost_sensitivity[{index}].break_even_cost",
             nullable=True,
         )
+        if entry["break_even_cost"] is not None and entry["break_even_cost"] < 0:
+            raise FreezeError(
+                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
+                "must be non-negative"
+            )
         _strict_text(entry["label"], f"{label}.all_in_cost_sensitivity[{index}].label")
     positions = _strict_sequence(view["position_trace"], f"{label}.position_trace")
     for index, item in enumerate(positions):
@@ -984,8 +1009,25 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         "retained_parents.terminal_authentication.report_byte_size",
         minimum=0,
     )
-    for key, value in retained["role_bindings"].items():
-        _strict_mapping(value, f"retained_parents.role_bindings.{key}")
+    role_bindings = retained["role_bindings"]
+    identity_bindings = config.document["retained_loader"]["identity_bindings"]
+    if role_bindings:
+        expected_roles = frozenset({"LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN"})
+        if frozenset(role_bindings) != expected_roles:
+            raise FreezeError("renderer retained role bindings differ from frozen role set")
+        expected_datasets = identity_bindings["dataset_ids"]
+        expected_configs = identity_bindings["config_ids"]
+        for role in sorted(expected_roles):
+            binding = _strict_role_binding(
+                role_bindings[role], f"retained_parents.role_bindings.{role}"
+            )
+            if (
+                binding["dataset_id"] != expected_datasets[role]
+                or binding["config_id"] != expected_configs[role]
+            ):
+                raise FreezeError(
+                    f"renderer retained role binding {role} differs from frozen identity"
+                )
     selection_keys = frozenset(
         {
             "outcome_blind",
@@ -1097,20 +1139,24 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         _strict_text(oof[key], f"statistical.oof.{key}")
     if oof["first_fit_evaluation_time"] is not None:
         _strict_text(oof["first_fit_evaluation_time"], "statistical.oof.first_fit_evaluation_time")
+    rows = _strict_integer(oof["rows"], "statistical.oof.rows", minimum=1)
     first_fit_mask = _strict_sequence(
-        oof["first_fit_prediction_mask"], "statistical.oof.first_fit_prediction_mask"
+        oof["first_fit_prediction_mask"], "statistical.oof.first_fit_prediction_mask", length=rows
     )
     if any(not isinstance(item, bool) for item in first_fit_mask):
         raise FreezeError(
             "renderer statistical.oof.first_fit_prediction_mask must contain booleans"
         )
-    _strict_integer(oof["rows"], "statistical.oof.rows", minimum=1)
     _strict_number(oof["mse"], "statistical.oof.mse")
     _strict_bool(oof["causal"], "statistical.oof.causal")
     _strict_number(oof["rank_correlation"], "statistical.oof.rank_correlation", nullable=True)
     _strict_number(oof["coverage"], "statistical.oof.coverage")
     _strict_integer(oof["support"], "statistical.oof.support", minimum=0)
-    _strict_sequence(oof["prediction_mask"], "statistical.oof.prediction_mask")
+    prediction_mask = _strict_sequence(
+        oof["prediction_mask"], "statistical.oof.prediction_mask", length=rows
+    )
+    if any(not isinstance(item, bool) for item in prediction_mask):
+        raise FreezeError("renderer statistical.oof.prediction_mask must contain booleans")
     folds = _strict_sequence(oof["folds"], "statistical.oof.folds")
     for index, fold in enumerate(folds):
         item = _strict_mapping(
@@ -1193,7 +1239,15 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         ),
     )
     _strict_text(tiny["model"], "graph.tiny_learned_graph.model")
-    _strict_mapping(tiny["algorithm"], "graph.tiny_learned_graph.algorithm")
+    algorithm = _strict_mapping(
+        tiny["algorithm"],
+        "graph.tiny_learned_graph.algorithm",
+        frozenset(config.document["algorithms"]["graph"]),
+    )
+    if json.dumps(_thaw_value(algorithm), sort_keys=True, separators=(",", ":")) != json.dumps(
+        _thaw_value(config.document["algorithms"]["graph"]), sort_keys=True, separators=(",", ":")
+    ):
+        raise FreezeError("renderer graph tiny algorithm differs from frozen algorithm schema")
     _strict_bool(tiny["feasibility_only"], "graph.tiny_learned_graph.feasibility_only")
     for key in ("layers", "hidden_units", "fits", "walk_forward_fit_executions"):
         _strict_integer(tiny[key], f"graph.tiny_learned_graph.{key}", minimum=0)
@@ -1211,6 +1265,27 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     expected_graph_control_ids = frozenset(item["id"] for item in config.document["graph_controls"])
     if graph_control_ids != expected_graph_control_ids:
         raise FreezeError("renderer graph control IDs differ from frozen controls")
+    metric_outputs = [*candidates, *controls, tiny, *graph_controls]
+    for metric in metric_outputs:
+        if len(metric["prediction_trace"]) != rows:
+            raise FreezeError(
+                f"renderer metric {metric['id']} prediction trace is not aligned with OOF rows"
+            )
+        if len(metric["prediction_mask"]) != rows:
+            raise FreezeError(
+                f"renderer metric {metric['id']} prediction mask is not aligned with OOF rows"
+            )
+    expected_role_pairs = {
+        (identity_bindings["dataset_ids"][role], identity_bindings["config_ids"][role])
+        for role in ("LOCAL_RIDGE", "POOLED_LOCAL_RIDGE", "ZERO_RETURN")
+    }
+    for metric in metric_outputs:
+        role_binding = metric["execution_receipt"].get("role_binding")
+        if (
+            role_binding is not None
+            and (role_binding["dataset_id"], role_binding["config_id"]) not in expected_role_pairs
+        ):
+            raise FreezeError(f"renderer metric {metric['id']} has an unknown role binding")
     _strict_bool(graph["r4_replacement_required"], "graph.r4_replacement_required")
     work = _strict_mapping(
         report["work"],
@@ -1232,9 +1307,13 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     for key in ("rows", "candidate_count", "fit_count", "graph_fit_count", "graph_control_count"):
         _strict_integer(work[key], f"work.{key}", minimum=0)
     fit_executions = _strict_mapping(work["fit_executions"], "work.fit_executions")
+    expected_fit_ids = candidate_ids | frozenset({"pooled_local_ridge", "tiny_learned_graph"})
+    if frozenset(fit_executions) != expected_fit_ids:
+        raise FreezeError("renderer work.fit_executions differs from frozen execution set")
     for key, value in fit_executions.items():
-        _strict_text(key, "work.fit_executions key")
         _strict_integer(value, f"work.fit_executions.{key}", minimum=0)
+    if sum(fit_executions.values()) != work["fit_count"]:
+        raise FreezeError("renderer work.fit_executions does not reconcile fit_count")
     _strict_bool(work["within_hard_limits"], "work.within_hard_limits")
     limits = _strict_mapping(work["limits"], "work.limits")
     if json.dumps(_thaw_value(limits), sort_keys=True, separators=(",", ":")) != json.dumps(
@@ -1251,10 +1330,22 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         "result_classification",
         frozenset({"negative", "failed", "inconclusive"}),
     )
-    for key in classification:
+    seen_classified: set[str] = set()
+    expected_statuses = {"negative": "NEGATIVE", "failed": "FAILED", "inconclusive": "INCONCLUSIVE"}
+    metric_statuses = {item["id"]: item["status"] for item in metric_outputs}
+    for key, expected_status in expected_statuses.items():
         values = _strict_sequence(classification[key], f"result_classification.{key}")
+        local_ids: set[str] = set()
         for index, item in enumerate(values):
-            _strict_text(item, f"result_classification.{key}[{index}]")
+            identifier = _strict_text(item, f"result_classification.{key}[{index}]")
+            if identifier in local_ids or identifier in seen_classified:
+                raise FreezeError("renderer result classification is not disjoint")
+            if metric_statuses.get(identifier) != expected_status:
+                raise FreezeError("renderer result classification status mismatch")
+            local_ids.add(identifier)
+            seen_classified.add(identifier)
+    if seen_classified != set(metric_statuses):
+        raise FreezeError("renderer result classification is not a complete metric partition")
     _strict_text(report["create_only_destination"], "create_only_destination")
     _strict_bool(report["no_post_result_expansion"], "no_post_result_expansion")
 
