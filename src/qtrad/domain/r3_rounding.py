@@ -145,16 +145,17 @@ class RepairedSleeveAttribution:
     internal_cross_quantity: Decimal
     external_delta_share: Decimal
     reason_codes: tuple[str, ...] = ()
+    repair_delta: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         _finite_decimal(self.requested_delta, "attribution requested delta")
         _finite_decimal(self.internal_cross_quantity, "attribution internal cross quantity")
         _finite_decimal(self.external_delta_share, "attribution external delta share")
+        _finite_decimal(self.repair_delta, "attribution repair delta")
         if self.internal_cross_quantity < 0:
             raise ValueError("attribution internal cross quantity must be non-negative")
-        if abs(self.external_delta_share) + self.internal_cross_quantity != abs(
-            self.requested_delta
-        ):
+        original_external = self.external_delta_share - self.repair_delta
+        if abs(original_external) + self.internal_cross_quantity != abs(self.requested_delta):
             raise ValueError("repaired sleeve attribution does not reconcile requested delta")
         object.__setattr__(self, "reason_codes", order_reason_codes(self.reason_codes))
         if any(code not in REASON_CODE_ORDER for code in self.reason_codes):
@@ -232,8 +233,8 @@ class RoundedTarget:
             raise ValueError("rounded target physical delta does not reconcile")
         if self.netting.asset_order != self.asset_order:
             raise ValueError("rounded target netting does not match asset order")
-        if not blocked_empty and self.netting.external_deltas != self.physical_delta:
-            raise ValueError("rounded target netting does not reconcile physical delta")
+        if not blocked_empty and not self.netting.external_deltas:
+            raise ValueError("rounded target netting has no external delta vector")
         if type(self.attributions) is not tuple:
             raise ValueError("rounded target attributions must be a tuple")
         if blocked_empty and self.attributions:
@@ -246,6 +247,7 @@ class RoundedTarget:
                 raise ValueError("rounded target attributions must be canonical")
             if len({item.key for item in self.attributions}) != len(self.attributions):
                 raise ValueError("rounded target attributions must be unique")
+            parent_sleeves = {item.key: item for item in self.netting.sleeves}
             for asset_index, asset in enumerate(self.asset_order):
                 asset_attributions = tuple(
                     item for item in self.attributions if item.key.asset_id == asset
@@ -267,6 +269,19 @@ class RoundedTarget:
                     (item.internal_cross_quantity for item in asset_attributions), Decimal("0")
                 ) != netted_asset.internal_cross_quantity * Decimal("2"):
                     raise ValueError("rounded target internal cross does not reconcile")
+                for item in asset_attributions:
+                    parent = parent_sleeves.get(item.key)
+                    if parent is None:
+                        raise ValueError("rounded target attribution key is not in parent netting")
+                    if (
+                        item.requested_delta != parent.requested_delta
+                        or item.internal_cross_quantity != parent.internal_cross_quantity
+                        or item.external_delta_share - item.repair_delta
+                        != parent.external_delta_share
+                    ):
+                        raise ValueError(
+                            "rounded target attribution does not preserve parent netting"
+                        )
         if type(self.disposition) is not RoundingDisposition:
             raise ValueError("rounded target disposition is invalid")
         object.__setattr__(self, "reason_codes", order_reason_codes(self.reason_codes))
@@ -356,6 +371,7 @@ class RoundedTarget:
                             item.requested_delta,
                             item.internal_cross_quantity,
                             item.external_delta_share,
+                            item.repair_delta,
                             item.reason_codes,
                         )
                         for item in self.attributions

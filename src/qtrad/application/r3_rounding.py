@@ -8,11 +8,9 @@ from typing import Final
 
 from qtrad.domain.economics import CostComponentKind, ExpectedCostState, ProductEconomics
 from qtrad.domain.portfolio import (
-    AssetNetting,
     ContinuousTarget,
     ContinuousTargetInputs,
     NettingResult,
-    SleeveAttribution,
 )
 from qtrad.domain.r3_rounding import (
     REASON_CODE_VERSION,
@@ -50,9 +48,28 @@ def _decimal(value: object, name: str) -> Decimal:
 
 
 def _normalise_reason(reason: str) -> str:
-    if reason == "ZERO_FORECAST_NEW_EXPOSURE":
-        return RoundingReasonCode.ZERO_FORECAST_NEW_EXPOSURE_BLOCKED.value
-    return reason
+    value = reason.upper()
+    mapping = {
+        "ZERO_FORECAST_NEW_EXPOSURE": RoundingReasonCode.ZERO_FORECAST_NEW_EXPOSURE_BLOCKED.value,
+        "SOLVER_INACCURATE": RoundingReasonCode.SOLVER_NON_OPTIMAL.value,
+        "SOLVER_NON_OPTIMAL": RoundingReasonCode.SOLVER_NON_OPTIMAL.value,
+        "SOLVER_ERROR": RoundingReasonCode.SOLVER_ERROR.value,
+        "SOLVER_INFEASIBLE": RoundingReasonCode.SOLVER_INFEASIBLE.value,
+        "SOLVER_RESULT_INVALID": RoundingReasonCode.SOLVER_RESULT_INVALID.value,
+        "ASSET_CAP": RoundingReasonCode.ASSET_CAP_REPAIR.value,
+        "GROSS_CAP": RoundingReasonCode.GROSS_CAP_REPAIR.value,
+        "NET_CAP": RoundingReasonCode.NET_CAP_REPAIR.value,
+        "CONCENTRATION_CAP": RoundingReasonCode.CONCENTRATION_CAP_REPAIR.value,
+        "GROUP_CAP": RoundingReasonCode.GROUP_CAP_REPAIR.value,
+        "CURRENCY_CAP": RoundingReasonCode.CURRENCY_CAP_REPAIR.value,
+        "PORTFOLIO_RISK_CAP": RoundingReasonCode.PORTFOLIO_RISK_REPAIR.value,
+    }
+    return mapping.get(
+        value,
+        value
+        if value in {item.value for item in RoundingReasonCode}
+        else RoundingReasonCode.DECISION_BLOCKED.value,
+    )
 
 
 def _reason_for_input(reason: str) -> str:
@@ -78,7 +95,6 @@ def _violations(
     risk = inputs.risk
     try:
         floats = tuple(float(value) for value in values)
-        tolerance = max(risk.finite_tolerance, float(inputs.solver_policy.absolute_tolerance))
         residuals: list[tuple[str, Decimal]] = []
         asset_residual = max(
             (abs(value) - cap for value, cap in zip(floats, risk.caps.asset_caps, strict=True)),
@@ -123,9 +139,7 @@ def _violations(
                 Decimal(str(max(risk.portfolio_risk(floats) - risk.caps.portfolio_risk_cap, 0.0))),
             )
         )
-        return tuple(
-            (name, residual) for name, residual in residuals if residual > Decimal(str(tolerance))
-        )
+        return tuple((name, residual) for name, residual in residuals if residual > Decimal("0"))
     except (ArithmeticError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("risk validation failed") from exc
 
@@ -152,6 +166,7 @@ def _repair(
         for name, _ in violations:
             reasons.add(_REASON_CAPS_BY_NAME[name])
         candidates: list[tuple[tuple[Decimal, ...], int, list[Decimal]]] = []
+        quantity_blocked = False
         for index, value in enumerate(values):
             if value == 0:
                 continue
@@ -159,6 +174,9 @@ def _repair(
             increment = inputs.economics[asset].quantity_increment
             trial = list(values)
             trial[index] = _reduce_one(value, increment)
+            if not _quantity_valid(trial[index], inputs.economics[asset]):
+                quantity_blocked = True
+                continue
             try:
                 trial_violations = _violations(trial, inputs)
             except ValueError:
@@ -169,6 +187,8 @@ def _repair(
             )
             candidates.append((score, index, trial))
         if not candidates:
+            if quantity_blocked:
+                reasons.add(RoundingReasonCode.MINIMUM_QUANTITY_NOT_MET.value)
             break
         _, _, values = min(candidates, key=lambda item: (item[0], item[1]))
         repaired = True
@@ -179,76 +199,55 @@ def _repaired_attributions(
     netting: NettingResult,
     final_delta: Sequence[Decimal],
     reasons: set[str],
-) -> tuple[tuple[RepairedSleeveAttribution, ...], tuple[AssetNetting, ...], Decimal]:
+) -> tuple[tuple[RepairedSleeveAttribution, ...], Decimal]:
     attributions: list[RepairedSleeveAttribution] = []
-    assets: list[AssetNetting] = []
     residual = Decimal("0")
     for asset_index, asset_item in enumerate(netting.assets):
         final = final_delta[asset_index]
         original = asset_item.attributions
         if not original:
+            residual += abs(final)
+            continue
+        parent_external = sum((item.external_delta_share for item in original), Decimal("0"))
+        if parent_external == 0:
             if final != 0:
                 residual += abs(final)
-            assets.append(AssetNetting(asset_item.asset_id, final, final, Decimal("0"), ()))
-            continue
-        requested = asset_item.requested_delta
-        if requested != 0:
-            factor = final / requested
             for item in original:
                 attributions.append(
                     RepairedSleeveAttribution(
                         item.key,
-                        item.requested_delta * factor,
-                        item.internal_cross_quantity * abs(factor),
-                        item.external_delta_share * factor,
-                        (RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value,)
-                        if final != asset_item.external_delta
-                        else (),
-                    )
-                )
-        elif final == 0:
-            for item in original:
-                attributions.append(
-                    RepairedSleeveAttribution(item.key, Decimal("0"), Decimal("0"), Decimal("0"))
-                )
-        else:
-            first = True
-            for item in original:
-                share = final if first else Decimal("0")
-                first = False
-                attributions.append(RepairedSleeveAttribution(item.key, share, Decimal("0"), share))
-            reasons.add(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value)
-        asset_attrs = tuple(
-            item for item in attributions if item.key.asset_id == asset_item.asset_id
-        )
-        internal = sum(
-            (item.internal_cross_quantity for item in asset_attrs), Decimal("0")
-        ) / Decimal("2")
-        assets.append(
-            AssetNetting(
-                asset_item.asset_id,
-                final,
-                final,
-                internal,
-                tuple(
-                    SleeveAttribution(
-                        item.key,
                         item.requested_delta,
                         item.internal_cross_quantity,
                         item.external_delta_share,
+                        repair_delta=Decimal("0"),
                     )
-                    for item in asset_attrs
-                ),
+                )
+            continue
+        factor = final / parent_external
+        changed = final != parent_external
+        if changed:
+            reasons.add(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value)
+        for item in original:
+            external = item.external_delta_share * factor
+            attributions.append(
+                RepairedSleeveAttribution(
+                    item.key,
+                    item.requested_delta,
+                    item.internal_cross_quantity,
+                    external,
+                    repair_delta=external - item.external_delta_share,
+                    reason_codes=(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value,)
+                    if changed
+                    else (),
+                )
             )
-        )
     ordered = tuple(sorted(attributions, key=lambda item: item.key.canonical_tuple))
-    if any(item.external_delta_share for item in ordered):
-        expected = sum(final_delta, Decimal("0"))
-        actual = sum((item.external_delta_share for item in ordered), Decimal("0"))
-        residual += abs(expected - actual)
+    expected = sum(final_delta, Decimal("0"))
+    actual = sum((item.external_delta_share for item in ordered), Decimal("0"))
+    residual += abs(expected - actual)
     if residual:
         reasons.add(RoundingReasonCode.ATTRIBUTION_RESIDUAL_REPAIRED.value)
-    return ordered, tuple(assets), residual
+    return ordered, residual
 
 
 def _blocked(
@@ -292,6 +291,8 @@ def round_and_repair_target(
     """Convert one continuous target to a valid Decimal target or fail closed."""
     selected_policy = policy or RoundingPolicy()
     reasons: set[str] = {_normalise_reason(reason) for reason in target.reason_codes}
+    if RoundingReasonCode.DECISION_BLOCKED.value in reasons:
+        return _blocked(target, inputs, selected_policy, reasons)
     try:
         if target.asset_order != inputs.asset_order:
             raise ValueError("target and input asset order mismatch")
@@ -353,9 +354,17 @@ def round_and_repair_target(
             reasons.add(RoundingReasonCode.CURRENT_POSITION_PROJECTED.value)
         try:
             values, repaired = _repair(values, inputs, reasons, selected_policy)
-            if _violations(values, inputs):
+            for index, asset in enumerate(inputs.asset_order):
+                if not _quantity_valid(values[index], inputs.economics[asset]):
+                    reasons.add(RoundingReasonCode.MINIMUM_QUANTITY_NOT_MET.value)
+                    return _blocked(target, inputs, selected_policy, reasons)
+            violations = _violations(values, inputs)
+            if violations:
+                for name, _ in violations:
+                    reasons.add(_REASON_CAPS_BY_NAME[name])
                 reasons.add(RoundingReasonCode.DECISION_BLOCKED.value)
                 return _blocked(target, inputs, selected_policy, reasons)
+            inputs.risk.validate_position(tuple(float(value) for value in values))
         except (ArithmeticError, AttributeError, TypeError, ValueError, OverflowError):
             reasons.add(RoundingReasonCode.INPUT_RISK_INVALID.value)
             return _blocked(target, inputs, selected_policy, reasons)
@@ -374,7 +383,7 @@ def round_and_repair_target(
             reasons.add(RoundingReasonCode.INPUT_ECONOMICS_MISSING.value)
             return _blocked(target, inputs, selected_policy, reasons)
         try:
-            attributions, assets, residual = _repaired_attributions(
+            attributions, residual = _repaired_attributions(
                 inputs.netting,
                 tuple(values[i] - current[i] for i in range(len(values))),
                 reasons,
@@ -385,20 +394,6 @@ def round_and_repair_target(
             return _blocked(target, inputs, selected_policy, reasons)
         if residual:
             return _blocked(target, inputs, selected_policy, reasons)
-        final_netting = NettingResult(
-            inputs.source_class,
-            inputs.evidence_purpose,
-            assets,
-            tuple(
-                SleeveAttribution(
-                    item.key,
-                    item.requested_delta,
-                    item.internal_cross_quantity,
-                    item.external_delta_share,
-                )
-                for item in attributions
-            ),
-        )
         expected_costs: dict[str, ExpectedCostState] = {}
         expected_cost = Decimal("0")
         expected_financing = Decimal("0")
@@ -408,7 +403,7 @@ def round_and_repair_target(
                 current_quantity=current[index],
                 target_quantity=target_values[index],
                 decision_time=inputs.decision_time,
-                internal_cross_quantity=final_netting.assets[index].internal_cross_quantity,
+                internal_cross_quantity=inputs.netting.assets[index].internal_cross_quantity,
             )
             if not state.complete:
                 raise ValueError("cost state is incomplete")
@@ -436,7 +431,7 @@ def round_and_repair_target(
             expected_costs=expected_costs,
             expected_cost_reporting=expected_cost,
             expected_financing_reporting=expected_financing,
-            netting=final_netting,
+            netting=inputs.netting,
             attributions=attributions,
             policy_identity=selected_policy.semantic_identity,
             decision_input_identity=inputs.decision_input_identity,

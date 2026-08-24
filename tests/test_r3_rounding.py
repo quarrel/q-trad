@@ -10,7 +10,7 @@ from test_r3_portfolio import _key, _netting_for, _target_inputs
 
 from qtrad.application.r3_portfolio import solve_continuous_target
 from qtrad.application.r3_rounding import round_and_repair_target
-from qtrad.domain.economics import SessionState
+from qtrad.domain.economics import ImpactDisposition, SessionState
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.portfolio import AssetNetting, NettingResult, SleeveAttribution
 from qtrad.domain.r3_rounding import RoundingDisposition, RoundingPolicy, RoundingReasonCode
@@ -100,11 +100,13 @@ def test_internal_cross_and_attribution_totals_are_exact() -> None:
         netting=netting,
     )
     result = round_and_repair_target(_target(inputs, (0.0, 0.0)), inputs)
-    assert result.netting.internal_cross_quantity == Decimal("0")
+    assert result.netting.internal_cross_quantity == Decimal("2")
     assert sum(
         (item.external_delta_share for item in result.attributions), Decimal("0")
     ) == Decimal("0")
-    assert result.attributions[0].requested_delta == Decimal("0")
+    assert result.attributions[0].requested_delta == Decimal("2")
+    assert result.attributions[1].requested_delta == Decimal("-2")
+    assert all(item.repair_delta == Decimal("0") for item in result.attributions)
 
 
 def test_permuted_reason_replay_and_identity_are_frozen() -> None:
@@ -201,3 +203,147 @@ def test_invalid_risk_fails_closed_without_partial_target() -> None:
     result = round_and_repair_target(target, inputs)
     assert result.disposition is RoundingDisposition.BLOCKED
     assert RoundingReasonCode.INPUT_RISK_INVALID.value in result.reason_codes
+
+
+def _risk_replaced(inputs, *, caps: RiskCaps, **fields):
+    risk = replace(
+        inputs.risk,
+        caps=caps,
+        semantic_identity=None,
+        closure_identity=None,
+        provenance_identity=None,
+        **fields,
+    )
+    object.__setattr__(inputs, "risk", risk)
+    return inputs
+
+
+@pytest.mark.parametrize(
+    ("name", "requested", "caps", "fields"),
+    [
+        (
+            "asset",
+            (Decimal("5"), Decimal("0")),
+            RiskCaps((2.0, 10.0), 20.0, 20.0, 1.0, 20.0),
+            {},
+        ),
+        (
+            "gross",
+            (Decimal("3"), Decimal("3")),
+            RiskCaps((10.0, 10.0), 2.0, 20.0, 1.0, 20.0),
+            {},
+        ),
+        (
+            "net",
+            (Decimal("3"), Decimal("0")),
+            RiskCaps((10.0, 10.0), 20.0, 2.0, 1.0, 20.0),
+            {},
+        ),
+        (
+            "concentration",
+            (Decimal("3"), Decimal("1")),
+            RiskCaps((10.0, 10.0), 20.0, 20.0, 0.5, 20.0),
+            {},
+        ),
+        (
+            "group",
+            (Decimal("3"), Decimal("0")),
+            RiskCaps((10.0, 10.0), 20.0, 20.0, 1.0, 20.0, group_caps=(2.0,)),
+            {
+                "group_keys": ("all",),
+                "group_exposure_matrix": ((1.0, 1.0),),
+                "group_caps": (2.0,),
+            },
+        ),
+        (
+            "currency",
+            (Decimal("3"), Decimal("0")),
+            RiskCaps((10.0, 10.0), 20.0, 20.0, 1.0, 20.0, currency_caps=(2.0,)),
+            {
+                "currency_keys": ("AUD",),
+                "currency_exposure_matrix": ((1.0, 1.0),),
+                "currency_caps": (2.0,),
+            },
+        ),
+        (
+            "risk",
+            (Decimal("3"), Decimal("3")),
+            RiskCaps((10.0, 10.0), 20.0, 20.0, 1.0, 0.0001),
+            {},
+        ),
+    ],
+)
+def test_every_coupled_cap_repairs_without_over_cap(
+    name: str,
+    requested: tuple[Decimal, Decimal],
+    caps: RiskCaps,
+    fields: dict[str, object],
+) -> None:
+    del name
+    inputs = _target_inputs(requested_target=requested)
+    capped = _risk_replaced(inputs, caps=caps, **fields)
+    result = round_and_repair_target(
+        _target(capped, tuple(float(value) for value in requested)), capped
+    )
+    if result.disposition is not RoundingDisposition.BLOCKED:
+        capped.risk.validate_position(tuple(float(value) for value in result.target_position))
+    assert not result.target_position or result.disposition is not RoundingDisposition.BLOCKED
+
+
+def test_repair_rejects_below_minimum_quantity() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("7"), Decimal("0")))
+    target = _target(inputs, (7.0, 0.0))
+    economics = dict(inputs.economics)
+    economics["asset:a"] = replace(
+        economics["asset:a"], minimum_quantity=Decimal("5"), quantity_increment=Decimal("1")
+    )
+    object.__setattr__(inputs, "economics", economics)
+    capped = _risk_replaced(
+        inputs,
+        caps=RiskCaps((2.0, 10.0), 20.0, 20.0, 1.0, 20.0),
+    )
+    result = round_and_repair_target(target, capped)
+    assert result.disposition is RoundingDisposition.BLOCKED
+    assert not result.target_position
+    assert RoundingReasonCode.MINIMUM_QUANTITY_NOT_MET.value in result.reason_codes
+
+
+def test_parent_solver_reasons_are_normalised_to_r3d() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1"), Decimal("0")))
+    target = _target(inputs, (1.0, 0.0))
+    object.__setattr__(
+        target,
+        "reason_codes",
+        ("SOLVER_INACCURATE", "ASSET_CAP", "unrecognised-parent-reason"),
+    )
+    result = round_and_repair_target(target, inputs)
+    assert result.disposition is RoundingDisposition.BLOCKED
+    assert RoundingReasonCode.SOLVER_NON_OPTIMAL.value in result.reason_codes
+    assert RoundingReasonCode.ASSET_CAP_REPAIR.value in result.reason_codes
+    assert RoundingReasonCode.DECISION_BLOCKED.value in result.reason_codes
+
+
+def test_strict_cap_repair_handles_sub_tolerance_excess() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("1.000000001"), Decimal("0")))
+    capped = _risk_replaced(
+        inputs,
+        caps=RiskCaps((1.0, 10.0), 20.0, 20.0, 1.0, 20.0),
+    )
+    result = round_and_repair_target(_target(capped, (1.000000001, 0.0)), capped)
+    assert result.target_position == (Decimal("1"), Decimal("0"))
+    capped.risk.validate_position((1.0, 0.0))
+
+
+def test_impact_quantity_cap_fails_closed_without_partial_target() -> None:
+    inputs = _target_inputs(requested_target=(Decimal("3"), Decimal("0")))
+    economics = dict(inputs.economics)
+    economics["asset:a"] = replace(
+        economics["asset:a"],
+        impact_disposition=ImpactDisposition.CAPPED_NO_IMPACT_RANGE,
+        impact_max_quantity=Decimal("1"),
+    )
+    object.__setattr__(inputs, "economics", economics)
+    result = round_and_repair_target(_target(inputs, (3.0, 0.0)), inputs)
+    assert result.disposition is RoundingDisposition.BLOCKED
+    assert not result.target_position
+    assert RoundingReasonCode.ASSET_PAPER_INELIGIBLE.value in result.reason_codes
