@@ -87,6 +87,7 @@ services:
       - qtrad-venv:/workspace/.venv
     networks:
       - qtrad-dev
+    gpus: all
 
 networks:
   qtrad-dev:
