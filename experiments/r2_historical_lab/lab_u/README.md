@@ -11,8 +11,8 @@ uv run -m experiments.r2_historical_lab.lab_u.universe run --config experiments/
 ```
 
 Configuration: [universe-config.json](universe-config.json). Authoritative corrected output:
-`/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2`. See [RESULTS.md](RESULTS.md) and
-[LAB-U-RETRY-AUDIT.md](LAB-U-RETRY-AUDIT.md).
+`/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2`. See [RESULTS.md](RESULTS.md),
+[LAB-U-Report.md](LAB-U-Report.md), and [LAB-U-RETRY-AUDIT.md](LAB-U-RETRY-AUDIT.md).
 
 The corrected implementation admits only chronological, horizon-mature pre-terminal targets.
 Finalists were selected from `DEV_1` through `DEV_3` before one explicitly post-hoc terminal

@@ -11,8 +11,8 @@ uv run -m experiments.r2_historical_lab.lab_t.tabular --help
 ```
 
 Configuration: [tabular-config.json](tabular-config.json). Historical corrected output:
-`/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1`. See [RESULTS.md](RESULTS.md) and
-[LAB-T-REMEDIATION.md](LAB-T-REMEDIATION.md).
+`/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1`. See [RESULTS.md](RESULTS.md),
+[LAB-T-Report.md](LAB-T-Report.md), and [LAB-T-REMEDIATION.md](LAB-T-REMEDIATION.md).
 
 The rejected first attempt was never used for selection and was removed after its state and hashes
 were compacted into the corrected output's `failed-attempts.jsonl`. No nonlinear finalist
