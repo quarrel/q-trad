@@ -1593,3 +1593,99 @@ def test_native_marker_wrapper_accounting_is_exact_and_bounded(
     monkeypatch.setattr(implementation, "_open_json_document", reject_marker_read)
     with pytest.raises(FreezeError, match="read_operations"):
         implementation.load_fixture_rows(fixture_rows, config)
+
+
+@pytest.mark.parametrize("field", ("instrument_id", "decision_time", "target_horizon_seconds"))
+def test_native_opportunity_identity_matches_target(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        actual_locators = dict(locators)
+        manifest_path = Path(actual_locators["target_source"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        reference = manifest["opportunity_parts"][0]
+        part_path = manifest_path.parent / reference["path"]
+        envelope = json.loads(part_path.read_text(encoding="utf-8"))
+        row = envelope["rows"][0]
+        if field == "instrument_id":
+            row[field] = next(
+                instrument for instrument in implementation._TARGET_IDS if instrument != row[field]
+            )
+        elif field == "decision_time":
+            row[field] = "2099-01-01T00:00:00Z"
+        else:
+            row[field] = 901
+        encoded = implementation._canonical_bytes(envelope)
+        part_path.write_bytes(encoded)
+        reference["sha256"] = hashlib.sha256(encoded).hexdigest()
+        manifest["closure_id"] = implementation._native_source_closure(manifest)
+        manifest_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("orphan_file", "orphan_directory", "orphan_symlink", "ancestor_symlink", "declared_symlink"),
+)
+def test_native_outcome_parts_tree_rejects_undeclared_and_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    manifest_path = real_parent / "outcome-evidence.json"
+    root = real_parent / "outcome-evidence.json.parts"
+    root.mkdir()
+    part = root / "part-000000.json"
+    part.write_bytes(b"part")
+    references: list[Mapping[str, Any]] = [
+        {
+            "path": "outcome-evidence.json.parts/part-000000.json",
+            "sha256": hashlib.sha256(b"part").hexdigest(),
+            "row_count": 1,
+            "part_index": 0,
+        }
+    ]
+    if mutation == "orphan_file":
+        (root / "orphan.json").write_text("orphan", encoding="utf-8")
+
+        def forbidden_is_file(_path: Path) -> bool:
+            raise AssertionError("orphan stat")
+
+        monkeypatch.setattr(Path, "is_file", forbidden_is_file)
+    elif mutation == "orphan_directory":
+        (root / "orphan").mkdir()
+    elif mutation == "orphan_symlink":
+        target = tmp_path / "symlink-target"
+        target.write_text("target", encoding="utf-8")
+        (root / "orphan").symlink_to(target)
+    elif mutation == "declared_symlink":
+        real_part = root / "part-000000.real"
+        part.rename(real_part)
+        part.symlink_to(real_part.name)
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        manifest_path = alias / manifest_path.name
+
+    with pytest.raises(FreezeError):
+        implementation._validate_native_outcome_parts_tree(
+            manifest_path, references, manifest_relative_path="outcome-evidence.json"
+        )

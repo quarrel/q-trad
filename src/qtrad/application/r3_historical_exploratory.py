@@ -3464,6 +3464,50 @@ def _validate_native_authorised_tree(
         raise FreezeError(f"native target-source {kind} family does not match declarations")
 
 
+def _validate_native_outcome_parts_tree(
+    manifest_path: Path,
+    references: Sequence[Any],
+    *,
+    manifest_relative_path: str,
+) -> None:
+    """Validate the complete outcome parts root before reading any declared part."""
+    root_relative = PurePosixPath(f"{manifest_relative_path}.parts")
+    declared: set[str] = set()
+    for index, reference in enumerate(references):
+        if not isinstance(reference, Mapping):
+            raise FreezeError("native outcome part reference is malformed")
+        reference_mapping = cast(Mapping[str, Any], reference)
+        if set(reference_mapping) != {"path", "sha256", "row_count", "part_index"}:
+            raise FreezeError("native outcome part reference is malformed")
+        relative = reference_mapping["path"]
+        if not isinstance(relative, str):
+            raise FreezeError("native outcome part reference is malformed")
+        relative_path = PurePosixPath(relative)
+        expected = root_relative / f"part-{index:06d}.json"
+        if relative_path != expected or reference_mapping["part_index"] != index:
+            raise FreezeError("native outcome part reference is non-canonical")
+        if relative_path.name in declared:
+            raise FreezeError("native outcome part reference is duplicated")
+        declared.add(relative_path.name)
+        try:
+            _reject_symlink_components(manifest_path.parent, relative_path)
+        except (OSError, ValueError) as exc:
+            raise FreezeError("native outcome parts tree is unsafe") from exc
+    try:
+        _reject_symlink_components(manifest_path.parent, root_relative)
+        root = manifest_path.parent / root_relative
+        entries = tuple(root.iterdir())
+    except (OSError, ValueError) as exc:
+        raise FreezeError("native outcome parts root is unavailable or unsafe") from exc
+    for entry in entries:
+        if entry.name not in declared:
+            raise FreezeError("native outcome parts root contains an undeclared entry")
+        if entry.is_symlink() or not entry.is_file():
+            raise FreezeError("native outcome parts root contains an unsafe entry")
+    if {entry.name for entry in entries} != declared:
+        raise FreezeError("native outcome parts root does not match declarations")
+
+
 def _iter_native_source_parts(
     manifest_path: Path,
     references: Sequence[tuple[str, str, int]],
@@ -3768,6 +3812,11 @@ def _load_native_outcome_values(
             if isinstance(reference.get("path"), str)
         ],
     )
+    _validate_native_outcome_parts_tree(
+        path,
+        list(references),
+        manifest_relative_path=str(limits["manifest_relative_path"]),
+    )
     expected: set[str] = set()
     sources: set[str] = set()
     outcome_ids: set[str] = set()
@@ -4059,7 +4108,7 @@ def _load_native_retained_rows(
         "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
     }
     state_peak = 0
-    target_index: dict[str, tuple[str, str, str | None]] = {}
+    target_index: dict[str, tuple[str, str, int, str | None]] = {}
     opportunity_ids: set[str] = set()
     target_groups: dict[str, dict[str, list[str]]] = {}
     forecast_coverage: dict[str, set[str]] = {}
@@ -4171,16 +4220,19 @@ def _load_native_retained_rows(
             }
             if not required <= set(row):
                 raise FreezeError("native target row fields are incomplete")
-            target_id, instrument, decision_time = (
+            target_id, instrument, decision_time, target_horizon = (
                 row["target_id"],
                 row["instrument_id"],
                 row["decision_time"],
+                row["target_horizon_seconds"],
             )
             if (
                 not isinstance(target_id, str)
                 or not isinstance(instrument, str)
                 or instrument not in _TARGET_IDS
                 or not isinstance(decision_time, str)
+                or type(target_horizon) is not int
+                or target_horizon <= 0
             ):
                 raise FreezeError("native target row identity is malformed")
             if selected_ids is None:
@@ -4189,7 +4241,12 @@ def _load_native_retained_rows(
                 fixture_target_id = row.get("fixture_target_id")
                 if fixture_target_id is not None and not isinstance(fixture_target_id, str):
                     raise FreezeError("native target fixture identity is malformed")
-                target_index[target_id] = (decision_time, instrument, fixture_target_id)
+                target_index[target_id] = (
+                    decision_time,
+                    instrument,
+                    target_horizon,
+                    fixture_target_id,
+                )
                 target_groups.setdefault(decision_time, {}).setdefault(instrument, []).append(
                     target_id
                 )
@@ -4206,6 +4263,7 @@ def _load_native_retained_rows(
                 "target_id",
                 "instrument_id",
                 "decision_time",
+                "target_horizon_seconds",
                 "feature_data_asof",
                 "dependency_start",
                 "dependency_end",
@@ -4213,8 +4271,19 @@ def _load_native_retained_rows(
             if not required <= set(row):
                 raise FreezeError("native opportunity row fields are incomplete")
             target_id = row["target_id"]
-            if not isinstance(target_id, str):
-                raise FreezeError("native opportunity target identity is malformed")
+            instrument = row["instrument_id"]
+            decision_time = row["decision_time"]
+            target_horizon = row["target_horizon_seconds"]
+            target_identity = target_index.get(target_id) if isinstance(target_id, str) else None
+            if (
+                not isinstance(target_id, str)
+                or not isinstance(instrument, str)
+                or not isinstance(decision_time, str)
+                or type(target_horizon) is not int
+                or target_identity is None
+                or (decision_time, instrument, target_horizon) != target_identity[:3]
+            ):
+                raise FreezeError("native opportunity identity differs from target")
             if selected_ids is None:
                 if target_id in opportunity_ids:
                     raise FreezeError("native target-source opportunity IDs are duplicated")
