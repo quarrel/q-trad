@@ -4747,13 +4747,14 @@ def _load_native_retained_rows(
     for decision in ordered_decisions:
         instrument_slots = first_target_groups[decision]
         group_row_count = sum(target_id is not None for target_id in instrument_slots)
-        complete_group = group_row_count == len(_TARGET_IDS) and all(
+        target_group_complete = group_row_count == len(_TARGET_IDS)
+        forecast_group_complete = target_group_complete and all(
             forecast_role_masks.get(target_id, 0) == 0b111
             for target_id in instrument_slots
             if target_id is not None
         )
         group_ids = tuple(target_id for target_id in instrument_slots if target_id is not None)
-        if not complete_group:
+        if not target_group_complete:
             incomplete.append(
                 {
                     "decision_time": decision,
@@ -4761,10 +4762,12 @@ def _load_native_retained_rows(
                     "row_count": group_row_count,
                 }
             )
-        else:
-            complete_group_count += 1
-            if len(complete) < required_groups:
-                complete.append((decision, group_ids))
+            continue
+        if not forecast_group_complete:
+            raise FreezeError("native forecast coverage is incomplete")
+        complete_group_count += 1
+        if len(complete) < required_groups:
+            complete.append((decision, group_ids))
     if complete_group_count < required_groups:
         raise FreezeError("native target source contains fewer than three complete groups")
     selected_target_ids = tuple(target_id for _decision, group in complete for target_id in group)
