@@ -13,6 +13,7 @@ from experiments.r2_historical_lab.lab_h.horizons import (
     _phase,
     _rank_horizons,
 )
+from experiments.r2_historical_lab.lab_h.one_minute import _one_minute_targets
 
 
 def test_phase_filter_reports_each_non_overlapping_offset() -> None:
@@ -138,3 +139,32 @@ def test_terminal_authority_is_forwarded_to_feature_load(
             "kind": "feature",
         }
     ]
+
+
+def test_one_minute_target_uses_exact_endpoint_and_five_minute_delay() -> None:
+    decision_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    scaffold = pl.DataFrame(
+        {
+            "instrument_id": ["fx:eur-usd"],
+            "decision_time": [decision_time],
+            "block": ["DEV_1"],
+        }
+    )
+    source = pl.DataFrame(
+        {
+            "interval_end": [decision_time, decision_time + timedelta(minutes=1)],
+            "close": [100.0, 101.0],
+            "available_at": [
+                decision_time + timedelta(minutes=5),
+                decision_time + timedelta(minutes=6),
+            ],
+        }
+    )
+
+    target = _one_minute_targets(scaffold, source, "fx:eur-usd").row(0, named=True)
+
+    assert target["target_end"] == decision_time + timedelta(minutes=1)
+    assert target["target_available_at"] == decision_time + timedelta(minutes=6)
+    assert target["target_return"] == pytest.approx(0.009950330853168092)
+    assert target["target_valid"] is True
+    assert target["horizon_minutes"] == 1
