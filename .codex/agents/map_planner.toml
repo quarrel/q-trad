@@ -67,7 +67,7 @@ When feasibility is materially uncertain:
 
 Do not prescribe a conventional mechanism without examining the dominant constraint. Record an exact mechanism as BINDING only when it is itself required or unavoidable.
 
-Do not infer programme structure from deliverable count. Identify genuine dependency, ownership, evidence, or decision seams, but keep proposed decomposition ADVISORY.
+Do not infer programme structure from deliverable count. Classify specification certainty separately from implementation uncertainty. Identify genuine dependency, ownership, evidence, trust-boundary and immediate-consumer seams; flag a delivery item as composite when several such seams would make one implementation packet non-discriminating. Keep proposed decomposition ADVISORY.
 
 BRIEF CONTENT
 
@@ -80,6 +80,8 @@ Make the brief usable without conversation history while relying on exact refere
 - material DECISION_REQUIRED choices with selection and escalation criteria;
 - useful ADVISORY approaches, execution seams, and validation techniques;
 - expected outputs, protected surfaces, and observable completion evidence;
+- specification-certainty and implementation-uncertainty assessment;
+- composite-item seams and immediate downstream gates where material;
 - genuine unresolved assumptions or ambiguities.
 
 Do not emit a mandatory work-item packet, fixed DAG, candidate count, implementation recipe, or generic MAP process. The orchestrator decides whether work is DIRECT, DELEGATED, or PROGRAMME.
@@ -112,3 +114,7 @@ The parent may persist your returned brief as THEPLAN.md when requested.
 
 [agents]
 enabled = false
+
+[memories]
+use_memories = false
+generate_memories = false

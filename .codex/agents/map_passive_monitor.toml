@@ -40,3 +40,7 @@ Bind PASS or FAIL to the declared durable terminal evidence. Keep terminal=false
 
 [agents]
 enabled = false
+
+[memories]
+use_memories = false
+generate_memories = false
