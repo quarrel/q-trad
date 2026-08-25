@@ -3763,14 +3763,18 @@ def _load_native_target_source(
         or manifest["source_id"] != expected["source_id"]
     ):
         raise FreezeError("native target-source wrapper contract or identity differs")
-    target_instruments = manifest["target_instruments"]
-    if (
-        not isinstance(target_instruments, list)
-        or len(target_instruments) != len(_TARGET_IDS)
-        or any(not isinstance(instrument_id, str) for instrument_id in target_instruments)
-        or len(set(target_instruments)) != len(_TARGET_IDS)
-        or set(target_instruments) != set(_TARGET_IDS)
+    raw_target_instruments = manifest["target_instruments"]
+    if not isinstance(raw_target_instruments, list):
+        raise FreezeError("native target source does not establish exact six-instrument universe")
+    target_instruments = cast(list[Any], raw_target_instruments)
+    if len(target_instruments) != len(_TARGET_IDS) or any(
+        not isinstance(instrument_id, str) for instrument_id in target_instruments
     ):
+        raise FreezeError("native target source does not establish exact six-instrument universe")
+    typed_target_instruments = cast(list[str], target_instruments)
+    if len(set(typed_target_instruments)) != len(_TARGET_IDS) or set(
+        typed_target_instruments
+    ) != set(_TARGET_IDS):
         raise FreezeError("native target source does not establish exact six-instrument universe")
     expected_lineage = {
         "source_target_dataset_id": _SOURCE_TARGET_DATASET_ID,
