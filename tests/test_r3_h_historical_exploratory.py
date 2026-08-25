@@ -1583,6 +1583,13 @@ def test_native_marker_wrapper_accounting_is_exact_and_bounded(
     assert mutated["consumed_bytes"] == mutated["source_scan_bytes"]
     assert mutated["source_scan_read_operations"] == baseline["source_scan_read_operations"]
 
-    budget: dict[str, Any] = {"read_operations": 1, "max_read_operations": 1}
+    def reject_marker_read(path: Path, limits: Mapping[str, Any]) -> Any:
+        if path.name == "selection.json":
+            budget = limits["_physical_budget"]
+            assert isinstance(budget, dict)
+            budget["max_read_operations"] = int(budget["read_operations"])
+        return original_open(path, limits)
+
+    monkeypatch.setattr(implementation, "_open_json_document", reject_marker_read)
     with pytest.raises(FreezeError, match="read_operations"):
-        implementation._charge_physical_budget(budget, read_operations=1)
+        implementation.load_fixture_rows(fixture_rows, config)
