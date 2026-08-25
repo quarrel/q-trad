@@ -163,19 +163,38 @@ def _load(
     terminal_start = datetime.fromisoformat(
         next(item for item in manifest["fold_blocks"] if item["name"] == TERMINAL_BLOCK)["start"]
     )
-    common = {
-        "manifest_path": manifest_path,
-        "expected_manifest_sha256": manifest_sha256,
-        "instruments": instruments,
-        "blocks": blocks,
-        "finalist_freeze": finalist_freeze,
-        "expected_finalist_freeze_sha256": finalist_freeze_sha256,
-        "configuration_id": finalist_configuration_id,
-    }
-    features = load_parts(**common, kind="feature").collect()
-    context = load_parts(**common, kind="context").collect()
+    features = load_parts(
+        manifest_path=manifest_path,
+        expected_manifest_sha256=manifest_sha256,
+        kind="feature",
+        instruments=instruments,
+        blocks=blocks,
+        finalist_freeze=finalist_freeze,
+        expected_finalist_freeze_sha256=finalist_freeze_sha256,
+        configuration_id=finalist_configuration_id,
+    ).collect()
+    context = load_parts(
+        manifest_path=manifest_path,
+        expected_manifest_sha256=manifest_sha256,
+        kind="context",
+        instruments=instruments,
+        blocks=blocks,
+        finalist_freeze=finalist_freeze,
+        expected_finalist_freeze_sha256=finalist_freeze_sha256,
+        configuration_id=finalist_configuration_id,
+    ).collect()
     targets = (
-        load_parts(**common, kind="target", horizons=(15,))
+        load_parts(
+            manifest_path=manifest_path,
+            expected_manifest_sha256=manifest_sha256,
+            kind="target",
+            instruments=instruments,
+            horizons=(15,),
+            blocks=blocks,
+            finalist_freeze=finalist_freeze,
+            expected_finalist_freeze_sha256=finalist_freeze_sha256,
+            configuration_id=finalist_configuration_id,
+        )
         .filter(_target_maturity_expression(terminal_start))
         .collect()
     )

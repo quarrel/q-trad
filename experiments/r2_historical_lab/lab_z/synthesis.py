@@ -186,7 +186,7 @@ def run(config_path: Path) -> dict[str, Any]:
     workstream_records: dict[str, list[dict[str, Any]]] = {}
     dimensions: list[dict[str, Any]] = []
     for item_value in cast(list[dict[str, Any]], design["workstreams"]):
-        item = cast(dict[str, Any], item_value)
+        item = item_value
         workstream = str(item["workstream"])
         records = _read_register(
             [Path(path) for path in cast(list[str], item["register_paths"])],
