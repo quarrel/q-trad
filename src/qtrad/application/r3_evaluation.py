@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -17,13 +18,14 @@ from qtrad.domain.economics import (
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.portfolio import (
+    CONFIGURED_HORIZONS,
+    ONE_HORIZON,
     AssetNetting,
+    HorizonState,
     NettingResult,
     SleeveKey,
 )
-from qtrad.domain.portfolio import (
-    SleeveAttribution as ParentSleeveAttribution,
-)
+from qtrad.domain.portfolio import SleeveAttribution as ParentSleeveAttribution
 from qtrad.domain.r3_evaluation import (
     DecisionClosure,
     EvaluationReport,
@@ -67,7 +69,7 @@ def _component(kind: CostComponentKind, basis: CostBasis, slope: str) -> Continu
     )
 
 
-def _model(asset_id: str) -> ContinuousCostModel:
+def _model(asset_id: str, horizon: timedelta = ONE_HORIZON) -> ContinuousCostModel:
     components = (
         _component(CostComponentKind.SPREAD, CostBasis.PHYSICAL_DELTA, "0"),
         _component(CostComponentKind.LATENCY_MOVEMENT, CostBasis.PHYSICAL_DELTA, "0"),
@@ -78,7 +80,7 @@ def _model(asset_id: str) -> ContinuousCostModel:
     )
     return ContinuousCostModel(
         asset_id=asset_id,
-        horizon=timedelta(minutes=15),
+        horizon=horizon,
         reporting_currency="AUD",
         components=components,
         economics_identity=identity({"contract": "fixture-economics-v1", "asset_id": asset_id}),
@@ -122,7 +124,12 @@ def _target_receipt(target: RoundedTarget) -> VerificationReceipt:
     )
 
 
-def _risk_state(source: MarketDataSourceClass, purpose: EvidencePurpose) -> RiskState:
+def _risk_state(
+    source: MarketDataSourceClass,
+    purpose: EvidencePurpose,
+    horizon: timedelta = ONE_HORIZON,
+    horizon_state_identities: tuple[str, ...] = (),
+) -> RiskState:
     caps = RiskCaps(
         asset_caps=(1.0,),
         gross_cap=1.0,
@@ -134,7 +141,7 @@ def _risk_state(source: MarketDataSourceClass, purpose: EvidencePurpose) -> Risk
     )
     return RiskState(
         asset_order=("ASSET_A",),
-        horizon=timedelta(minutes=15),
+        horizon=horizon,
         as_of=_FIXTURE_TIME,
         observation_cutoff=_FIXTURE_TIME,
         lookback=timedelta(days=1),
@@ -163,11 +170,34 @@ def _risk_state(source: MarketDataSourceClass, purpose: EvidencePurpose) -> Risk
         source_class=source,
         evidence_purpose=purpose,
         provenance="R3.E fixture implementation evidence: ordered risk state",
+        horizon_state_identities=horizon_state_identities,
     )
 
 
-def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
-    """Build a one-asset opposing-sleeve fixture through R3.D target contracts."""
+def _normalise_fixture_horizons(
+    horizons: Sequence[int | timedelta],
+) -> tuple[timedelta, ...]:
+    parsed: list[timedelta] = []
+    for value in horizons:
+        if type(value) is int and not isinstance(value, bool):
+            value = timedelta(minutes=value)
+        if type(value) is not timedelta or value not in CONFIGURED_HORIZONS:
+            raise ValueError("fixture horizons must be configured 5m, 15m, 30m or 60m")
+        parsed.append(value)
+    result = tuple(parsed)
+    if not result or tuple(sorted(result, key=CONFIGURED_HORIZONS.index)) != result:
+        raise ValueError("fixture horizons must be non-empty, unique and canonical")
+    if len(set(result)) != len(result):
+        raise ValueError("fixture horizons must be unique")
+    return result
+
+
+def build_fixture_inputs(
+    horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
+) -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
+    """Build the canonical fixture with one physical cost boundary."""
+    configured = _normalise_fixture_horizons(horizons)
+    legacy = configured == (ONE_HORIZON,)
     asset = "ASSET_A"
     assets = (asset,)
     current = (Decimal("0"),)
@@ -182,23 +212,51 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
     expected = {asset: expected_state}
     source = MarketDataSourceClass.IG_NATIVE_CAPTURE
     purpose = EvidencePurpose.FIXTURE_IMPLEMENTATION
-    long_key = SleeveKey(source, purpose, "fixture-exp", "long", asset)
-    short_key = SleeveKey(source, purpose, "fixture-exp", "short", asset)
-    long_parent = ParentSleeveAttribution(long_key, Decimal("1"), Decimal("0.5"), Decimal("0.5"))
-    short_parent = ParentSleeveAttribution(short_key, Decimal("-0.5"), Decimal("0.5"), Decimal("0"))
+    keys = [
+        SleeveKey(
+            source,
+            purpose,
+            "fixture-exp",
+            side if legacy else f"{side}-{int(horizon.total_seconds() // 60)}m",
+            asset,
+            horizon,
+        )
+        for side in ("long", "short")
+        for horizon in configured
+    ]
+    deltas = {
+        key: (Decimal("1") if key.configuration_id == "long" else Decimal("-0.5"))
+        if legacy
+        else (Decimal("0.25") if key.configuration_id.startswith("long-") else Decimal("-0.125"))
+        for key in keys
+    }
+    crosses = {key: (Decimal("0.5") if legacy else Decimal("0.125")) for key in keys}
+    parents = tuple(
+        ParentSleeveAttribution(
+            key,
+            deltas[key],
+            crosses[key],
+            Decimal("0")
+            if abs(deltas[key]) == crosses[key]
+            else (abs(deltas[key]) - crosses[key])
+            * (Decimal("1") if deltas[key] >= 0 else Decimal("-1")),
+        )
+        for key in sorted(keys, key=lambda item: item.canonical_tuple)
+    )
     netting = NettingResult(
         source,
         purpose,
-        (
-            AssetNetting(
-                asset, Decimal("0.5"), Decimal("0.5"), Decimal("0.5"), (long_parent, short_parent)
-            ),
-        ),
-        (long_parent, short_parent),
+        (AssetNetting(asset, Decimal("0.5"), Decimal("0.5"), Decimal("0.5"), parents),),
+        parents,
     )
-    repaired = (
-        RepairedSleeveAttribution(long_key, Decimal("1"), Decimal("0.5"), Decimal("0.5")),
-        RepairedSleeveAttribution(short_key, Decimal("-0.5"), Decimal("0.5"), Decimal("0")),
+    repaired = tuple(
+        RepairedSleeveAttribution(
+            item.key,
+            item.requested_delta,
+            item.internal_cross_quantity,
+            item.external_delta_share,
+        )
+        for item in parents
     )
     financing = next(
         component.reporting_amount
@@ -207,17 +265,32 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
     )
     assert financing is not None
     total = expected_state.require_total_reporting()
-    decision_input_identity = identity(
-        {
-            "contract": "qtrad-r3d-decision-input-v1",
-            "source_class": source,
-            "evidence_purpose": purpose,
-            "asset_order": assets,
-            "current_position": current,
-            "target_position": target_position,
-            "expected_cost_identity": cost_states_identity(expected),
-        }
+    lifecycle = tuple(
+        HorizonState(
+            key=key,
+            decision_time=_FIXTURE_TIME,
+            expiry_time=_FIXTURE_TIME + key.horizon,
+            review_identity=identity({"review": "fixture", "key": key.as_json()}),
+            model_identity=identity({"model": "fixture", "asset": asset, "horizon": key.horizon}),
+            configuration_identity=identity({"configuration": key.configuration_id}),
+            forecast_identity=identity({"forecast": "fixture", "key": key.as_json()}),
+        )
+        for key in sorted(keys, key=lambda item: item.canonical_tuple)
     )
+    decision_input_payload: dict[str, object] = {
+        "contract": "qtrad-r3d-decision-input-v1",
+        "source_class": source,
+        "evidence_purpose": purpose,
+        "asset_order": assets,
+        "current_position": current,
+        "target_position": target_position,
+        "expected_cost_identity": cost_states_identity(expected),
+    }
+    if not legacy:
+        decision_input_payload["horizon_states"] = tuple(
+            item.semantic_identity for item in lifecycle
+        )
+    decision_input_identity = identity(decision_input_payload)
     target = RoundedTarget(
         source_class=source,
         evidence_purpose=purpose,
@@ -243,31 +316,31 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
             }
         ),
         cost_state_identity=cost_states_identity(expected),
+        horizon_state_identities=()
+        if legacy
+        else tuple((item.semantic_identity, item.closure_identity) for item in lifecycle),
     )
     target_receipt = _target_receipt(target)
-    attributions = (
+    attributions = tuple(
         SleeveAttribution(
-            "long",
+            item.key.configuration_id,
             asset,
-            repaired[0].requested_delta,
-            repaired[0].internal_cross_quantity,
-            repaired[0].external_delta_share,
-            repaired[0].repair_delta,
-            repaired[0].reason_codes,
-            key=repaired[0].key,
-        ),
-        SleeveAttribution(
-            "short",
-            asset,
-            repaired[1].requested_delta,
-            repaired[1].internal_cross_quantity,
-            repaired[1].external_delta_share,
-            repaired[1].repair_delta,
-            repaired[1].reason_codes,
-            key=repaired[1].key,
-        ),
+            item.requested_delta,
+            item.internal_cross_quantity,
+            item.external_delta_share,
+            item.repair_delta,
+            item.reason_codes,
+            key=item.key,
+        )
+        for item in repaired
     )
-    risk = _risk_state(source, purpose)
+    risk = _risk_state(
+        source,
+        purpose,
+        horizon_state_identities=()
+        if legacy
+        else tuple(item.semantic_identity for item in lifecycle),
+    )
     decision = DecisionClosure(
         source_class=source,
         evidence_purpose=purpose,
@@ -276,8 +349,8 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         target_position=target_position,
         physical_delta=target_position,
         decision_time=_FIXTURE_TIME,
-        expiry_time=_FIXTURE_TIME + timedelta(minutes=15),
-        holding_interval=timedelta(minutes=15),
+        expiry_time=_FIXTURE_TIME + ONE_HORIZON,
+        holding_interval=ONE_HORIZON,
         gross_forecast_return={asset: Decimal("0.02")},
         gross_contribution={asset: Decimal("1.00")},
         physical_notional={asset: Decimal("50")},
@@ -289,6 +362,7 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         rounded_target=target,
         target_verification_identity=target_receipt.receipt_identity,
         risk_state=risk,
+        horizon_states=() if legacy else lifecycle,
     )
     quotes = (
         QuoteEvidence(asset, _FIXTURE_TIME, Decimal("99"), Decimal("101"), sequence=0),
@@ -297,7 +371,7 @@ def build_fixture_inputs() -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
         ),
         QuoteEvidence(
             asset,
-            _FIXTURE_TIME + timedelta(minutes=15, seconds=1),
+            _FIXTURE_TIME + ONE_HORIZON + timedelta(seconds=1),
             Decimal("102"),
             Decimal("104"),
             sequence=2,
@@ -317,9 +391,12 @@ def _write_create_only(path: Path, payload: bytes) -> str:
     return identity(json.loads(persisted))
 
 
-def run_fixture(output_dir: Path) -> EvaluationReport:
+def run_fixture(
+    output_dir: Path,
+    horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
+) -> EvaluationReport:
     """Run and persist the production evaluator's bounded fixture path."""
-    decision, quotes = build_fixture_inputs()
+    decision, quotes = build_fixture_inputs(horizons)
     latency = timedelta(seconds=1)
     outcomes = build_outcome_closures(decision, quotes, latency=latency)
     report = evaluate_independently(decision, quotes, latency=latency)
@@ -377,8 +454,11 @@ def run_fixture(output_dir: Path) -> EvaluationReport:
     return report
 
 
-def fixture_cli(output: str) -> None:
-    report = run_fixture(Path(output))
+def fixture_cli(
+    output: str,
+    horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
+) -> None:
+    report = run_fixture(Path(output), horizons)
     print(
         json.dumps(
             {"report": str(Path(output) / "report.json"), "identity": report.semantic_identity},

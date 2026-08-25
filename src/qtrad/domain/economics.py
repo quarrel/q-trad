@@ -23,6 +23,18 @@ from qtrad.domain.time import require_utc
 ECONOMICS_CONTRACT: Final = "qtrad-r3-economics-v1"
 SOLVER_POLICY_CONTRACT: Final = "qtrad-r3-solver-policy-v1"
 COST_ADJUSTED_RETURN_UNIT: Final = "REPORTING_RETURN"
+CONFIGURED_HORIZONS: Final = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(minutes=30),
+    timedelta(minutes=60),
+)
+
+
+def require_configured_horizon(value: timedelta, name: str = "horizon") -> timedelta:
+    if type(value) is not timedelta or value not in CONFIGURED_HORIZONS:
+        raise ValueError(f"{name} must be one of the configured 5m, 15m, 30m or 60m horizons")
+    return value
 
 
 class InputStatus(StrEnum):
@@ -1256,8 +1268,7 @@ class ContinuousCostModel:
             raise ValueError("continuous costs require supported impact status")
         if type(self.components) is not tuple:
             raise ValueError("continuous cost components must be a tuple")
-        if self.horizon != timedelta(minutes=15):
-            raise ValueError("R3.C continuous costs require a frozen 15m horizon")
+        require_configured_horizon(self.horizon, "continuous cost horizon")
         if tuple(c.component for c in self.components) != _COMPONENT_ORDER:
             raise ValueError("continuous costs must contain all six components canonically")
         if len(set(c.component for c in self.components)) != len(self.components):

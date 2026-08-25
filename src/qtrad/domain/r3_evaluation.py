@@ -25,7 +25,7 @@ from qtrad.domain.economics import (
     InputStatus,
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass, PriceBasis
-from qtrad.domain.portfolio import SleeveKey
+from qtrad.domain.portfolio import HorizonState, SleeveKey
 from qtrad.domain.r3_rounding import RoundedTarget
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
@@ -202,6 +202,7 @@ class DecisionClosure:
     reporting_currency: str = "AUD"
     contract: str = DECISION_CONTRACT
     risk_state: RiskState | None = None
+    horizon_states: tuple[HorizonState, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -279,6 +280,36 @@ class DecisionClosure:
             or self.risk_state.asset_order != assets
         ):
             raise ValueError("decision risk state does not bind source, evidence or asset order")
+        horizon_states = tuple(self.horizon_states)
+        if (
+            tuple(sorted(horizon_states, key=lambda item: item.key.canonical_tuple))
+            != horizon_states
+        ):
+            raise ValueError("decision horizon states must use canonical sleeve order")
+        if len({item.key for item in horizon_states}) != len(horizon_states):
+            raise ValueError("decision horizon states must be unique")
+        if any(
+            item.key.source_class is not self.source_class
+            or item.key.evidence_purpose is not self.evidence_purpose
+            or item.key.asset_id not in assets
+            for item in horizon_states
+        ):
+            raise ValueError("decision horizon state source, evidence or asset mismatch")
+        object.__setattr__(self, "horizon_states", horizon_states)
+        if horizon_states:
+            expected_horizon_ids = tuple(item.semantic_identity for item in horizon_states)
+            expected_pairs = tuple(
+                (item.semantic_identity, item.closure_identity) for item in horizon_states
+            )
+            if (
+                self.risk_state is None
+                or self.risk_state.horizon_state_identities != expected_horizon_ids
+            ):
+                raise ValueError("decision risk state horizon identities do not bind lifecycle")
+            if self.rounded_target.horizon_state_identities != expected_pairs:
+                raise ValueError("decision rounded target horizon identities do not bind lifecycle")
+        elif self.risk_state is not None and self.risk_state.horizon_state_identities:
+            raise ValueError("decision risk state has unexpected horizon identities")
         object.__setattr__(
             self, "gross_forecast_return", MappingProxyType(dict(self.gross_forecast_return))
         )
@@ -322,7 +353,7 @@ class DecisionClosure:
 
     @property
     def canonical_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "contract": self.contract,
             "source_class": self.source_class,
             "evidence_purpose": self.evidence_purpose,
@@ -361,6 +392,11 @@ class DecisionClosure:
             if self.risk_state is not None
             else None,
         }
+        if self.horizon_states:
+            payload["horizon_states"] = tuple(
+                item.canonical_payload for item in self.horizon_states
+            )
+        return payload
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -868,6 +904,7 @@ class EvaluationReport:
     risk_target_position: tuple[Decimal, ...] = ()
     risk_state_identity: str = ""
     report_contract: str = REPORT_CONTRACT
+    horizon_state_identities: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -1124,6 +1161,13 @@ class EvaluationReport:
                 raise ValueError("report risk equations do not match authoritative risk state")
         if self.fx_translation_identity:
             _digest(self.fx_translation_identity, "FX translation identity")
+        horizon_identities = tuple(self.horizon_state_identities)
+        if len({item[0] for item in horizon_identities}) != len(horizon_identities):
+            raise ValueError("report horizon identities must be unique")
+        for semantic_id, closure_id in horizon_identities:
+            _digest(semantic_id, "report horizon semantic identity")
+            _digest(closure_id, "report horizon closure identity")
+        object.__setattr__(self, "horizon_state_identities", horizon_identities)
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -1169,6 +1213,11 @@ class EvaluationReport:
             "risk_state_identity": self.risk_state_identity,
             "risk_current_position": self.risk_current_position,
             "risk_target_position": self.risk_target_position,
+            **(
+                {"horizon_state_identities": self.horizon_state_identities}
+                if self.horizon_state_identities
+                else {}
+            ),
         }
 
     @property
@@ -1917,6 +1966,11 @@ def evaluate_independently(
         risk_state_identity=(decision.risk_state.semantic_identity or "")
         if decision.risk_state is not None
         else "",
+        horizon_state_identities=()
+        if not decision.horizon_states
+        else tuple(
+            (item.semantic_identity, item.closure_identity) for item in decision.horizon_states
+        ),
     )
 
 
