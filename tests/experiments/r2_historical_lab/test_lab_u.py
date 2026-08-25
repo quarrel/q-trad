@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
-from experiments.r2_historical_lab.universe import (
+from experiments.r2_historical_lab.lab_u.universe import (
     _choose_finalists,
     _target_maturity_expression,
     _training_and_validation,
@@ -40,7 +40,6 @@ def test_outer_training_is_chronological_and_horizon_mature() -> None:
 
     assert training["decision_time"].to_list() == [start]
     assert validation.height == 2
-
 
 
 def test_development_targets_must_mature_before_terminal_start() -> None:

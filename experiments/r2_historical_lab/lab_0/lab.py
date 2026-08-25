@@ -19,11 +19,11 @@ from typing import Any
 import polars as pl
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.baseline import ORIGINAL_TARGETS
-from experiments.r2_historical_lab.baseline import (
+from experiments.r2_historical_lab.lab_0.baseline import ORIGINAL_TARGETS
+from experiments.r2_historical_lab.lab_0.baseline import (
     reconstruct_baseline as reconstruct_baseline_impl,
 )
-from experiments.r2_historical_lab.features import (
+from experiments.r2_historical_lab.lab_0.features import (
     FEATURE_LAG,
     FEATURE_NAMES,
     add_pooled_features,
@@ -31,7 +31,7 @@ from experiments.r2_historical_lab.features import (
     build_local_features,
     opportunity_times,
 )
-from experiments.r2_historical_lab.harness import MANIFEST_CONTRACT
+from experiments.r2_historical_lab.lab_0.harness import MANIFEST_CONTRACT
 from qtrad.domain.foundation import target_identity
 from qtrad.domain.market_data import PriceBasis
 
@@ -213,9 +213,7 @@ def _feature_schema(config: LabConfig) -> dict[str, object]:
         path = config.terminal_run_root / f"features-{feature_set}.json"
         if _sha256(path) != expected_sha:
             raise ValueError(f"retained {feature_set} feature manifest bytes changed")
-        schemas[feature_set] = [
-            item["name"] for item in _read_json(path)["feature_schema"]
-        ]
+        schemas[feature_set] = [item["name"] for item in _read_json(path)["feature_schema"]]
     if schemas["P1"] != list(FEATURE_NAMES):
         raise ValueError("LAB P1 feature order differs from retained supported schema")
     if schemas["L1"] != schemas["P0"]:
@@ -232,9 +230,7 @@ def _block_expression(blocks: Sequence[tuple[str, datetime, datetime]]) -> pl.Ex
     expression: pl.Expr = pl.lit("TRAINING_ONLY")
     for name, start, end in reversed(blocks):
         expression = (
-            pl.when(
-                (pl.col("decision_time") >= start) & (pl.col("decision_time") < end)
-            )
+            pl.when((pl.col("decision_time") >= start) & (pl.col("decision_time") < end))
             .then(pl.lit(name))
             .otherwise(expression)
         )
@@ -328,9 +324,7 @@ def _targets(
         opportunities.with_columns(
             (pl.col("decision_time") + horizon).alias("target_end"),
             (
-                pl.col("decision_time")
-                + horizon
-                + timedelta(seconds=TARGET_REVISION_DELAY_SECONDS)
+                pl.col("decision_time") + horizon + timedelta(seconds=TARGET_REVISION_DELAY_SECONDS)
             ).alias("target_available_at"),
         )
         .join(prices, left_on="decision_time", right_on="price_time", how="left")
@@ -438,9 +432,7 @@ def _read_month_context(
     month: int,
 ) -> pl.DataFrame:
     paths = [
-        str(item["path"])
-        for item in references
-        if item["year"] == year and item["month"] == month
+        str(item["path"]) for item in references if item["year"] == year and item["month"] == month
     ]
     if not paths:
         raise ValueError(f"no context parts for {year:04d}-{month:02d}")
@@ -476,9 +468,7 @@ def _fold_rows(
                 {
                     "block": name,
                     "original_fold_id": (
-                        retained_folds[index]["fold_id"]
-                        if index < len(retained_folds)
-                        else None
+                        retained_folds[index]["fold_id"] if index < len(retained_folds) else None
                     ),
                     "horizon_minutes": horizon,
                     "validation_start": start,
@@ -515,9 +505,7 @@ def build(
     if config.base_sha != EXPECTED_BASE_SHA:
         raise ValueError("lab configuration is not bound to the authorised repository SHA")
     manifest, parts = authenticate_stage7_manifest(config.stage7_manifest)
-    active_intervals, _provider_gaps, retained_folds, foundation = _retained_inventory(
-        config
-    )
+    active_intervals, _provider_gaps, retained_folds, foundation = _retained_inventory(config)
     feature_schema = _feature_schema(config)
     fold_frame, blocks = _fold_rows(retained_folds)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -540,8 +528,7 @@ def build(
     for instrument in selected:
         references = grouped[instrument]
         paths = [
-            _safe_source_part(config.stage7_manifest.parent, item["path"])
-            for item in references
+            _safe_source_part(config.stage7_manifest.parent, item["path"]) for item in references
         ]
         for path, reference in zip(paths, references, strict=True):
             if _sha256(path) != reference["bytes_sha256"]:
@@ -696,9 +683,7 @@ def build(
         },
         "instruments": selected,
         "original_target_instruments": list(ORIGINAL_TARGETS),
-        "market_groups": {
-            item: item.split(":", maxsplit=1)[0].upper() for item in selected
-        },
+        "market_groups": {item: item.split(":", maxsplit=1)[0].upper() for item in selected},
         "horizons_minutes": list(HORIZONS),
         "feature_schema": feature_schema,
         "feature_semantics": {
@@ -726,9 +711,9 @@ def build(
         ),
         "baseline_reconstruction": baseline,
         "downstream": {
-            "loader": "experiments.r2_historical_lab.harness.load_parts",
-            "attempt_register": "experiments.r2_historical_lab.harness.append_attempt",
-            "finalist_freeze": "experiments.r2_historical_lab.harness.freeze_finalists",
+            "loader": "experiments.r2_historical_lab.lab_0.harness.load_parts",
+            "attempt_register": "experiments.r2_historical_lab.lab_0.harness.append_attempt",
+            "finalist_freeze": "experiments.r2_historical_lab.lab_0.harness.freeze_finalists",
             "terminal_access": "denied unless exact finalist freeze authorises configuration",
         },
     }
@@ -815,9 +800,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         smoke_config = replace(
             config,
             job_id=f"{config.job_id}-smoke-remediated",
-            output_root=config.output_root.with_name(
-                f"{config.job_id}-smoke-remediated"
-            ),
+            output_root=config.output_root.with_name(f"{config.job_id}-smoke-remediated"),
         )
         result = build(smoke_config, instruments=instrument)
     else:

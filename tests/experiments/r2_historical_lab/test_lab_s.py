@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from experiments.r2_historical_lab.statistical import (
+from experiments.r2_historical_lab.lab_s.statistical import (
     _calibration_is_eligible,
     _fit_calibration,
     _hierarchical_ridge_prediction,

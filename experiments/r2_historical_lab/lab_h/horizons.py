@@ -16,13 +16,13 @@ import polars as pl
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.baseline import (
+from experiments.r2_historical_lab.lab_0.baseline import (
     ORIGINAL_TARGETS,
     _fit_preprocessing,
     _transform,
     _weights,
 )
-from experiments.r2_historical_lab.harness import (
+from experiments.r2_historical_lab.lab_0.harness import (
     TERMINAL_BLOCK,
     append_attempt,
     authenticate_manifest,

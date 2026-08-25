@@ -4,8 +4,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from experiments.r2_historical_lab import horizons
-from experiments.r2_historical_lab.horizons import (
+from experiments.r2_historical_lab.lab_h import horizons
+from experiments.r2_historical_lab.lab_h.horizons import (
     HorizonConfig,
     _development_targets,
     _effective_opportunities,

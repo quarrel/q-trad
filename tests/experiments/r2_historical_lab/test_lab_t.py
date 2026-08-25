@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import polars as pl
 import pytest
 
-from experiments.r2_historical_lab.tabular import (
+from experiments.r2_historical_lab.lab_t.tabular import (
     _development_targets,
     _qualifies,
     configuration_id,

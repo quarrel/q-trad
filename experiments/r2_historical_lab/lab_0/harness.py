@@ -12,7 +12,7 @@ from typing import Any, cast
 import polars as pl
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.features import positive_contribution_share
+from experiments.r2_historical_lab.lab_0.features import positive_contribution_share
 
 MANIFEST_CONTRACT = "qtrad-r2-historical-lab-manifest-v2"
 EVALUATION_CONTRACT = "qtrad-r2-historical-lab-evaluation-v1"

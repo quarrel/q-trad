@@ -15,12 +15,12 @@ import polars as pl
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.baseline import (
+from experiments.r2_historical_lab.lab_0.baseline import (
     _fit_preprocessing,
     _transform,
     _weights,
 )
-from experiments.r2_historical_lab.harness import (
+from experiments.r2_historical_lab.lab_0.harness import (
     TERMINAL_BLOCK,
     append_attempt,
     authenticate_manifest,
@@ -224,8 +224,7 @@ def _training_and_validation(
     evaluation_instruments: Sequence[str],
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     validation = rows.filter(
-        (pl.col("block") == block)
-        & pl.col("instrument_id").is_in(list(evaluation_instruments))
+        (pl.col("block") == block) & pl.col("instrument_id").is_in(list(evaluation_instruments))
     )
     if validation.is_empty():
         raise ValueError(f"no validation rows for {block}")
@@ -240,9 +239,7 @@ def _training_and_validation(
     )
 
 
-def _identity(
-    frame: pl.DataFrame, order: Sequence[str]
-) -> np.ndarray:
+def _identity(frame: pl.DataFrame, order: Sequence[str]) -> np.ndarray:
     positions = {instrument: index for index, instrument in enumerate(order)}
     values = np.zeros((frame.height, len(order)), dtype=float)
     for row_index, instrument in enumerate(frame["instrument_id"]):
@@ -292,9 +289,7 @@ def _select_alpha(
     x_validation = _design(inner_validation, state, ())
     if identity_order:
         x_fit = np.column_stack((x_fit, _identity(inner_fit, identity_order)))
-        x_validation = np.column_stack(
-            (x_validation, _identity(inner_validation, identity_order))
-        )
+        x_validation = np.column_stack((x_validation, _identity(inner_validation, identity_order)))
     y_fit = inner_fit["target_return"].to_numpy()
     y_validation = inner_validation["target_return"].to_numpy()
     scored: list[tuple[float, float]] = []
@@ -331,9 +326,7 @@ def _fit_predict_one(
     x_validation = _design(validation, state, ())
     if identity_order:
         x_training = np.column_stack((x_training, _identity(training, identity_order)))
-        x_validation = np.column_stack(
-            (x_validation, _identity(validation, identity_order))
-        )
+        x_validation = np.column_stack((x_validation, _identity(validation, identity_order)))
     model = Ridge(
         alpha=alpha,
         solver="lsqr",
@@ -358,10 +351,7 @@ def _predict(
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     if model == "LOCAL_RIDGE":
-        scopes = [
-            ((instrument,), (instrument,))
-            for instrument in evaluation_universe
-        ]
+        scopes = [((instrument,), (instrument,)) for instrument in evaluation_universe]
     elif model == "FULLY_POOLED_LOCAL_RIDGE":
         scopes = [(tuple(training_universe), tuple(evaluation_universe))]
     elif model == "GROUP_POOLED_RIDGE":
@@ -380,9 +370,7 @@ def _predict(
 
     for train_scope, evaluate_scope in scopes:
         fit_rows = training.filter(pl.col("instrument_id").is_in(list(train_scope)))
-        validation_rows = validation.filter(
-            pl.col("instrument_id").is_in(list(evaluate_scope))
-        )
+        validation_rows = validation.filter(pl.col("instrument_id").is_in(list(evaluate_scope)))
         identity_order = () if model == "LOCAL_RIDGE" else train_scope
         prediction = _fit_predict_one(fit_rows, validation_rows, identity_order)
         frames.append(
@@ -409,9 +397,7 @@ def _evaluate(
         validation.join(predictions, on=keys, how="inner", validate="1:1")
         .with_columns(
             (pl.col("target_return") ** 2).alias("_zero_se"),
-            ((pl.col("expected_return") - pl.col("target_return")) ** 2).alias(
-                "_model_se"
-            ),
+            ((pl.col("expected_return") - pl.col("target_return")) ** 2).alias("_model_se"),
         )
         .join(
             pl.DataFrame(
@@ -431,9 +417,7 @@ def _evaluate(
         pl.col("_model_se").mean().alias("model_mse"),
         (pl.col("_zero_se") - pl.col("_model_se")).sum().alias("improvement"),
     )
-    positive_total = float(
-        cast(float, instruments["improvement"].clip(lower_bound=0.0).sum())
-    )
+    positive_total = float(cast(float, instruments["improvement"].clip(lower_bound=0.0).sum()))
     instruments = instruments.with_columns(
         (1.0 - pl.col("model_mse") / pl.col("zero_mse")).alias("skill_versus_zero"),
         (
@@ -442,25 +426,23 @@ def _evaluate(
             else pl.lit(0.0)
         ).alias("positive_improvement_share"),
     )
-    groups = instruments.group_by("market_group").agg(
-        pl.col("support").sum().alias("support"),
-        pl.col("zero_mse").mean().alias("zero_mse"),
-        pl.col("model_mse").mean().alias("model_mse"),
-        pl.col("improvement").sum().alias("improvement"),
-        pl.col("positive_improvement_share").sum().alias("positive_improvement_share"),
-    ).with_columns(
-        (1.0 - pl.col("model_mse") / pl.col("zero_mse")).alias("skill_versus_zero")
+    groups = (
+        instruments.group_by("market_group")
+        .agg(
+            pl.col("support").sum().alias("support"),
+            pl.col("zero_mse").mean().alias("zero_mse"),
+            pl.col("model_mse").mean().alias("model_mse"),
+            pl.col("improvement").sum().alias("improvement"),
+            pl.col("positive_improvement_share").sum().alias("positive_improvement_share"),
+        )
+        .with_columns((1.0 - pl.col("model_mse") / pl.col("zero_mse")).alias("skill_versus_zero"))
     )
     equal_group_zero = float(cast(float, groups["zero_mse"].mean()))
     equal_group_model = float(cast(float, groups["model_mse"].mean()))
     result["equal_group_then_instrument_zero_mse"] = equal_group_zero
     result["equal_group_then_instrument_model_mse"] = equal_group_model
-    result["equal_group_then_instrument_delta_mse"] = (
-        equal_group_model - equal_group_zero
-    )
-    result["equal_group_then_instrument_skill"] = (
-        1.0 - equal_group_model / equal_group_zero
-    )
+    result["equal_group_then_instrument_delta_mse"] = equal_group_model - equal_group_zero
+    result["equal_group_then_instrument_skill"] = 1.0 - equal_group_model / equal_group_zero
     detail: list[dict[str, Any]] = []
     for row in groups.iter_rows(named=True):
         detail.append({"level": "GROUP", "name": row["market_group"], **row})
@@ -501,9 +483,7 @@ def _run_configuration(
     predictions: list[pl.DataFrame] = []
     validations: list[pl.DataFrame] = []
     for block in blocks:
-        training, validation = _training_and_validation(
-            rows, block, evaluation_universe
-        )
+        training, validation = _training_and_validation(rows, block, evaluation_universe)
         predictions.append(
             _predict(
                 training,
@@ -525,8 +505,7 @@ def _choose_finalists(rows: Sequence[dict[str, Any]]) -> list[str]:
     core = [
         row
         for row in rows
-        if row["evaluation_universe"] == "CORE_6"
-        and row["model"] == "FULLY_POOLED_LOCAL_RIDGE"
+        if row["evaluation_universe"] == "CORE_6" and row["model"] == "FULLY_POOLED_LOCAL_RIDGE"
     ]
     broad = [
         row
@@ -634,9 +613,7 @@ def _run(config: dict[str, Any]) -> None:
     if existing:
         raise FileExistsError(f"LAB-U outputs are create-only for a run: {existing}")
 
-    features, context, targets = _load(
-        manifest_path, manifest_sha256, ALL_PRE_TERMINAL_BLOCKS
-    )
+    features, context, targets = _load(manifest_path, manifest_sha256, ALL_PRE_TERMINAL_BLOCKS)
     rows_by_universe = {
         name: _rows_for_universe(features, context, targets, universe)
         for name, universe in UNIVERSES.items()
@@ -675,9 +652,7 @@ def _run(config: dict[str, Any]) -> None:
                 result=result,
                 manifest_sha256=manifest_sha256,
             )
-            flattened = _flatten_result(
-                configuration, identifier, "DEVELOPMENT", result
-            )
+            flattened = _flatten_result(configuration, identifier, "DEVELOPMENT", result)
             matrix_rows.append(flattened)
             detail_rows.extend(
                 {
@@ -709,9 +684,7 @@ def _run(config: dict[str, Any]) -> None:
         finalist_configuration_id=finalist_ids[0],
     )
     terminal_rows_by_universe = {
-        name: _rows_for_universe(
-            terminal_features, terminal_context, terminal_targets, universe
-        )
+        name: _rows_for_universe(terminal_features, terminal_context, terminal_targets, universe)
         for name, universe in UNIVERSES.items()
     }
     for identifier in finalist_ids:
@@ -728,9 +701,7 @@ def _run(config: dict[str, Any]) -> None:
             result=result,
             manifest_sha256=manifest_sha256,
         )
-        flattened = _flatten_result(
-            configuration, identifier, "TERMINAL_POST_HOC", result
-        )
+        flattened = _flatten_result(configuration, identifier, "TERMINAL_POST_HOC", result)
         matrix_rows.append(flattened)
         detail_rows.extend(
             {

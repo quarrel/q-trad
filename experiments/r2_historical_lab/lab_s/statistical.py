@@ -17,9 +17,13 @@ import polars as pl
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.baseline import _fit_preprocessing, _transform, _weights
-from experiments.r2_historical_lab.features import MARKET_GROUPS
-from experiments.r2_historical_lab.harness import (
+from experiments.r2_historical_lab.lab_0.baseline import (
+    _fit_preprocessing,
+    _transform,
+    _weights,
+)
+from experiments.r2_historical_lab.lab_0.features import MARKET_GROUPS
+from experiments.r2_historical_lab.lab_0.harness import (
     TERMINAL_BLOCK,
     append_attempt,
     authenticate_manifest,
@@ -290,9 +294,8 @@ def _ridge_prediction(
     )
     if pooled:
         instruments = sorted(str(value) for value in selected["instrument_id"].unique())
-        missing = (
-            set(str(value) for value in validation["instrument_id"].unique())
-            - set(instruments)
+        missing = set(str(value) for value in validation["instrument_id"].unique()) - set(
+            instruments
         )
         if missing:
             raise ValueError(f"validation instruments absent from training: {sorted(missing)}")
@@ -419,18 +422,14 @@ def _hierarchical_ridge_prediction(
         normal[group_slice, group_slice] = group_gram
         normal[global_slice, group_slice] = group_gram
         normal[group_slice, global_slice] = group_gram
-        right_hand_side[group_slice] = group_train.T @ (
-            group_weights * targets[selected]
-        )
+        right_hand_side[group_slice] = group_train.T @ (group_weights * targets[selected])
 
     ratio_scale = math.sqrt(instrument_penalty_ratio)
     for instrument_code in range(instrument_count):
         selected = train_instrument_codes == instrument_code
         instrument_train = base_train[selected]
         instrument_weights = weights[selected]
-        instrument_gram = instrument_train.T @ (
-            instrument_weights[:, None] * instrument_train
-        )
+        instrument_gram = instrument_train.T @ (instrument_weights[:, None] * instrument_train)
         instrument_slice = slice(
             instrument_offset + instrument_code * feature_count,
             instrument_offset + (instrument_code + 1) * feature_count,
@@ -441,9 +440,7 @@ def _hierarchical_ridge_prediction(
             group_offset + (group_code + 1) * feature_count,
         )
         scaled_cross = instrument_gram / ratio_scale
-        normal[instrument_slice, instrument_slice] = (
-            instrument_gram / instrument_penalty_ratio
-        )
+        normal[instrument_slice, instrument_slice] = instrument_gram / instrument_penalty_ratio
         normal[global_slice, instrument_slice] = scaled_cross
         normal[instrument_slice, global_slice] = scaled_cross
         normal[group_slice, instrument_slice] = scaled_cross
@@ -500,14 +497,11 @@ def _hierarchical_prediction(
     base_validation = np.column_stack((np.ones(validation.height), x_validation))
     groups = sorted({_market_group(str(value)) for value in selected["instrument_id"]})
     instruments = sorted(str(value) for value in selected["instrument_id"].unique())
-    validation_instruments = {
-        str(value) for value in validation["instrument_id"].unique()
-    }
+    validation_instruments = {str(value) for value in validation["instrument_id"].unique()}
     missing = validation_instruments - set(instruments)
     if missing:
         raise ValueError(
-            "hierarchical validation instruments absent from training: "
-            f"{sorted(missing)}"
+            f"hierarchical validation instruments absent from training: {sorted(missing)}"
         )
     group_codes = {value: index for index, value in enumerate(groups)}
     instrument_codes = {value: index for index, value in enumerate(instruments)}
@@ -516,10 +510,7 @@ def _hierarchical_prediction(
         dtype=np.intp,
     )
     validation_group_codes = np.asarray(
-        [
-            group_codes[_market_group(str(value))]
-            for value in validation["instrument_id"]
-        ],
+        [group_codes[_market_group(str(value))] for value in validation["instrument_id"]],
         dtype=np.intp,
     )
     train_instrument_codes = np.asarray(
@@ -542,9 +533,7 @@ def _hierarchical_prediction(
         group_count=len(groups),
         instrument_count=len(instruments),
         alpha=float(configuration["ridge_alpha"]),
-        instrument_penalty_ratio=float(
-            configuration["hierarchical_instrument_penalty_ratio"]
-        ),
+        instrument_penalty_ratio=float(configuration["hierarchical_instrument_penalty_ratio"]),
     )
     return prediction * validation_scales, {
         "fit_rows": selected.height,
@@ -619,8 +608,7 @@ def _outer_prediction(
 
     inner_start = fit_time - timedelta(days=int(configuration["calibration_inner_days"]))
     inner_training = training.filter(
-        (pl.col("decision_time") < inner_start)
-        & (pl.col("target_available_at") < inner_start)
+        (pl.col("decision_time") < inner_start) & (pl.col("target_available_at") < inner_start)
     )
     inner_validation = training.filter(
         (pl.col("decision_time") >= inner_start)
@@ -662,9 +650,7 @@ def _select_validation(
 ) -> pl.DataFrame:
     validation = rows.filter(pl.col("block") == block_name)
     if block_name in DEVELOPMENT_BLOCK_NAMES:
-        terminal_start = datetime.fromisoformat(
-            str(block_specs[TERMINAL_BLOCK]["start"])
-        )
+        terminal_start = datetime.fromisoformat(str(block_specs[TERMINAL_BLOCK]["start"]))
         validation = validation.filter(pl.col("target_available_at") < terminal_start)
     return validation
 
@@ -682,8 +668,7 @@ def _evaluate_configuration(
         start = datetime.fromisoformat(str(block_specs[block_name]["start"]))
         validation = _select_validation(rows, block_name, block_specs)
         training = rows.filter(
-            (pl.col("decision_time") < start)
-            & (pl.col("target_available_at") < start)
+            (pl.col("decision_time") < start) & (pl.col("target_available_at") < start)
         )
         if validation.is_empty() or training.is_empty():
             raise ValueError(f"{block_name} lacks training or validation rows")
@@ -696,9 +681,7 @@ def _evaluate_configuration(
         prediction_parts.append(
             validation.select(*KEYS).with_columns(pl.Series("expected_return", prediction))
         )
-        target_parts.append(
-            validation.select(*KEYS, "target_return", "target_valid", "block")
-        )
+        target_parts.append(validation.select(*KEYS, "target_return", "target_valid", "block"))
         fold_metadata.append(
             {
                 "block": block_name,
@@ -911,11 +894,7 @@ def run_smoke(
         & (pl.col("target_available_at") < start)
     )
     first_times = (
-        rows.filter(pl.col("block") == "DEV_1")["decision_time"]
-        .unique()
-        .sort()
-        .head(60)
-        .to_list()
+        rows.filter(pl.col("block") == "DEV_1")["decision_time"].unique().sort().head(60).to_list()
     )
     validation = rows.filter(
         (pl.col("block") == "DEV_1") & pl.col("decision_time").is_in(first_times)
@@ -942,6 +921,7 @@ def run_smoke(
         )
     )
 
+
 def run_scale_projection(
     design: dict[str, Any],
     manifest_path: Path,
@@ -958,8 +938,7 @@ def run_scale_projection(
     )
     start = datetime.fromisoformat(str(_block_specs(manifest)["DEV_1"]["start"]))
     training = rows.filter(
-        (pl.col("decision_time") < start)
-        & (pl.col("target_available_at") < start)
+        (pl.col("decision_time") < start) & (pl.col("target_available_at") < start)
     )
     validation = rows.filter(pl.col("block") == "DEV_1")
     configuration = {
@@ -1277,9 +1256,9 @@ def run_terminal(
     terminal_rows: list[dict[str, object]] = []
     for configuration in configurations.values():
         universe = str(configuration["universe"])
-        rows = pl.concat(
-            [preterminal_by_universe[universe], terminal_by_universe[universe]]
-        ).sort("decision_time", "instrument_id")
+        rows = pl.concat([preterminal_by_universe[universe], terminal_by_universe[universe]]).sort(
+            "decision_time", "instrument_id"
+        )
         attempted = _attempt(
             rows,
             configuration,

@@ -64,12 +64,7 @@ POOLED_NAMES = (
     "cross_market_missing_count",
     "cross_market_source_active_count",
 )
-FEATURE_NAMES = (
-    LOCAL_RETURN_NAMES
-    + LOCAL_VOLATILITY_NAMES
-    + TIME_AVAILABILITY_NAMES
-    + POOLED_NAMES
-)
+FEATURE_NAMES = LOCAL_RETURN_NAMES + LOCAL_VOLATILITY_NAMES + TIME_AVAILABILITY_NAMES + POOLED_NAMES
 METADATA_NAMES = (
     "instrument_id",
     "decision_time",
@@ -128,7 +123,6 @@ class SourceIndex:
             return None
         return point
 
-
     def direct_return(
         self,
         interval_end: datetime,
@@ -148,10 +142,7 @@ class SourceIndex:
         cutoff: datetime,
     ) -> dict[str, float | None]:
         minutes = seconds // 60
-        endpoints = [
-            interval_end - timedelta(minutes=offset)
-            for offset in range(minutes, -1, -1)
-        ]
+        endpoints = [interval_end - timedelta(minutes=offset) for offset in range(minutes, -1, -1)]
         active = [self.active(value, cutoff) for value in endpoints]
         selected = [
             self.selected(value, cutoff) if is_active else None
@@ -165,8 +156,7 @@ class SourceIndex:
             if is_active and point is not None and point.high > 0 and point.low > 0
         ]
         expected_returns = sum(
-            left_active and right_active
-            for left_active, right_active in pairwise(active)
+            left_active and right_active for left_active, right_active in pairwise(active)
         )
         returns = [
             log(right.close / left.close)
@@ -351,14 +341,17 @@ def add_pooled_features(
                 result = result.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
         return result
 
-    availability = peers.group_by("decision_time").agg(
-        pl.col("current_available").sum().alias("cross_market_available_count"),
-        pl.len().cast(pl.Float64).alias("cross_market_source_active_count"),
-    ).with_columns(
-        (
-            pl.col("cross_market_source_active_count")
-            - pl.col("cross_market_available_count")
-        ).alias("cross_market_missing_count")
+    availability = (
+        peers.group_by("decision_time")
+        .agg(
+            pl.col("current_available").sum().alias("cross_market_available_count"),
+            pl.len().cast(pl.Float64).alias("cross_market_source_active_count"),
+        )
+        .with_columns(
+            (
+                pl.col("cross_market_source_active_count") - pl.col("cross_market_available_count")
+            ).alias("cross_market_missing_count")
+        )
     )
     result = features.join(availability, on="decision_time", how="left").with_columns(
         pl.col(
@@ -372,19 +365,13 @@ def add_pooled_features(
         result = result.join(global_values, on="decision_time", how="left")
         if group_peers.is_empty():
             result = result.with_columns(
-                pl.lit(None, dtype=pl.Float64).alias(
-                    f"loo_market_group_mean_return_{suffix}s"
-                ),
-                pl.lit(None, dtype=pl.Float64).alias(
-                    f"loo_market_group_dispersion_{suffix}s"
-                ),
+                pl.lit(None, dtype=pl.Float64).alias(f"loo_market_group_mean_return_{suffix}s"),
+                pl.lit(None, dtype=pl.Float64).alias(f"loo_market_group_dispersion_{suffix}s"),
                 pl.lit(0.0).alias(f"loo_market_group_available_count_{suffix}s"),
             )
         else:
             group_values = group_peers.group_by("decision_time").agg(
-                pl.col(f"return_{suffix}s")
-                .mean()
-                .alias(f"loo_market_group_mean_return_{suffix}s"),
+                pl.col(f"return_{suffix}s").mean().alias(f"loo_market_group_mean_return_{suffix}s"),
                 pl.col(f"return_{suffix}s")
                 .std(ddof=0)
                 .alias(f"loo_market_group_dispersion_{suffix}s"),

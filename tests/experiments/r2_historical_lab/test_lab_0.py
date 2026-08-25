@@ -8,8 +8,8 @@ import polars as pl
 import pytest
 
 from experiments.r2_historical_lab import LABEL, SOURCE_CLASS
-from experiments.r2_historical_lab.features import add_pooled_features
-from experiments.r2_historical_lab.harness import (
+from experiments.r2_historical_lab.lab_0.features import add_pooled_features
+from experiments.r2_historical_lab.lab_0.harness import (
     MANIFEST_CONTRACT,
     append_attempt,
     authenticate_manifest,
@@ -17,7 +17,7 @@ from experiments.r2_historical_lab.harness import (
     freeze_finalists,
     load_parts,
 )
-from experiments.r2_historical_lab.lab import _features, _fold_rows, _targets, _write_parquet
+from experiments.r2_historical_lab.lab_0.lab import _features, _fold_rows, _targets, _write_parquet
 
 
 def _source() -> pl.DataFrame:

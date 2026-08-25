@@ -1,66 +1,36 @@
-# R2 IBKR historical exploratory lab
+# R2 IBKR historical exploratory laboratory
 
-This package builds the shared LAB-0 dataset from retained local Stage 7 provider-history
-bytes. Every output is `EXPLORATORY_POST_HOC_ONLY` with source class
-`IBKR_HISTORICAL_RESEARCH`; it is not a second holdout, confirmation, promotion, or
-decision-grade result.
+This package preserves six completed model-development workstreams over the already-consumed
+historical IBKR research input. Every result is `EXPLORATORY_POST_HOC_ONLY`, retains source class
+`IBKR_HISTORICAL_RESEARCH`, and is neither a second holdout nor confirmation, promotion, or
+decision-grade evidence.
 
-Run from the repository root with the repository environment active:
+All workstreams were authorised from base
+`f31cf4731fc233726f45f67f54064c40965d01d7`. LAB-0 produced the shared authenticated dataset at
+`/workspace/tmp/qtrad-r2-lab/LAB-0`; its manifest SHA-256 is
+`462e40fa84038156b16c68bde4b68d574ab7862c680657ebd1a0035b39bf0072`.
 
-    uv run -m experiments.r2_historical_lab.lab inspect --config experiments/r2_historical_lab/default-config.json
-    uv run -m experiments.r2_historical_lab.lab smoke --config experiments/r2_historical_lab/default-config.json
-    uv run -m experiments.r2_historical_lab.lab build --config experiments/r2_historical_lab/default-config.json
-    uv run -m experiments.r2_historical_lab.lab replay-baseline --config experiments/r2_historical_lab/default-config.json
+## Workstreams
 
-Build and smoke destinations are create-only. Choose a new job ID and output path for a new
-attempt; preserve failed and superseded attempts. The full build hashes and decodes every
-selected Stage 7 part once, writes instrument/month Parquet parts, and runs the genuine original
-six-target, 15-minute OOF reconstruction before publishing a complete manifest.
+| Job | Package | Preserved branch head | Outcome | Raw output |
+|---|---|---|---|---|
+| LAB-0 | [`lab_0/`](lab_0/) | `73b35e2be152f9bacb8882dadb09a01e28ad4d37` | Canonical downstream dataset and baseline reconstruction | `/workspace/tmp/qtrad-r2-lab/LAB-0` |
+| LAB-H | [`lab_h/`](lab_h/) | `b581b699d30d115eca690436b27d9f5dbd6c27c2` | No tested horizon or cadence beat zero | `/workspace/tmp/qtrad-r2-lab/LAB-H` |
+| LAB-L | [`lab_l/`](lab_l/) | `d224d49bc94d4f53261d036e4395a41cf7b5b004` | No tested sequence or nonlinear model beat zero | `/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2`, `LAB-L-ALL20` |
+| LAB-S | [`lab_s/`](lab_s/) | `9573e8451319c6cca0de7bc47cc4c4d9a556c8e7` | Tiny pooled development edge failed on the post-hoc terminal block | `/workspace/tmp/qtrad-r2-lab/LAB-S` |
+| LAB-T | [`lab_t/`](lab_t/) | `be13527eaa4b57a8d8736b01c74e48e1de90dd22` | No nonlinear tabular candidate qualified | `/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1` |
+| LAB-U | [`lab_u/`](lab_u/) | `a66b3af2230639684d932ad2b54cd06ae435fb83` | Wider pooling gains were concentrated and failed terminal evaluation | `/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2` |
 
-Downstream workstreams must call
-`experiments.r2_historical_lab.harness.load_parts` with the exact manifest SHA-256. The loader
-authenticates only selected parts, rejects explicit empty selections, and defaults every feature,
-context, and target read to `DEV_1` through `DEV_3`. Request `TRAINING_ONLY` explicitly for
-chronological fitting. Evaluate every completed candidate directly against `ZERO_RETURN` with
-`evaluate_against_zero`, then register that exact provenance-bearing result with `append_attempt`.
-An explicit `{"status": "FAILED", ...}` result remains registerable but is never finalist-eligible.
-Only results evaluated exclusively on canonical `DEV_1` through `DEV_3` blocks are finalist-eligible;
-`TRAINING_ONLY` results may be registered for diagnostics but cannot authorise or coexist with a later
-freeze for the same configuration. Unknown block labels are rejected. Freeze a small finalist set
-with `freeze_finalists`, and supply the exact freeze SHA-256 and configuration ID for the single
-`TERMINAL_FORMER_HOLDOUT` read. If any matching registered attempt failed, evaluated training-only
-rows, or evaluated the terminal block, that configuration is permanently ineligible for a later
-freeze in the same workstream and manifest.
+LAB-H, LAB-L, LAB-S, and LAB-U import LAB-0's preprocessing and/or authenticated harness explicitly
+from `lab_0`. LAB-T remains deliberately self-contained because integration preserves the executed
+experiment rather than behaviourally refactoring it.
 
-## LAB-L temporal representation experiment
+The package-root `__init__.py` contains only programme-wide source/evidence constants. Each
+workstream directory owns its executable module, compact configuration, run notes, and result
+summary. Tests mirror this structure under `tests/experiments/r2_historical_lab/`.
 
-LAB-L consumes only the exact canonical LAB-0 manifest named in
-`sequence-configurations.json`. Run the controlled smoke before a full CORE_6 execution:
-
-    uv run --isolated --with torch -m experiments.r2_historical_lab.sequence \
-        --config experiments/r2_historical_lab/sequence-configurations.json \
-        --scope CORE_6 --smoke \
-        --output /workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2-smoke
-
-The full fixed experiment omits `--smoke` and writes under
-`/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2`. The first retained-scale attempt timed out after four
-completed configurations; its summary and pre-deletion hashes remain in
-`/workspace/tmp/qtrad-r2-lab/LAB-L-EXECUTION.md`. After the successful replacement runs, the
-incomplete attempt and disposable smoke outputs were intentionally cleaned so they cannot be mistaken
-for final results. Its completed configurations still count as attempted exploratory variants. The
-former consumed holdout remains inaccessible unless a sequence configuration first passes every
-declared development screening condition and is create-only frozen by the shared LAB harness.
-
-## LAB-U universe experiment
-
-Run the authenticated smoke and the complete universe matrix from the LAB-U worktree:
-
-    uv run -m experiments.r2_historical_lab.universe smoke --config experiments/r2_historical_lab/universe-config.json
-    uv run -m experiments.r2_historical_lab.universe run --config experiments/r2_historical_lab/universe-config.json
-
-LAB-U recomputes the original cross-market availability count for each declared training universe,
-fits only chronological and horizon-mature rows, and excludes every non-terminal target whose outcome
-is not available strictly before the former-holdout start. It freezes no more than three finalists
-from DEV_1 through DEV_3, and only then loads the former consumed holdout as a terminal post-hoc
-development block. Outputs remain non-authoritative under the create-only path configured in
-`universe-config.json`.
+Raw and large outputs remain outside Git under `/workspace/tmp/qtrad-r2-lab/`. The branch heads
+above and the execution heads recorded in each result are scientific provenance; later namespace or
+archive commits do not become the code identity that produced those results. Do not overwrite
+historical outputs. Any reproduction must use a new create-only output path and must not make
+provider calls or reinterpret the consumed terminal block.

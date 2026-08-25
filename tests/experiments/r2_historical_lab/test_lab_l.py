@@ -7,7 +7,7 @@ from typing import cast
 import numpy as np
 import polars as pl
 
-from experiments.r2_historical_lab.sequence import (
+from experiments.r2_historical_lab.lab_l.sequence import (
     GROUPS,
     SEQUENCE_COLUMNS,
     LabConfig,
@@ -112,7 +112,9 @@ def test_standardiser_handles_an_entirely_absent_channel() -> None:
 
 
 def test_fixed_configuration_and_smoke_cover_every_planned_model() -> None:
-    config = LabConfig.read(Path("experiments/r2_historical_lab/sequence-configurations.json"))
+    config = LabConfig.read(
+        Path("experiments/r2_historical_lab/lab_l/sequence-configurations.json")
+    )
 
     models = _model_configurations(config)
 
