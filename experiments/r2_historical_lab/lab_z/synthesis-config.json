@@ -1,0 +1,150 @@
+{
+  "programme_base_sha": "f31cf4731fc233726f45f67f54064c40965d01d7",
+  "evidence_label": "EXPLORATORY_POST_HOC_ONLY",
+  "source_class": "IBKR_HISTORICAL_RESEARCH",
+  "manifest_sha256": "462e40fa84038156b16c68bde4b68d574ab7862c680657ebd1a0035b39bf0072",
+  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-Z",
+  "workstreams": [
+    {
+      "workstream": "LAB-H",
+      "register_paths": ["/workspace/tmp/qtrad-r2-lab/LAB-H/run-register.jsonl"],
+      "finalist_path": "/workspace/tmp/qtrad-r2-lab/LAB-H/finalists.json",
+      "supporting_configuration_paths": [],
+      "complexity_and_dependency_cost": "Ridge only; four horizons plus phase-offset cadence screens; no dependency beyond the LAB-0 stack.",
+      "material_failure_or_fragility": "Every aggregate horizon and every full non-overlap distribution lost to zero; 5m and 30m terminal finalists also lost."
+    },
+    {
+      "workstream": "LAB-U",
+      "register_paths": ["/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2/run-register.jsonl"],
+      "finalist_path": "/workspace/tmp/qtrad-r2-lab/LAB-U-attempt2/finalist-freeze.json",
+      "supporting_configuration_paths": [],
+      "complexity_and_dependency_cost": "Ridge only; CORE_6, OMITTED_14 and ALL_20 loading with local, group and full pooling.",
+      "material_failure_or_fragility": "The original run crossed the terminal-maturity boundary and was rejected; corrected positive development results were concentrated and every terminal finalist lost."
+    },
+    {
+      "workstream": "LAB-S",
+      "register_paths": ["/workspace/tmp/qtrad-r2-lab/LAB-S/run-register.jsonl"],
+      "finalist_path": "/workspace/tmp/qtrad-r2-lab/LAB-S/finalist-freeze.json",
+      "supporting_configuration_paths": ["/workspace/tmp/qtrad-r2-lab/LAB-S/development-state.json"],
+      "complexity_and_dependency_cost": "Ridge formulations only; scaling, pooling, calibration and recency variants, including a bounded hierarchical solve.",
+      "material_failure_or_fragility": "Only ALL_20 raw fully pooled Ridge was slightly positive in aggregate; it improved one block and four instruments, then its terminal calibration slope changed sign and it lost."
+    },
+    {
+      "workstream": "LAB-T",
+      "register_paths": ["/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1/run-register.jsonl"],
+      "finalist_path": "/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1/finalists.json",
+      "supporting_configuration_paths": [],
+      "complexity_and_dependency_cost": "Adds scikit-learn histogram boosting and MLP fits plus P1 feature computation.",
+      "material_failure_or_fragility": "All nonlinear variants lost; MLP losses were catastrophic, boosting was concentrated, and no finalist qualified for terminal access."
+    },
+    {
+      "workstream": "LAB-L",
+      "register_paths": [
+        "/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2/run-register.jsonl",
+        "/workspace/tmp/qtrad-r2-lab/LAB-L-ALL20/run-register.jsonl"
+      ],
+      "finalist_path": null,
+      "supporting_configuration_paths": [
+        "/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2/sequence-configurations.json",
+        "/workspace/tmp/qtrad-r2-lab/LAB-L-ALL20/sequence-configurations.json"
+      ],
+      "complexity_and_dependency_cost": "Adds PyTorch, sequence construction, bounded neural training, early stopping and seed control.",
+      "material_failure_or_fragility": "Every engineered Ridge, MLP and LSTM lost in every block and instrument; the first retained-scale attempt timed out after four configurations and no sequence finalist qualified."
+    }
+  ],
+  "bounded_combination": {
+    "source_workstream": "LAB-S",
+    "source_configuration_ids": [
+      "c969d8a78d428aea24e848f3328341ac31efe54db04f1baae0173661fd80bffe",
+      "cd466277c202dacc368a9160151056c88b5358790418107058b72b66bb08ff86"
+    ],
+    "frozen_source_configuration_ids": [
+      "c969d8a78d428aea24e848f3328341ac31efe54db04f1baae0173661fd80bffe"
+    ],
+    "cadence_seconds": 60,
+    "cadence_non_overlap_survived": false
+  },
+  "future_experiment_slate": {
+    "contract": "qtrad-r2-historical-lab-z-future-experiment-slate-v1",
+    "status": "GUARDED_FALSIFICATION_SLATE_NOT_PROMOTED",
+    "evidence_label": "EXPLORATORY_POST_HOC_ONLY",
+    "source_class": "IBKR_HISTORICAL_RESEARCH",
+    "selected_for_production": false,
+    "historical_promotion_standard_met": false,
+    "target_universe": [
+      "commodity:spot-gold",
+      "commodity:spot-silver",
+      "commodity:us-crude",
+      "fx:aud-usd",
+      "fx:eur-jpy",
+      "fx:eur-usd",
+      "fx:gbp-usd",
+      "fx:nzd-usd",
+      "fx:usd-cad",
+      "fx:usd-chf",
+      "fx:usd-jpy",
+      "index:australia-200",
+      "index:eu-stocks-50",
+      "index:ftse-100",
+      "index:germany-40",
+      "index:hong-kong-hs50",
+      "index:japan-225",
+      "index:us-500",
+      "index:us-tech-100",
+      "index:wall-street"
+    ],
+    "horizon_minutes": 15,
+    "decision_cadence_seconds": 60,
+    "feature_set": {
+      "name": "P0",
+      "semantic_sha256": "61b4955c8b1536e84c80a574a5a10924d6fd235a1e6b70da3b76de43c9b45282"
+    },
+    "target_scaling": "RAW_RETURN",
+    "training_window_policy": {
+      "kind": "EXPANDING",
+      "chronological_outer_folds": true,
+      "fold_local_preprocessing": "TRAINING_MEDIAN_STANDARDISE_V1",
+      "target_maturity": "OUTCOME_AVAILABLE_BEFORE_FIT_OR_DECISION",
+      "source_active_opportunity_membership": true
+    },
+    "calibration_policy": "RAW_NO_POST_FIT_CALIBRATION",
+    "slate": [
+      {
+        "role": "DIRECT_NULL",
+        "model_family": "ZERO_RETURN",
+        "complexity_dependencies": []
+      },
+      {
+        "role": "IMMEDIATE_LINEAR_COMPARATOR",
+        "model_family": "LOCAL_RIDGE",
+        "ridge_alpha_policy": "CHRONOLOGICAL_INNER_SELECTION_FROM_[0.01,0.1,1.0,10.0]",
+        "complexity_dependencies": ["scikit-learn"]
+      },
+      {
+        "role": "POOLED_LINEAR_HYPOTHESIS",
+        "model_family": "FULLY_POOLED_LOCAL_RIDGE",
+        "ridge_alpha_policy": "CHRONOLOGICAL_INNER_SELECTION_FROM_[0.01,0.1,1.0,10.0]",
+        "complexity_dependencies": ["scikit-learn"]
+      }
+    ],
+    "nonlinear_tabular_challenger": null,
+    "sequence_challenger": null,
+    "direct_zero_question": "Does fully pooled Ridge achieve positive direct MSE skill versus ZERO_RETURN in multiple chronological blocks and multiple instruments?",
+    "immediate_comparator_question": "Does fully pooled Ridge improve directly on LOCAL_RIDGE under the identical untouched source, universe, folds, features, target and cadence?",
+    "mandatory_rejection_gates": [
+      "non_positive_direct_skill_versus_zero",
+      "fewer_than_two_positive_chronological_blocks",
+      "fewer_than_two_positive_instruments",
+      "best_instrument_or_period_contribution_above_0.8",
+      "unstable_or_non_positive_calibration_slope",
+      "failure_of_full_phase_non_overlap_cadence_screen"
+    ],
+    "complexity_dependency_requirements": [
+      "Python 3.13",
+      "Polars",
+      "NumPy",
+      "scikit-learn Ridge only",
+      "No neural-network dependency"
+    ]
+  }
+}
