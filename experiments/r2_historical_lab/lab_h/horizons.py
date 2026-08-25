@@ -178,17 +178,27 @@ def _load_joined(
     expected_finalist_freeze_sha256: str | None = None,
     configuration_id: str | None = None,
 ) -> pl.DataFrame:
-    loader = {
-        "manifest_path": config.manifest_path,
-        "expected_manifest_sha256": config.manifest_sha256,
-        "instruments": ORIGINAL_TARGETS,
-        "blocks": blocks,
-        "finalist_freeze": finalist_freeze,
-        "expected_finalist_freeze_sha256": expected_finalist_freeze_sha256,
-        "configuration_id": configuration_id,
-    }
-    features = load_parts(**loader, kind="feature").collect()
-    targets = load_parts(**loader, kind="target", horizons=horizons).collect()
+    features = load_parts(
+        manifest_path=config.manifest_path,
+        expected_manifest_sha256=config.manifest_sha256,
+        kind="feature",
+        instruments=ORIGINAL_TARGETS,
+        blocks=blocks,
+        finalist_freeze=finalist_freeze,
+        expected_finalist_freeze_sha256=expected_finalist_freeze_sha256,
+        configuration_id=configuration_id,
+    ).collect()
+    targets = load_parts(
+        manifest_path=config.manifest_path,
+        expected_manifest_sha256=config.manifest_sha256,
+        kind="target",
+        instruments=ORIGINAL_TARGETS,
+        horizons=horizons,
+        blocks=blocks,
+        finalist_freeze=finalist_freeze,
+        expected_finalist_freeze_sha256=expected_finalist_freeze_sha256,
+        configuration_id=configuration_id,
+    ).collect()
     return targets.join(
         features,
         on=["instrument_id", "decision_time"],
