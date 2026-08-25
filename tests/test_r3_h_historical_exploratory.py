@@ -2556,3 +2556,166 @@ def test_native_retained_loader_uses_pop_reconciliation_and_explicit_disposal() 
     assert "forecast_coverage" not in source
     assert "del first_target_groups, forecast_role_masks" in source
     assert "0b111" in source
+
+
+def _mutate_native_source_on_second_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None],
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_loader = implementation._load_native_target_source
+    calls = 0
+
+    def second_pass_loader(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_loader(*args, **kwargs)
+        calls += 1
+        if calls != 2:
+            return result
+        manifest, target_rows, opportunity_rows, inventory = result
+        targets = [dict(row) for row in target_rows]
+        opportunities = [dict(row) for row in opportunity_rows]
+        mutation(targets, opportunities)
+        return manifest, iter(targets), iter(opportunities), inventory
+
+    monkeypatch.setattr(implementation, "_load_native_target_source", second_pass_loader)
+
+
+def test_native_selected_second_pass_target_domain_mutation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows[0]["target_basis"] = "UNSUPPORTED"
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize("mutation", ("swapped", "duplicate"))
+def test_native_selected_second_pass_target_order_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "swapped":
+            target_rows[0], target_rows[1] = target_rows[1], target_rows[0]
+        else:
+            target_rows.append(deepcopy(target_rows[-1]))
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="strictly increasing"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+def test_native_selected_second_pass_missing_target_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.pop(0)
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize("mutation", ("swapped", "missing", "duplicate"))
+def test_native_selected_second_pass_opportunity_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "swapped":
+            first, second = opportunity_rows[:2]
+            first["target_id"], second["target_id"] = second["target_id"], first["target_id"]
+        elif mutation == "missing":
+            opportunity_rows.pop(0)
+        else:
+            opportunity_rows.append(deepcopy(opportunity_rows[0]))
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    expected = (
+        "identity differs from target"
+        if mutation == "swapped"
+        else "selected target/opportunity join is incomplete"
+    )
+    if mutation == "duplicate":
+        expected = "selected opportunity ID is duplicated"
+    with pytest.raises(FreezeError, match=expected):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+def test_native_second_pass_receipts_scan_all_physical_rows() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    expected_rows = len(rows)
+    source_receipts = metadata["source_scan_receipts"]
+    target_source = source_receipts["target_source"]
+    assert target_source["target_receipt"]["physical_rows"] == expected_rows * 2
+    assert target_source["opportunity_receipt"]["physical_rows"] == expected_rows * 2
+    for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
+        assert source_receipts[name]["physical_rows"] == expected_rows * 2
+        assert source_receipts[name]["second_pass"]["physical_rows"] == expected_rows
+
+
+def test_native_second_pass_skips_nonselected_fixture_row_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    extra_id = "extra-nonselected"
+    extra_target_ids: list[str] = []
+
+    def add_extra(
+        target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]
+    ) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["fixture_target_id"] = extra_id
+        extra_target_ids.append(cast(str, extra["target_id"]))
+        target_rows.append(extra)
+
+    _mutate_fixture_native_source(monkeypatch, config, add_extra)
+
+    def mutate_nonselected(
+        target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]
+    ) -> None:
+        next(row for row in target_rows if row.get("fixture_target_id") == extra_id)[
+            "target_basis"
+        ] = "UNSUPPORTED"
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate_nonselected)
+    observed: list[str] = []
+    original_row = implementation._native_fixture_row
+
+    def capture(target_id: str, *args: Any, **kwargs: Any) -> Any:
+        observed.append(target_id)
+        return original_row(target_id, *args, **kwargs)
+
+    monkeypatch.setattr(implementation, "_native_fixture_row", capture)
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    rows, _metadata = load_fixture_rows(synthetic_fixture(), config)
+    assert len(observed) == len(rows) == len(synthetic_fixture())
+    assert extra_target_ids[0] not in observed

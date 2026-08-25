@@ -4412,6 +4412,19 @@ def _load_native_retained_rows(
         previous_target_id: str | None = None
         for row in target_rows:
             target_row_count += 1
+            if selected_ids is not None:
+                replay_target_id = row.get("target_id")
+                if not isinstance(replay_target_id, str):
+                    raise FreezeError("native target row identity is malformed")
+                replay_target_id_bytes = _native_canonical_sha256_id(replay_target_id, "target ID")
+                if replay_target_id_bytes not in selected_ids:
+                    if previous_target_id is not None and replay_target_id <= previous_target_id:
+                        raise FreezeError(
+                            "native target-source target IDs are not strictly increasing"
+                        )
+                    previous_target_id = replay_target_id
+                    check_scan_progress(len(target_index))
+                    continue
             required = {
                 "target_id",
                 "instrument_id",
@@ -4506,6 +4519,16 @@ def _load_native_retained_rows(
             check_scan_progress(len(target_index))
         for row in opportunity_rows:
             opportunity_row_count += 1
+            if selected_ids is not None:
+                replay_target_id = row.get("target_id")
+                if not isinstance(replay_target_id, str):
+                    raise FreezeError("native opportunity identity is malformed")
+                replay_target_id_bytes = _native_canonical_sha256_id(
+                    replay_target_id, "opportunity target ID"
+                )
+                if replay_target_id_bytes not in selected_ids:
+                    check_scan_progress(len(target_index))
+                    continue
             required = {
                 "target_id",
                 "instrument_id",
@@ -4660,6 +4683,18 @@ def _load_native_retained_rows(
             receipt["physical_rows"] += len(part_rows)
             receipt["physical_part_bytes"] += part_size
             for row in part_rows:
+                if selected_ids is not None:
+                    replay_target_id = row.get("target_id")
+                    if not isinstance(replay_target_id, str):
+                        raise FreezeError(
+                            f"native {name} logical row identity or value is malformed"
+                        )
+                    replay_target_id_bytes = _native_canonical_sha256_id(
+                        replay_target_id, f"{name} target ID"
+                    )
+                    if replay_target_id_bytes not in selected_ids:
+                        check_scan_progress(len(role_masks))
+                        continue
                 if not required_native <= set(row):
                     raise FreezeError(f"native {name} logical row fields are incomplete")
                 if fixture and "asset" not in row:
