@@ -2719,3 +2719,21 @@ def test_native_second_pass_skips_nonselected_fixture_row_reconstruction(
     rows, _metadata = load_fixture_rows(synthetic_fixture(), config)
     assert len(observed) == len(rows) == len(synthetic_fixture())
     assert extra_target_ids[0] not in observed
+
+
+def test_native_nonselected_malformed_target_is_rejected_during_first_exhaustive_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["target_basis"] = "UNSUPPORTED"
+        target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
