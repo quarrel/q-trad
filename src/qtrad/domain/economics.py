@@ -23,6 +23,18 @@ from qtrad.domain.time import require_utc
 ECONOMICS_CONTRACT: Final = "qtrad-r3-economics-v1"
 SOLVER_POLICY_CONTRACT: Final = "qtrad-r3-solver-policy-v1"
 COST_ADJUSTED_RETURN_UNIT: Final = "REPORTING_RETURN"
+CONFIGURED_HORIZONS: Final = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(minutes=30),
+    timedelta(minutes=60),
+)
+
+
+def require_configured_horizon(value: timedelta, name: str = "horizon") -> timedelta:
+    if type(value) is not timedelta or value not in CONFIGURED_HORIZONS:
+        raise ValueError(f"{name} must be one of the configured 5m, 15m, 30m or 60m horizons")
+    return value
 
 
 class InputStatus(StrEnum):
@@ -1256,8 +1268,7 @@ class ContinuousCostModel:
             raise ValueError("continuous costs require supported impact status")
         if type(self.components) is not tuple:
             raise ValueError("continuous cost components must be a tuple")
-        if self.horizon != timedelta(minutes=15):
-            raise ValueError("R3.C continuous costs require a frozen 15m horizon")
+        require_configured_horizon(self.horizon, "continuous cost horizon")
         if tuple(c.component for c in self.components) != _COMPONENT_ORDER:
             raise ValueError("continuous costs must contain all six components canonically")
         if len(set(c.component for c in self.components)) != len(self.components):
@@ -1322,14 +1333,24 @@ class ContinuousCostModel:
         target_quantity: Decimal,
         decision_time: datetime,
         internal_cross_quantity: Decimal = Decimal(0),
+        holding_interval: timedelta | None = None,
     ) -> ExpectedCostState:
-        """Evaluate costs and bind a new complete point state to the final target."""
+        """Evaluate costs at one physical boundary.
+
+        holding_interval is the actual interval for which the resulting physical
+        position is held. The default preserves the model's configured horizon for
+        the R3.E one-horizon contract; lifecycle callers provide each event's next
+        boundary interval explicitly.
+        """
         _finite_decimal(current_quantity, "continuous current quantity")
         _finite_decimal(target_quantity, "continuous target quantity")
         _finite_decimal(internal_cross_quantity, "continuous internal cross quantity")
         if internal_cross_quantity < 0:
             raise ValueError("continuous internal cross quantity must be non-negative")
         require_utc(decision_time, "continuous cost decision time")
+        interval = self.horizon if holding_interval is None else holding_interval
+        if type(interval) is not timedelta or interval < timedelta(0):
+            raise ValueError("continuous holding interval must be a non-negative timedelta")
         if any(
             component.status in (InputStatus.MISSING, InputStatus.UNSUPPORTED)
             for component in self.components
@@ -1341,9 +1362,17 @@ class ContinuousCostModel:
             model = self.component(kind)
             quantity = delta if model.basis is CostBasis.PHYSICAL_DELTA else abs(target_quantity)
             native_amount = model.evaluate(quantity)
+            if (
+                kind is CostComponentKind.FINANCING
+                and holding_interval is not None
+                and self.horizon > timedelta(0)
+            ):
+                native_amount *= Decimal(interval.total_seconds()) / Decimal(
+                    self.horizon.total_seconds()
+                )
             reporting_amount = native_amount * model.conversion_rate
             quantity_basis = quantity if model.basis is CostBasis.PHYSICAL_DELTA else None
-            holding_interval = self.horizon if model.basis is CostBasis.PHYSICAL_HOLDING else None
+            holding = interval if model.basis is CostBasis.PHYSICAL_HOLDING else None
             if model.status is InputStatus.DOCUMENTED_ZERO:
                 costs.append(
                     ComponentCost.documented_zero(
@@ -1357,7 +1386,7 @@ class ContinuousCostModel:
                         conversion_source=model.conversion_source,
                         conversion_version=model.conversion_version,
                         quantity_basis=quantity_basis,
-                        holding_interval=holding_interval,
+                        holding_interval=holding,
                     )
                 )
             else:
@@ -1375,14 +1404,14 @@ class ContinuousCostModel:
                         version=model.version,
                         provenance=model.provenance,
                         quantity_basis=quantity_basis,
-                        holding_interval=holding_interval,
+                        holding_interval=holding,
                     )
                 )
         return ExpectedCostState(
             decision_time=decision_time,
             current_quantity=current_quantity,
             target_quantity=target_quantity,
-            holding_interval=self.horizon,
+            holding_interval=interval,
             reporting_currency=self.reporting_currency,
             components=tuple(costs),
             version=self.version,

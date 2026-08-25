@@ -229,6 +229,7 @@ class RoundedTarget:
     continuous_target_identity: str
     cost_state_identity: str = ""
     attribution_residual: Decimal = Decimal("0")
+    horizon_state_identities: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -336,6 +337,18 @@ class RoundedTarget:
         _finite_decimal(self.expected_cost_reporting, "rounded target expected cost")
         _finite_decimal(self.expected_financing_reporting, "rounded target expected financing")
         _finite_decimal(self.attribution_residual, "rounded target attribution residual")
+        horizon_states = tuple(self.horizon_state_identities)
+        if len({semantic for semantic, _ in horizon_states}) != len(horizon_states):
+            raise ValueError("rounded target horizon state identities must be unique")
+        for semantic, closure in horizon_states:
+            for value, label in ((semantic, "semantic"), (closure, "closure")):
+                if (
+                    type(value) is not str
+                    or len(value) != 64
+                    or any(char not in "0123456789abcdef" for char in value)
+                ):
+                    raise ValueError(f"rounded target horizon {label} identity is invalid")
+        object.__setattr__(self, "horizon_state_identities", horizon_states)
         if self.attribution_residual < 0:
             raise ValueError("rounded target attribution residual must be non-negative")
         if (
@@ -399,45 +412,46 @@ class RoundedTarget:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return json.dumps(
-            _canonical(
-                {
-                    "contract": ROUNDING_CONTRACT,
-                    "source_class": self.source_class,
-                    "evidence_purpose": self.evidence_purpose,
-                    "asset_order": self.asset_order,
-                    "current_position": self.current_position,
-                    "continuous_target": self.continuous_target,
-                    "target_position": self.target_position,
-                    "physical_delta": self.physical_delta,
-                    "disposition": self.disposition,
-                    "reason_codes": self.reason_codes,
-                    "expected_costs": tuple(
-                        (asset, self.expected_costs[asset].require_total_reporting())
-                        for asset in self.asset_order
-                        if asset in self.expected_costs
-                    ),
-                    "expected_cost_reporting": self.expected_cost_reporting,
-                    "expected_financing_reporting": self.expected_financing_reporting,
-                    "netting": self.netting.semantic_identity,
-                    "attributions": tuple(
-                        (
-                            item.key.as_json(),
-                            item.requested_delta,
-                            item.internal_cross_quantity,
-                            item.external_delta_share,
-                            item.repair_delta,
-                            item.reason_codes,
-                        )
-                        for item in self.attributions
-                    ),
-                    "policy_identity": self.policy_identity,
-                    "decision_input_identity": self.decision_input_identity,
-                    "continuous_target_identity": self.continuous_target_identity,
-                    "cost_state_identity": self.cost_state_identity,
-                    "attribution_residual": self.attribution_residual,
-                }
+        payload: dict[str, object] = {
+            "contract": ROUNDING_CONTRACT,
+            "source_class": self.source_class,
+            "evidence_purpose": self.evidence_purpose,
+            "asset_order": self.asset_order,
+            "current_position": self.current_position,
+            "continuous_target": self.continuous_target,
+            "target_position": self.target_position,
+            "physical_delta": self.physical_delta,
+            "disposition": self.disposition,
+            "reason_codes": self.reason_codes,
+            "expected_costs": tuple(
+                (asset, self.expected_costs[asset].require_total_reporting())
+                for asset in self.asset_order
+                if asset in self.expected_costs
             ),
+            "expected_cost_reporting": self.expected_cost_reporting,
+            "expected_financing_reporting": self.expected_financing_reporting,
+            "netting": self.netting.semantic_identity,
+            "attributions": tuple(
+                (
+                    item.key.as_json(),
+                    item.requested_delta,
+                    item.internal_cross_quantity,
+                    item.external_delta_share,
+                    item.repair_delta,
+                    item.reason_codes,
+                )
+                for item in self.attributions
+            ),
+            "policy_identity": self.policy_identity,
+            "decision_input_identity": self.decision_input_identity,
+            "continuous_target_identity": self.continuous_target_identity,
+            "cost_state_identity": self.cost_state_identity,
+            "attribution_residual": self.attribution_residual,
+        }
+        if self.horizon_state_identities:
+            payload["horizon_state_identities"] = self.horizon_state_identities
+        return json.dumps(
+            _canonical(payload),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -446,6 +460,19 @@ class RoundedTarget:
     @property
     def semantic_identity(self) -> str:
         return hashlib.sha256(self.canonical_bytes).hexdigest()
+
+    @property
+    def closure_identity(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "semantic_identity": self.semantic_identity,
+                    "closure": self.canonical_bytes.hex(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
 
     @property
     def final_target(self) -> tuple[Decimal, ...]:

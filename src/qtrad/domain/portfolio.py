@@ -35,6 +35,19 @@ from qtrad.domain.time import require_utc
 PORTFOLIO_CONTRACT: Final = "qtrad-r3-one-horizon-portfolio-v2"
 TARGET_CONTRACT: Final = "qtrad-r3-continuous-target-v1"
 ONE_HORIZON: Final = timedelta(minutes=15)
+CONFIGURED_HORIZONS: Final = (
+    timedelta(minutes=5),
+    ONE_HORIZON,
+    timedelta(minutes=30),
+    timedelta(minutes=60),
+)
+SUPPORTED_HORIZONS: Final = frozenset(CONFIGURED_HORIZONS)
+
+
+def require_configured_horizon(value: timedelta, name: str = "horizon") -> timedelta:
+    if type(value) is not timedelta or value not in SUPPORTED_HORIZONS:
+        raise ValueError(f"{name} must be one of the configured 5m, 15m, 30m or 60m horizons")
+    return value
 
 
 class DecisionDisposition(StrEnum):
@@ -161,8 +174,7 @@ class SleeveKey:
             )
         ):
             raise ValueError("sleeve identity fields are required")
-        if self.horizon != ONE_HORIZON:
-            raise ValueError("R3.C supports exactly the 15-minute horizon")
+        require_configured_horizon(self.horizon, "sleeve horizon")
 
     @property
     def canonical_tuple(self) -> tuple[str, str, str, str, str, int]:
@@ -184,6 +196,61 @@ class SleeveKey:
             "asset_id": self.asset_id,
             "horizon_seconds": int(self.horizon.total_seconds()),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class HorizonState:
+    """Immutable review/model/forecast lifecycle for one configured sleeve horizon."""
+
+    key: SleeveKey
+    decision_time: datetime
+    expiry_time: datetime
+    review_identity: str
+    model_identity: str
+    configuration_identity: str
+    forecast_identity: str
+
+    def __post_init__(self) -> None:
+        if type(self.key) is not SleeveKey:
+            raise ValueError("horizon state requires a SleeveKey")
+        require_utc(self.decision_time, "horizon state decision time")
+        require_utc(self.expiry_time, "horizon state expiry time")
+        if self.expiry_time <= self.decision_time:
+            raise ValueError("horizon state expiry must follow decision time")
+        if self.expiry_time - self.decision_time != self.key.horizon:
+            raise ValueError("horizon state expiry must match sleeve horizon")
+        if any(
+            type(value) is not str or not value
+            for value in (
+                self.review_identity,
+                self.model_identity,
+                self.configuration_identity,
+                self.forecast_identity,
+            )
+        ):
+            raise ValueError("horizon state identities are required")
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "key": self.key.as_json(),
+            "decision_time": self.decision_time,
+            "expiry_time": self.expiry_time,
+            "review_identity": self.review_identity,
+            "model_identity": self.model_identity,
+            "configuration_identity": self.configuration_identity,
+            "forecast_identity": self.forecast_identity,
+        }
+
+    @property
+    def semantic_identity(self) -> str:
+        return _identity(self.canonical_payload)
+
+    @property
+    def closure_identity(self) -> str:
+        return _identity(
+            {"semantic_identity": self.semantic_identity, "closure": self.canonical_payload}
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,10 +310,11 @@ class HorizonIntent:
         _nonnegative(self.gross_sleeve_value, "gross sleeve value")
         require_utc(self.decision_time, "intent decision time")
         require_utc(self.expiry_time, "intent expiry time")
-        if self.expiry_time <= self.decision_time:
+        terminal = self.expiry_time == self.decision_time and "TERMINAL_EVENT" in self.reason_codes
+        if self.expiry_time <= self.decision_time and not terminal:
             raise ValueError("intent expiry must follow decision time")
-        if self.gross_forecast.horizon != ONE_HORIZON:
-            raise ValueError("intent forecast must use the 15-minute horizon")
+        if self.gross_forecast.horizon != self.key.horizon:
+            raise ValueError("intent forecast horizon must match sleeve horizon")
         if self.gross_forecast.model_identity != self.model_identity:
             raise ValueError("intent model identity must match gross forecast")
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
@@ -840,8 +908,7 @@ class ContinuousTargetInputs:
                 raise ValueError(f"asset {asset} cost reporting currency mismatch")
             if model.horizon != self.risk.horizon:
                 raise ValueError(f"asset {asset} continuous cost horizon mismatch")
-            if model.horizon != ONE_HORIZON:
-                raise ValueError(f"asset {asset} continuous cost horizon must be 15m")
+            require_configured_horizon(model.horizon, f"asset {asset} cost horizon")
             if model.economics_identity != economics.semantic_identity:
                 raise ValueError(f"asset {asset} economics authority mismatch")
             commission = model.component(CostComponentKind.COMMISSION)
@@ -1094,7 +1161,7 @@ class ContinuousTarget:
                     state.decision_time != self.decision_time
                     or state.current_quantity != self.current_position[index]
                     or state.target_quantity != self.target_position[index]
-                    or state.holding_interval != ONE_HORIZON
+                    or state.holding_interval < timedelta(0)
                     or state.reporting_currency != self.reporting_currencies[asset]
                 ):
                     raise ValueError("accepted target cost state binding mismatch")
@@ -1175,6 +1242,12 @@ class ContinuousTarget:
     @property
     def semantic_identity(self) -> str:
         return _identity(self.canonical_bytes)
+
+    @property
+    def closure_identity(self) -> str:
+        return _identity(
+            {"semantic_identity": self.semantic_identity, "closure": self.canonical_bytes.hex()}
+        )
 
 
 def independent_continuous_feasibility(

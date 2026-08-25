@@ -274,6 +274,7 @@ class RiskState:
     semantic_identity: str | None = None
     closure_identity: str | None = None
     provenance_identity: str | None = None
+    horizon_state_identities: tuple[str, ...] = ()
 
     CONTRACT: ClassVar[str] = RISK_STATE_CONTRACT
 
@@ -298,6 +299,17 @@ class RiskState:
             tuple(tuple(row) for row in self.currency_exposure_matrix),
         )
         object.__setattr__(self, "currency_caps", tuple(self.currency_caps))
+        horizon_states = tuple(self.horizon_state_identities)
+        if len(set(horizon_states)) != len(horizon_states):
+            raise ValueError("risk horizon state identities must be unique")
+        if any(
+            type(value) is not str
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+            for value in horizon_states
+        ):
+            raise ValueError("risk horizon state identity is invalid")
+        object.__setattr__(self, "horizon_state_identities", horizon_states)
         ordered = canonical_asset_order(self.asset_order)
         if ordered != self.asset_order:
             raise ValueError("risk asset_order is not canonical")
@@ -460,6 +472,11 @@ class RiskState:
             "currency_exposure_matrix": self.currency_exposure_matrix,
             "currency_caps": self.currency_caps,
             "caps": self.caps.as_json(),
+            **(
+                {"horizon_state_identities": self.horizon_state_identities}
+                if self.horizon_state_identities
+                else {}
+            ),
         }
 
     def _closure_payload(self) -> dict[str, object]:

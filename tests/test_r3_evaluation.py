@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -7,10 +9,11 @@ from decimal import Decimal
 import pytest
 
 import qtrad.application.r3_evaluation as evaluation_app
-from qtrad.application.r3_evaluation import build_fixture_inputs, run_fixture
+from qtrad.application.r3_evaluation import build_fixture_inputs, fixture_cli, run_fixture
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
     EvaluationDisposition,
+    LifecycleEvent,
     OutcomeClosure,
     VerificationReceipt,
     build_outcome_closures,
@@ -347,3 +350,327 @@ def test_nonzero_r3d_repair_reconciles_and_reports_allocations():
     assert allocations["long"].repair_delta == Decimal("0.1")
     assert allocations["short"].physical_delta == Decimal("0")
     assert allocations["short"].repair_delta == Decimal("0")
+
+
+def test_unified_fixture_identity_and_canonical_replay(tmp_path):
+    first = run_fixture(tmp_path / "first")
+    second = run_fixture(tmp_path / "second")
+    assert first.semantic_identity != (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    assert first.lifecycle_events is not None
+    assert len(first.canonical_bytes) > 5176
+    assert first.canonical_bytes == second.canonical_bytes
+    assert first.semantic_identity == second.semantic_identity
+    assert (tmp_path / "first" / "report.json").read_bytes() == first.canonical_bytes
+
+
+def test_multihorizon_lifecycle_nets_once_per_event_and_finances_held_sleeves(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    decision, _ = build_fixture_inputs((5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    assert tuple(event.event_time for event in events) == (
+        decision.decision_time,
+        *sorted({item.expiry_time for item in decision.horizon_states}),
+    )
+    assert events[-1].physical_position == (("ASSET_A", Decimal("0")),)
+    assert events[-1].physical_delta == (("ASSET_A", Decimal("-0.125")),)
+    for index, event in enumerate(events):
+        previous = Decimal("0") if index == 0 else events[index - 1].physical_position[0][1]
+        assert event.physical_position[0][1] - previous == event.physical_delta[0][1]
+        assert (
+            sum((value for _, value in event.sleeve_transaction_costs), Decimal("0"))
+            == event.transaction_cost[0][1]
+        )
+        assert (
+            sum((value for _, value in event.sleeve_financing_costs), Decimal("0"))
+            == event.financing_cost[0][1]
+        )
+        assert event.target_identity and event.cost_state_identity
+        assert event.netting_identity and event.decision_identity
+    assert any(
+        sum((value for _, value in event.sleeve_financing_costs), Decimal("0")) > 0
+        for event in events[1:]
+    )
+
+
+def test_multihorizon_lifecycle_records_zero_delta_holding_finance(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+
+    holding_event = next(
+        event
+        for event in events
+        if event.physical_delta == (("ASSET_A", Decimal("0")),)
+        and event.physical_position[0][1] != Decimal("0")
+    )
+    assert holding_event.next_event_time - holding_event.event_time > timedelta(0)
+    assert holding_event.physical_position == (("ASSET_A", Decimal("0.125")),)
+    assert holding_event.transaction_cost == (("ASSET_A", Decimal("0")),)
+    assert holding_event.sleeve_transaction_costs
+    assert all(amount == Decimal("0") for _, amount in holding_event.sleeve_transaction_costs)
+
+    financing = holding_event.financing_cost[0][1]
+    assert financing > Decimal("0")
+    assert holding_event.sleeve_financing_costs == (
+        ("long-60m", financing / Decimal("2")),
+        ("short-60m", financing / Decimal("2")),
+    )
+    assert (
+        sum(
+            (amount for _, amount in holding_event.sleeve_financing_costs),
+            Decimal("0"),
+        )
+        == financing
+    )
+
+
+def test_lifecycle_event_identity_chain_rejects_mutation(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match="identity chain"):
+        replace(events[0], target_identity="0" * 64)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("physical_position", (("ASSET_A", Decimal("0")),)),
+        ("physical_delta", (("ASSET_A", Decimal("0")),)),
+        ("transaction_cost", (("ASSET_A", Decimal("0")),)),
+        ("financing_cost", (("ASSET_A", Decimal("0")),)),
+        ("sleeve_allocations", ()),
+        ("sleeve_transaction_costs", ()),
+        ("sleeve_financing_costs", ()),
+    ),
+)
+def test_lifecycle_event_rejects_forged_public_values(tmp_path, field, value):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match=r"(authoritative|attribution)"):
+        replace(events[0], **{field: value})
+
+
+def test_horizon_permutation_replays_identical_canonical_report(tmp_path):
+    canonical = run_fixture(tmp_path / "canonical", (5, 15, 30, 60))
+    permuted = run_fixture(tmp_path / "permuted", (60, 30, 5, 15))
+    assert canonical.canonical_bytes == permuted.canonical_bytes
+    assert canonical.semantic_identity == permuted.semantic_identity
+
+
+def test_lifecycle_cost_largest_remainder_uses_stable_ties_without_residual():
+    weights = (
+        ("sleeve-a", Decimal("1")),
+        ("sleeve-b", Decimal("1")),
+        ("sleeve-c", Decimal("1")),
+    )
+    allocated = evaluation_app._allocate_lifecycle_cost(Decimal("4e-28"), weights, Decimal("3"))
+    assert allocated == (
+        ("sleeve-a", Decimal("2e-28")),
+        ("sleeve-b", Decimal("1e-28")),
+        ("sleeve-c", Decimal("1e-28")),
+    )
+    assert sum((value for _, value in allocated), Decimal("0")) == Decimal("4e-28")
+
+
+def test_lifecycle_report_rejects_omitted_or_stale_event_sequence(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match="required"):
+        replace(report, lifecycle_events=())
+    with pytest.raises(ValueError, match="close all physical positions"):
+        replace(report, lifecycle_events=events[:-1])
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "target_identity",
+        "risk_state_identity",
+        "outcome_identities",
+        "report_identity",
+        "receipt_identity",
+    ),
+)
+def test_lifecycle_event_rejects_forged_component_links(tmp_path, field):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    value = ("0" * 64,) if field == "outcome_identities" else "0" * 64
+    with pytest.raises(ValueError, match="identity chain"):
+        replace(events[0], **{field: value})
+
+
+def test_lifecycle_crossing_and_no_trade_financing_are_explicit(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    first = events[0]
+    assert sum(
+        (item.internal_cross_quantity for item in first.sleeve_allocations), Decimal("0")
+    ) == Decimal("1.000")
+    assert first.physical_delta == (("ASSET_A", Decimal("0.500")),)
+    later = events[2]
+    assert later.physical_delta == (("ASSET_A", Decimal("-0.125")),)
+    assert later.financing_cost[0][1] > Decimal("0")
+    assert any(value != Decimal("0") for _, value in later.sleeve_financing_costs)
+
+
+@pytest.mark.parametrize(
+    "component_field",
+    ("_decision_component", "_outcome_components", "_report_component", "_receipt_component"),
+)
+def test_lifecycle_event_rejects_reused_component_from_another_event(tmp_path, component_field):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match=r"(identity chain|does not bind)"):
+        replace(events[0], **{component_field: getattr(events[1], component_field)})
+
+
+def test_lifecycle_persistence_binds_ordered_receipt_chain(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    event_dirs = sorted((tmp_path / "lifecycle-events").iterdir())
+    assert len(event_dirs) == len(events)
+    for event_dir in event_dirs:
+        target_receipt = json.loads((event_dir / "target-receipt.json").read_bytes())
+        decision_receipt = json.loads((event_dir / "decision-receipt.json").read_bytes())
+        outcome_receipt = json.loads((event_dir / "outcome-ASSET_A-receipt.json").read_bytes())
+        assert (
+            decision_receipt["parent_verification_identity"] == target_receipt["receipt_identity"]
+        )
+        assert (
+            outcome_receipt["parent_verification_identity"] == decision_receipt["receipt_identity"]
+        )
+
+
+def test_legacy_projection_is_opaque_and_non_authoritative(monkeypatch, tmp_path):
+    output = tmp_path / "legacy"
+    fixture_cli(str(output))
+    payload = (output / "report.json").read_bytes()
+    assert len(payload) == 5176
+    assert hashlib.sha256(payload).hexdigest() == (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    assert not (output / "decision.json").exists()
+    assert not (output / "target.json").exists()
+    receipt = json.loads((output / "compatibility-projection-receipt.json").read_bytes())
+    assert receipt["disposition"] == "NON_AUTHORITATIVE_COMPATIBILITY_PROJECTION"
+    assert receipt["projection_sha256"] == (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    monkeypatch.setattr(evaluation_app, "_COMPATIBILITY_PROJECTION_SHA256", "0" * 64)
+    with pytest.raises(ValueError, match="SHA256"):
+        fixture_cli(str(tmp_path / "forged"))
+
+
+def _fixture_events() -> tuple[LifecycleEvent, ...]:
+    decision, quotes = build_fixture_inputs()
+    return evaluation_app._build_lifecycle_events(
+        decision,
+        decision.horizon_states,
+        evaluation_app._model("ASSET_A"),
+        quotes,
+    )
+
+
+def test_lifecycle_rejects_shifted_event_boundary():
+    event = _fixture_events()[0]
+    with pytest.raises(ValueError, match="authoritative decision boundary"):
+        replace(event, event_time=event.event_time + timedelta(seconds=1))
+
+
+def test_lifecycle_rejects_caller_state_parent_swap():
+    decision, quotes = build_fixture_inputs()
+    with pytest.raises(ValueError, match="lifecycle states do not bind"):
+        evaluation_app._build_lifecycle_events(
+            decision,
+            tuple(reversed(decision.horizon_states)),
+            evaluation_app._model("ASSET_A"),
+            quotes,
+        )
+
+
+def test_lifecycle_receipt_binds_ordered_decision_and_outcomes():
+    events = _fixture_events()
+    receipt = object.__getattribute__(events[0], "_receipt_component")
+    other_receipt = object.__getattribute__(events[1], "_receipt_component")
+    forged = replace(
+        receipt,
+        parent_receipt_identities=(
+            receipt.parent_receipt_identities[0],
+            other_receipt.parent_receipt_identities[1],
+        ),
+        receipt_identity="",
+    )
+    with pytest.raises(ValueError, match="ordered outcome receipts"):
+        replace(events[0], _receipt_component=forged, receipt_identity=forged.receipt_identity)
+
+
+def test_lifecycle_seeds_nonzero_authoritative_physical_position():
+    decision, quotes = build_fixture_inputs()
+    object.__setattr__(decision, "current_position", (Decimal("0.25"),))
+    events = evaluation_app._build_lifecycle_events(
+        decision,
+        decision.horizon_states,
+        evaluation_app._model("ASSET_A"),
+        quotes,
+    )
+    assert events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
+    assert events[-1].physical_position == (("ASSET_A", Decimal("0.00")),)
+
+
+def test_persisted_lifecycle_report_seeds_nonzero_authoritative_position(monkeypatch, tmp_path):
+    original_inputs = evaluation_app.build_fixture_inputs
+
+    def nonzero_inputs(horizons=(15,)):
+        decision, quotes = original_inputs(horizons)
+        object.__setattr__(decision, "current_position", (Decimal("0.25"),))
+        return decision, quotes
+
+    monkeypatch.setattr(evaluation_app, "build_fixture_inputs", nonzero_inputs)
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    assert report.lifecycle_events is not None
+    assert report.lifecycle_events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
+    persisted = json.loads((tmp_path / "report.json").read_bytes())
+    assert persisted["lifecycle_events"][0]["physical_delta"] == [["ASSET_A", "0.250"]]
+
+
+def test_terminal_intents_and_closure_use_zero_duration_authority(monkeypatch, tmp_path):
+    captured = []
+    original = evaluation_app.construct_horizon_intent
+
+    def capture(**kwargs):
+        intent = original(**kwargs)
+        captured.append(intent)
+        return intent
+
+    monkeypatch.setattr(evaluation_app, "construct_horizon_intent", capture)
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    terminal = events[-1]
+    decision = object.__getattribute__(terminal, "_decision_component")
+    event_report = object.__getattribute__(terminal, "_report_component")
+    terminal_intents = [item for item in captured if item.decision_time == terminal.event_time]
+    assert terminal_intents
+    assert all(item.expiry_time == terminal.event_time for item in terminal_intents)
+    assert decision.terminal_disposition is True
+    assert decision.expiry_time == decision.decision_time
+    assert decision.holding_interval == timedelta(0)
+    assert event_report.expected_cost_components["ASSET_A"]["FINANCING"] == Decimal("0")
+    with pytest.raises(ValueError, match="terminal decision interval"):
+        replace(decision, expiry_time=decision.decision_time + timedelta(seconds=1))
+
+
+def test_compatibility_projection_rejects_non_15m_without_artifacts(tmp_path):
+    with pytest.raises(ValueError, match="fixed to the 15m"):
+        run_fixture(tmp_path, (5,), compatibility_projection=True)
+    assert tuple(tmp_path.iterdir()) == ()

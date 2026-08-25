@@ -1257,8 +1257,15 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
 
-    r3e = subparsers.add_parser("r3-e", help="run the bounded R3.E fixture evaluator")
+    r3e = subparsers.add_parser("r3-e", help="run the bounded R3.F fixture evaluator")
     r3e.add_argument("--output", type=Path, required=True)
+    r3e.add_argument(
+        "--horizon",
+        dest="horizons",
+        type=int,
+        action="append",
+        help="configured sleeve horizon in minutes; repeat for multiple horizons",
+    )
     return parser
 
 
@@ -2461,7 +2468,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "api":
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     elif args.command == "r3-e":
-        fixture_cli(str(args.output))
+        fixture_cli(str(args.output), args.horizons or (15,))
     else:
         raise RuntimeError("unhandled command")
 

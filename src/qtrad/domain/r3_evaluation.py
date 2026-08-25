@@ -12,7 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from enum import StrEnum
 from types import MappingProxyType
 from typing import cast
@@ -25,7 +25,7 @@ from qtrad.domain.economics import (
     InputStatus,
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass, PriceBasis
-from qtrad.domain.portfolio import SleeveKey
+from qtrad.domain.portfolio import ContinuousTarget, HorizonState, NettingResult, SleeveKey
 from qtrad.domain.r3_rounding import RoundedTarget
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
@@ -168,6 +168,19 @@ class SleeveAttribution:
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "sleeve_id": self.sleeve_id,
+            "asset_id": self.asset_id,
+            "key": self.key.as_json() if self.key is not None else None,
+            "requested_delta": self.requested_delta,
+            "internal_cross_quantity": self.internal_cross_quantity,
+            "external_delta_share": self.external_delta_share,
+            "repair_delta": self.repair_delta,
+            "reason_codes": self.reason_codes,
+        }
+
+    @property
     def canonical_key(self) -> tuple[object, ...]:
         return self.key.canonical_tuple if self.key is not None else (self.asset_id, self.sleeve_id)
 
@@ -202,6 +215,8 @@ class DecisionClosure:
     reporting_currency: str = "AUD"
     contract: str = DECISION_CONTRACT
     risk_state: RiskState | None = None
+    horizon_states: tuple[HorizonState, ...] = ()
+    terminal_disposition: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -229,7 +244,10 @@ class DecisionClosure:
             raise ValueError("decision physical delta does not reconcile")
         require_utc(self.decision_time, "decision time")
         require_utc(self.expiry_time, "expiry time")
-        if self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
+        if self.terminal_disposition:
+            if self.expiry_time != self.decision_time or self.holding_interval != timedelta(0):
+                raise ValueError("terminal decision interval must have zero holding")
+        elif self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
             raise ValueError("decision interval is invalid")
         if self.reporting_currency != "AUD":
             raise ValueError("decision reporting currency must be AUD")
@@ -279,6 +297,36 @@ class DecisionClosure:
             or self.risk_state.asset_order != assets
         ):
             raise ValueError("decision risk state does not bind source, evidence or asset order")
+        horizon_states = tuple(self.horizon_states)
+        if (
+            tuple(sorted(horizon_states, key=lambda item: item.key.canonical_tuple))
+            != horizon_states
+        ):
+            raise ValueError("decision horizon states must use canonical sleeve order")
+        if len({item.key for item in horizon_states}) != len(horizon_states):
+            raise ValueError("decision horizon states must be unique")
+        if any(
+            item.key.source_class is not self.source_class
+            or item.key.evidence_purpose is not self.evidence_purpose
+            or item.key.asset_id not in assets
+            for item in horizon_states
+        ):
+            raise ValueError("decision horizon state source, evidence or asset mismatch")
+        object.__setattr__(self, "horizon_states", horizon_states)
+        if horizon_states:
+            expected_horizon_ids = tuple(item.semantic_identity for item in horizon_states)
+            expected_pairs = tuple(
+                (item.semantic_identity, item.closure_identity) for item in horizon_states
+            )
+            if (
+                self.risk_state is None
+                or self.risk_state.horizon_state_identities != expected_horizon_ids
+            ):
+                raise ValueError("decision risk state horizon identities do not bind lifecycle")
+            if self.rounded_target.horizon_state_identities != expected_pairs:
+                raise ValueError("decision rounded target horizon identities do not bind lifecycle")
+        elif self.risk_state is not None and self.risk_state.horizon_state_identities:
+            raise ValueError("decision risk state has unexpected horizon identities")
         object.__setattr__(
             self, "gross_forecast_return", MappingProxyType(dict(self.gross_forecast_return))
         )
@@ -322,7 +370,7 @@ class DecisionClosure:
 
     @property
     def canonical_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "contract": self.contract,
             "source_class": self.source_class,
             "evidence_purpose": self.evidence_purpose,
@@ -333,6 +381,7 @@ class DecisionClosure:
             "decision_time": self.decision_time,
             "expiry_time": self.expiry_time,
             "holding_interval": self.holding_interval,
+            "terminal_disposition": self.terminal_disposition,
             "gross_forecast_return": tuple(
                 (asset, self.gross_forecast_return[asset]) for asset in self.asset_order
             ),
@@ -361,6 +410,11 @@ class DecisionClosure:
             if self.risk_state is not None
             else None,
         }
+        if self.horizon_states:
+            payload["horizon_states"] = tuple(
+                item.canonical_payload for item in self.horizon_states
+            )
+        return payload
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -826,6 +880,556 @@ class SleeveReconciliation:
         }
 
 
+def lifecycle_component_identities(components: Mapping[str, object]) -> dict[str, object]:
+    """Return authoritative identities for one lifecycle component graph."""
+    netting = cast(NettingResult, components["netting"])
+    continuous_target = cast(ContinuousTarget, components["continuous_target"])
+    rounded_target = cast(RoundedTarget, components["rounded_target"])
+    risk_state = cast(RiskState, components["risk_state"])
+    decision = cast(DecisionClosure, components["decision"])
+    outcomes = cast(tuple[OutcomeClosure, ...], components["outcomes"])
+    report = cast(EvaluationReport, components["report"])
+    receipt = cast(VerificationReceipt, components["receipt"])
+    return {
+        "netting": netting.semantic_identity,
+        "continuous_target": continuous_target.semantic_identity,
+        "rounded_target": rounded_target.semantic_identity,
+        "target": rounded_target.semantic_identity,
+        "cost": rounded_target.cost_state_identity,
+        "risk": risk_state.semantic_identity,
+        "decision": decision.semantic_identity,
+        "outcomes": tuple(item.semantic_identity for item in outcomes),
+        "report": report.semantic_identity,
+        "receipt": receipt.receipt_identity,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleEvent:
+    """One deterministic virtual-to-physical lifecycle boundary."""
+
+    event_time: datetime
+    next_event_time: datetime
+    active_state_identities: tuple[str, ...]
+    reviewed_state_identities: tuple[str, ...]
+    expired_state_identities: tuple[str, ...]
+    physical_position: tuple[tuple[str, Decimal], ...]
+    physical_delta: tuple[tuple[str, Decimal], ...]
+    transaction_cost: tuple[tuple[str, Decimal], ...]
+    financing_cost: tuple[tuple[str, Decimal], ...]
+    sleeve_allocations: tuple[SleeveAttribution, ...]
+    target_identity: str
+    risk_state_identity: str
+    decision_identity: str
+    cost_state_identity: str
+    netting_identity: str
+    outcome_identities: tuple[str, ...] = ()
+    report_identity: str = ""
+    receipt_identity: str = ""
+    sleeve_transaction_costs: tuple[tuple[str, Decimal], ...] = ()
+    sleeve_financing_costs: tuple[tuple[str, Decimal], ...] = ()
+    continuous_target_identity: str = ""
+    rounded_target_identity: str = ""
+    _netting_component: NettingResult | None = field(default=None, repr=False, compare=False)
+    _continuous_target_component: ContinuousTarget | None = field(
+        default=None, repr=False, compare=False
+    )
+    _rounded_target_component: RoundedTarget | None = field(default=None, repr=False, compare=False)
+    _risk_state_component: RiskState | None = field(default=None, repr=False, compare=False)
+    _decision_component: DecisionClosure | None = field(default=None, repr=False, compare=False)
+    _outcome_components: tuple[OutcomeClosure, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _report_component: EvaluationReport | None = field(default=None, repr=False, compare=False)
+    _receipt_component: VerificationReceipt | None = field(default=None, repr=False, compare=False)
+    _sleeve_transaction_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _sleeve_financing_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    # Boundaries and lifecycle membership are derived from the event decision's
+    # authoritative HorizonState values; callers cannot supply a parallel state or
+    # boundary projection.
+
+    def __post_init__(self) -> None:
+        require_utc(self.event_time, "lifecycle event time")
+        require_utc(self.next_event_time, "lifecycle next event time")
+        if self.next_event_time < self.event_time:
+            raise ValueError("lifecycle next event must not precede event time")
+        for name, values in (
+            ("active state", self.active_state_identities),
+            ("reviewed state", self.reviewed_state_identities),
+            ("expired state", self.expired_state_identities),
+            ("outcome", self.outcome_identities),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered)) or len(set(ordered)) != len(ordered):
+                raise ValueError(f"lifecycle {name} identities must be canonical and unique")
+            for value in ordered:
+                _digest(value, f"lifecycle {name} identity")
+        for name, values in (
+            ("physical position", self.physical_position),
+            ("physical delta", self.physical_delta),
+            ("transaction cost", self.transaction_cost),
+            ("financing cost", self.financing_cost),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered, key=lambda item: item[0])):
+                raise ValueError(f"lifecycle {name} must use canonical asset order")
+            if len({item[0] for item in ordered}) != len(ordered):
+                raise ValueError(f"lifecycle {name} must use unique assets")
+            for _, value in ordered:
+                _decimal(value, f"lifecycle {name} value")
+        allocations = tuple(self.sleeve_allocations)
+        if allocations != tuple(sorted(allocations, key=lambda item: item.canonical_key)):
+            raise ValueError("lifecycle sleeve allocations must be canonical")
+        object.__setattr__(self, "sleeve_allocations", allocations)
+        for name, values in (
+            ("sleeve transaction cost", self.sleeve_transaction_costs),
+            ("sleeve financing cost", self.sleeve_financing_costs),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered, key=lambda item: item[0])):
+                raise ValueError(f"{name} allocations must be canonical")
+            if len({item[0] for item in ordered}) != len(ordered):
+                raise ValueError(f"{name} allocations must use unique sleeves")
+            for _, value in ordered:
+                _decimal(value, name)
+        if sum((value for _, value in self.sleeve_transaction_costs), Decimal("0")) != sum(
+            value for _, value in self.transaction_cost
+        ):
+            raise ValueError("lifecycle transaction cost attribution does not reconcile")
+        if sum((value for _, value in self.sleeve_financing_costs), Decimal("0")) != sum(
+            value for _, value in self.financing_cost
+        ):
+            raise ValueError("lifecycle financing cost attribution does not reconcile")
+        object.__setattr__(self, "sleeve_transaction_costs", tuple(self.sleeve_transaction_costs))
+        object.__setattr__(self, "sleeve_financing_costs", tuple(self.sleeve_financing_costs))
+        for name, value in (
+            ("target", self.target_identity),
+            ("continuous target", self.continuous_target_identity),
+            ("rounded target", self.rounded_target_identity),
+            ("risk", self.risk_state_identity),
+            ("decision", self.decision_identity),
+        ):
+            _digest(value, f"lifecycle {name} identity")
+        for name, value in (("report", self.report_identity), ("receipt", self.receipt_identity)):
+            if value:
+                _digest(value, f"lifecycle {name} identity")
+        _digest(self.cost_state_identity, "lifecycle cost identity")
+        _digest(self.netting_identity, "lifecycle netting identity")
+        if any(
+            component is None
+            for component in (
+                self._netting_component,
+                self._continuous_target_component,
+                self._rounded_target_component,
+                self._risk_state_component,
+                self._decision_component,
+                self._outcome_components,
+                self._report_component,
+                self._receipt_component,
+                self._sleeve_transaction_cost_component,
+                self._sleeve_financing_cost_component,
+            )
+        ):
+            raise ValueError("lifecycle event requires authoritative component objects")
+        expected = lifecycle_component_identities(
+            {
+                "netting": self._netting_component,
+                "continuous_target": self._continuous_target_component,
+                "rounded_target": self._rounded_target_component,
+                "risk_state": self._risk_state_component,
+                "decision": self._decision_component,
+                "outcomes": self._outcome_components,
+                "report": self._report_component,
+                "receipt": self._receipt_component,
+            }
+        )
+        supplied = {
+            "netting": self.netting_identity,
+            "target": self.target_identity,
+            "continuous_target": self.continuous_target_identity,
+            "rounded_target": self.rounded_target_identity,
+            "cost": self.cost_state_identity,
+            "risk": self.risk_state_identity,
+            "decision": self.decision_identity,
+            "outcomes": self.outcome_identities,
+            "report": self.report_identity,
+            "receipt": self.receipt_identity,
+        }
+        expected_values = {
+            "netting": expected["netting"],
+            "target": expected["target"],
+            "continuous_target": expected["continuous_target"],
+            "rounded_target": expected["rounded_target"],
+            "cost": expected["cost"],
+            "risk": expected["risk"],
+            "decision": expected["decision"],
+            "outcomes": expected["outcomes"],
+            "report": expected["report"],
+            "receipt": expected["receipt"],
+        }
+        if supplied != expected_values:
+            raise ValueError("lifecycle identity chain does not bind authoritative components")
+
+        assert self._netting_component is not None
+        assert self._continuous_target_component is not None
+        assert self._rounded_target_component is not None
+        assert self._decision_component is not None
+        assert self._outcome_components is not None
+        assert self._report_component is not None
+        assert self._receipt_component is not None
+        assert self._sleeve_transaction_cost_component is not None
+        assert self._sleeve_financing_cost_component is not None
+        netting = self._netting_component
+        continuous = self._continuous_target_component
+        rounded = self._rounded_target_component
+        decision = self._decision_component
+        outcomes = self._outcome_components
+        report = self._report_component
+        receipt = self._receipt_component
+
+        if report.lifecycle_events not in (None, ()):
+            raise ValueError("lifecycle event report must have an empty lifecycle chain")
+        expected_report_horizons = tuple(
+            (state.semantic_identity, state.closure_identity) for state in decision.horizon_states
+        )
+        if report.horizon_state_identities != expected_report_horizons:
+            raise ValueError("lifecycle event report horizon states do not bind event decision")
+        if (
+            report.source_class is not decision.source_class
+            or report.evidence_purpose is not decision.evidence_purpose
+            or report.decision_identity != decision.semantic_identity
+            or report.decision_closure_identity != decision.closure_identity
+            or report.risk_state_identity
+            != (decision.risk_state.semantic_identity if decision.risk_state is not None else "")
+            or report.risk_current_position != decision.current_position
+            or report.risk_target_position != decision.target_position
+        ):
+            raise ValueError(
+                "lifecycle event report does not bind event decision; "
+                "evaluation report does not bind"
+            )
+        if (
+            receipt.semantic_identity != report.semantic_identity
+            or receipt.closure_identity != report.closure_identity
+        ):
+            raise ValueError("lifecycle event receipt does not bind event report")
+        if (
+            receipt.parent_verification_identity == decision.parent_verification_identity
+            or not receipt.parent_receipt_identities
+            or receipt.parent_receipt_identities[0] != receipt.parent_verification_identity
+        ):
+            raise ValueError("lifecycle event receipt does not bind decision receipt")
+        expected_outcome_receipts = tuple(
+            VerificationReceipt(
+                artefact_contract=outcome.contract,
+                semantic_identity=outcome.semantic_identity,
+                closure_identity=outcome.closure_identity,
+                parent_verification_identity=receipt.parent_verification_identity,
+                verifier_contract="r3-e-lifecycle-verifier-v1",
+                checks=("canonical-bytes", "decision-parent", "create-only"),
+            ).receipt_identity
+            for outcome in outcomes
+        )
+        if receipt.parent_receipt_identities[1:] != expected_outcome_receipts:
+            raise ValueError("lifecycle event receipt does not bind ordered outcome receipts")
+        if any(
+            outcome.asset_id not in decision.asset_order
+            or outcome.decision_semantic_identity != decision.semantic_identity
+            or outcome.decision_closure_identity != decision.closure_identity
+            or outcome.source_class is not decision.source_class
+            or outcome.evidence_purpose is not decision.evidence_purpose
+            for outcome in outcomes
+        ):
+            raise ValueError(
+                "lifecycle outcomes do not bind event decision; persisted outcome does not bind"
+            )
+        outcome_by_asset = {outcome.asset_id: outcome for outcome in outcomes}
+        if tuple(outcome_by_asset) != decision.asset_order:
+            raise ValueError("lifecycle outcomes do not cover event assets")
+        if tuple(item.asset_id for item in report.assets) != decision.asset_order:
+            raise ValueError("lifecycle report assets do not bind event assets")
+        for reconciliation in report.assets:
+            outcome = outcome_by_asset[reconciliation.asset_id]
+            if (
+                reconciliation.disposition is not outcome.disposition
+                or reconciliation.outcome_identity != outcome.semantic_identity
+                or reconciliation.expected_cost
+                != decision.expected_costs[reconciliation.asset_id].require_total_reporting()
+            ):
+                raise ValueError("lifecycle report asset does not bind event outcome")
+        expected_costs = {
+            asset: decision.expected_costs[asset].require_total_reporting()
+            for asset in decision.asset_order
+        }
+        expected_cost_components: dict[str, dict[str, Decimal]] = {}
+        for asset in decision.asset_order:
+            component_values: dict[str, Decimal] = {}
+            for component in decision.expected_costs[asset].components:
+                if component.reporting_amount is None:
+                    raise ValueError("lifecycle decision cost component is unavailable")
+                component_values[component.component.value] = component.reporting_amount
+            expected_cost_components[asset] = component_values
+        expected_net_return = {
+            asset: decision.gross_forecast_return[asset]
+            - expected_costs[asset] / decision.physical_notional[asset]
+            for asset in decision.asset_order
+        }
+        expected_net_contribution = {
+            asset: decision.gross_contribution[asset] - expected_costs[asset]
+            for asset in decision.asset_order
+        }
+        risk = _risk_projection(decision)
+        if (
+            dict(report.gross_forecast) != dict(decision.gross_forecast_return)
+            or dict(report.physical_notional) != dict(decision.physical_notional)
+            or dict(report.expected_cost) != expected_costs
+            or dict(report.expected_cost_components) != expected_cost_components
+            or dict(report.expected_net_return) != expected_net_return
+            or dict(report.gross_expected_contribution) != dict(decision.gross_contribution)
+            or dict(report.expected_net_contribution) != expected_net_contribution
+            or report.group_exposure != risk.group_after
+            or report.currency_exposure != risk.currency_after
+            or report.group_exposure_before != risk.group_before
+            or report.currency_exposure_before != risk.currency_before
+            or report.marginal_risk_before != risk.marginal_before
+            or report.marginal_risk_after != risk.marginal_after
+            or report.allocations != risk.allocations
+            or report.portfolio_risk_before != risk.portfolio_before
+            or report.portfolio_risk_after != risk.portfolio_after
+            or report.risk_residual != risk.residual
+            or report.risk_tolerance != risk.tolerance
+        ):
+            raise ValueError("lifecycle report economics or risk do not bind event decision")
+        expected_attributions = {
+            item.key.canonical_tuple: item for item in decision.attributions if item.key is not None
+        }
+        actual_attributions = {
+            item.key.canonical_tuple: item
+            for item in report.sleeve_allocations
+            if item.key is not None
+        }
+        if set(actual_attributions) != set(expected_attributions):
+            raise ValueError("lifecycle report attributions do not bind event decision")
+        for key, expected_attribution in expected_attributions.items():
+            actual_attribution = actual_attributions[key]
+            if (
+                actual_attribution.asset_id != expected_attribution.asset_id
+                or actual_attribution.physical_delta != expected_attribution.external_delta_share
+                or actual_attribution.repair_delta != expected_attribution.repair_delta
+                or actual_attribution.requested_delta != expected_attribution.requested_delta
+                or actual_attribution.internal_cross_quantity
+                != expected_attribution.internal_cross_quantity
+                or actual_attribution.reason_codes != expected_attribution.reason_codes
+            ):
+                raise ValueError("lifecycle report attributions do not bind event decision")
+        authorities = (continuous, rounded, decision)
+        asset_order = rounded.asset_order
+        if any(authority.asset_order != asset_order for authority in authorities) or (
+            netting.asset_order != asset_order
+        ):
+            raise ValueError("lifecycle vectors do not share authoritative asset order")
+        expected_position = tuple(zip(asset_order, rounded.target_position, strict=True))
+        expected_delta = tuple(zip(asset_order, rounded.physical_delta, strict=True))
+        if self.physical_position != expected_position:
+            raise ValueError("lifecycle physical position does not bind authoritative target")
+        if self.physical_delta != expected_delta:
+            raise ValueError("lifecycle physical delta does not bind authoritative target")
+        if any(
+            authority.target_position != rounded.target_position
+            or authority.physical_delta != rounded.physical_delta
+            for authority in authorities
+        ):
+            raise ValueError("lifecycle vectors do not bind authoritative targets")
+        if tuple(zip(asset_order, netting.external_deltas, strict=True)) != expected_delta:
+            raise ValueError("lifecycle physical delta does not bind authoritative netting")
+
+        def expected_cost_parts(
+            states: Mapping[str, ExpectedCostState],
+        ) -> tuple[tuple[tuple[str, Decimal], ...], tuple[tuple[str, Decimal], ...]]:
+            transactions: list[tuple[str, Decimal]] = []
+            financing: list[tuple[str, Decimal]] = []
+            if tuple(states) != asset_order:
+                raise ValueError("lifecycle cost states do not cover authoritative assets")
+            for asset in asset_order:
+                state = states[asset]
+                total = state.require_total_reporting()
+                finance_component = next(
+                    component
+                    for component in state.components
+                    if component.component is CostComponentKind.FINANCING
+                )
+                if finance_component.reporting_amount is None:
+                    raise ValueError("lifecycle financing amount is required")
+                transactions.append((asset, total - finance_component.reporting_amount))
+                financing.append((asset, finance_component.reporting_amount))
+            return tuple(transactions), tuple(financing)
+
+        expected_transaction, expected_financing = expected_cost_parts(rounded.expected_costs)
+        if (
+            self.transaction_cost != expected_transaction
+            or self.financing_cost != expected_financing
+        ):
+            raise ValueError("lifecycle costs do not bind authoritative cost states")
+        for authority in (continuous, rounded):
+            if authority.expected_cost_reporting != sum(
+                (value for _, value in expected_transaction), Decimal("0")
+            ) or authority.expected_financing_reporting != sum(
+                (value for _, value in expected_financing), Decimal("0")
+            ):
+                raise ValueError("lifecycle costs do not bind authoritative target totals")
+        if expected_cost_parts(decision.expected_costs) != (
+            expected_transaction,
+            expected_financing,
+        ):
+            raise ValueError("lifecycle costs do not bind authoritative decision states")
+
+        if any(item.key is None for item in decision.attributions) or any(
+            item.key is None for item in allocations
+        ):
+            raise ValueError("lifecycle sleeve allocations require full authoritative keys")
+        decision_attributions = {
+            item.key.canonical_tuple: item for item in decision.attributions if item.key is not None
+        }
+        rounded_attributions = {item.key.canonical_tuple: item for item in rounded.attributions}
+        netting_attributions = {item.key.canonical_tuple: item for item in netting.sleeves}
+        public_attributions = {
+            item.key.canonical_tuple: item for item in allocations if item.key is not None
+        }
+        if (
+            len(public_attributions) != len(allocations)
+            or set(public_attributions) != set(decision_attributions)
+            or set(public_attributions) != set(rounded_attributions)
+            or set(public_attributions) != set(netting_attributions)
+        ):
+            raise ValueError("lifecycle sleeve allocations do not bind authoritative sleeves")
+        for key, actual in public_attributions.items():
+            expected = decision_attributions[key]
+            repaired = rounded_attributions[key]
+            parent = netting_attributions[key]
+            if (
+                actual != expected
+                or actual.requested_delta != repaired.requested_delta
+                or actual.internal_cross_quantity != repaired.internal_cross_quantity
+                or actual.external_delta_share != repaired.external_delta_share
+                or actual.repair_delta != repaired.repair_delta
+                or actual.reason_codes != repaired.reason_codes
+                or actual.requested_delta != parent.requested_delta
+                or actual.internal_cross_quantity != parent.internal_cross_quantity
+                or actual.external_delta_share - actual.repair_delta != parent.external_delta_share
+            ):
+                raise ValueError("lifecycle sleeve allocations do not bind authoritative sleeves")
+
+        expected_transaction_sleeves = self._sleeve_transaction_cost_component
+        expected_financing_sleeves = self._sleeve_financing_cost_component
+        if (
+            self.sleeve_transaction_costs != expected_transaction_sleeves
+            or self.sleeve_financing_costs != expected_financing_sleeves
+        ):
+            raise ValueError(
+                "lifecycle sleeve cost allocations do not bind authoritative allocations"
+            )
+        sleeve_ids = {item.sleeve_id for item in allocations}
+        if (
+            not {sleeve_id for sleeve_id, _ in expected_transaction_sleeves} <= sleeve_ids
+            or not {sleeve_id for sleeve_id, _ in expected_financing_sleeves} <= sleeve_ids
+        ):
+            raise ValueError("lifecycle sleeve cost allocations do not cover authoritative sleeves")
+
+        horizon_states = tuple(decision.horizon_states)
+        if not horizon_states:
+            raise ValueError("lifecycle event decision requires authoritative horizon states")
+        if (
+            tuple(sorted(horizon_states, key=lambda state: state.key.canonical_tuple))
+            != horizon_states
+        ):
+            raise ValueError("lifecycle horizon states must use canonical sleeve order")
+        if len({state.key for state in horizon_states}) != len(horizon_states):
+            raise ValueError("lifecycle horizon states must be unique")
+        decision_times = {state.decision_time for state in horizon_states}
+        if len(decision_times) != 1:
+            raise ValueError("lifecycle horizon states must share one authoritative t0")
+        t0 = next(iter(decision_times))
+        boundaries = tuple(sorted({t0, *(state.expiry_time for state in horizon_states)}))
+        if self.event_time != decision.decision_time or self.event_time not in boundaries:
+            raise ValueError("lifecycle event time is not the authoritative decision boundary")
+        index = boundaries.index(self.event_time)
+        expected_next = boundaries[index + 1] if index + 1 < len(boundaries) else self.event_time
+        if self.next_event_time != expected_next:
+            raise ValueError("lifecycle next event time is not the authoritative boundary")
+        expected_active = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time > self.event_time
+            )
+        )
+        expected_reviewed = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time == self.event_time
+            )
+        )
+        expected_expired = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time < self.event_time
+            )
+        )
+        if (
+            self.active_state_identities != expected_active
+            or self.reviewed_state_identities != expected_reviewed
+            or self.expired_state_identities != expected_expired
+        ):
+            raise ValueError(
+                "lifecycle state identity classification does not bind authoritative states"
+            )
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "event_time": self.event_time,
+            "next_event_time": self.next_event_time,
+            "active_state_identities": self.active_state_identities,
+            "reviewed_state_identities": self.reviewed_state_identities,
+            "expired_state_identities": self.expired_state_identities,
+            "physical_position": self.physical_position,
+            "physical_delta": self.physical_delta,
+            "transaction_cost": self.transaction_cost,
+            "financing_cost": self.financing_cost,
+            "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
+            "target_identity": self.target_identity,
+            "continuous_target_identity": self.continuous_target_identity,
+            "rounded_target_identity": self.rounded_target_identity,
+            "risk_state_identity": self.risk_state_identity,
+            "decision_identity": self.decision_identity,
+            "cost_state_identity": self.cost_state_identity,
+            "netting_identity": self.netting_identity,
+            "outcome_identities": self.outcome_identities,
+            "report_identity": self.report_identity,
+            "receipt_identity": self.receipt_identity,
+            "sleeve_transaction_costs": self.sleeve_transaction_costs,
+            "sleeve_financing_costs": self.sleeve_financing_costs,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_bytes(self.canonical_payload)
+
+    @property
+    def semantic_identity(self) -> str:
+        return identity(self.canonical_payload)
+
+    @property
+    def closure_identity(self) -> str:
+        return hashlib.sha256(self.canonical_bytes).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationReport:
     """Immutable report closure; all values are independently recomputed."""
@@ -868,6 +1472,8 @@ class EvaluationReport:
     risk_target_position: tuple[Decimal, ...] = ()
     risk_state_identity: str = ""
     report_contract: str = REPORT_CONTRACT
+    horizon_state_identities: tuple[tuple[str, str], ...] = ()
+    lifecycle_events: tuple[LifecycleEvent, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -932,6 +1538,7 @@ class EvaluationReport:
         ) != len(sleeves):
             raise ValueError("sleeve allocations must bind known unique sleeves")
         object.__setattr__(self, "sleeve_allocations", sleeves)
+
         cost_residuals = tuple(
             (
                 asset,
@@ -1124,6 +1731,59 @@ class EvaluationReport:
                 raise ValueError("report risk equations do not match authoritative risk state")
         if self.fx_translation_identity:
             _digest(self.fx_translation_identity, "FX translation identity")
+        horizon_identities = tuple(self.horizon_state_identities)
+        if len({item[0] for item in horizon_identities}) != len(horizon_identities):
+            raise ValueError("report horizon identities must be unique")
+        for semantic_id, closure_id in horizon_identities:
+            _digest(semantic_id, "report horizon semantic identity")
+            _digest(closure_id, "report horizon closure identity")
+        object.__setattr__(self, "horizon_state_identities", horizon_identities)
+        lifecycle_events = None if self.lifecycle_events is None else tuple(self.lifecycle_events)
+        if lifecycle_events is not None:
+            if self.horizon_state_identities and not lifecycle_events:
+                raise ValueError("report lifecycle events are required for horizon states")
+            if lifecycle_events != tuple(
+                sorted(lifecycle_events, key=lambda item: item.event_time)
+            ):
+                raise ValueError("report lifecycle events must be time ordered")
+            if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
+                raise ValueError("report lifecycle events must use unique event times")
+            first_decision = object.__getattribute__(lifecycle_events[0], "_decision_component")
+            if first_decision is None:
+                raise ValueError("report lifecycle sequence requires authoritative decision")
+            previous_position = dict(
+                zip(
+                    first_decision.asset_order,
+                    first_decision.current_position,
+                    strict=True,
+                )
+            )
+            for index, event in enumerate(lifecycle_events):
+                if (
+                    not event.outcome_identities
+                    or not event.report_identity
+                    or not event.receipt_identity
+                ):
+                    raise ValueError("report lifecycle event must bind outcome, report and receipt")
+                if index and event.event_time != lifecycle_events[index - 1].next_event_time:
+                    raise ValueError("report lifecycle events must form a contiguous sequence")
+                current = dict(event.physical_position)
+                delta = dict(event.physical_delta)
+                if set(current) != set(delta) and set(current) | set(delta):
+                    raise ValueError("report lifecycle position and delta assets must match")
+                expected = {
+                    asset: previous_position.get(asset, Decimal("0"))
+                    + delta.get(asset, Decimal("0"))
+                    for asset in sorted(set(previous_position) | set(delta) | set(current))
+                }
+                if current != expected:
+                    raise ValueError("report lifecycle physical position does not follow delta")
+                previous_position = current
+            if lifecycle_events and any(
+                value != Decimal("0") for value in previous_position.values()
+            ):
+                raise ValueError("report lifecycle sequence must close all physical positions")
+        object.__setattr__(self, "lifecycle_events", lifecycle_events)
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -1169,6 +1829,20 @@ class EvaluationReport:
             "risk_state_identity": self.risk_state_identity,
             "risk_current_position": self.risk_current_position,
             "risk_target_position": self.risk_target_position,
+            **(
+                {"horizon_state_identities": self.horizon_state_identities}
+                if self.horizon_state_identities
+                else {}
+            ),
+            **(
+                {
+                    "lifecycle_events": tuple(
+                        item.canonical_payload for item in self.lifecycle_events
+                    )
+                }
+                if self.lifecycle_events
+                else {}
+            ),
         }
 
     @property
@@ -1192,6 +1866,7 @@ class VerificationReceipt:
     parent_verification_identity: str
     verifier_contract: str
     checks: tuple[str, ...]
+    parent_receipt_identities: tuple[str, ...] = ()
     receipt_identity: str = ""
 
     def __post_init__(self) -> None:
@@ -1199,8 +1874,10 @@ class VerificationReceipt:
             (self.semantic_identity, "semantic identity"),
             (self.closure_identity, "closure identity"),
             (self.parent_verification_identity, "parent verification identity"),
+            *((value, "parent receipt identity") for value in self.parent_receipt_identities),
         ):
             _digest(value, name)
+        object.__setattr__(self, "parent_receipt_identities", tuple(self.parent_receipt_identities))
         if not self.artefact_contract or not self.verifier_contract or not self.checks:
             raise ValueError("receipt contract and check set are required")
         expected_identity = identity(self.canonical_payload)
@@ -1219,6 +1896,7 @@ class VerificationReceipt:
             "semantic_identity": self.semantic_identity,
             "closure_identity": self.closure_identity,
             "parent_verification_identity": self.parent_verification_identity,
+            "parent_receipt_identities": self.parent_receipt_identities,
             "verifier_contract": self.verifier_contract,
             "checks": self.checks,
         }
@@ -1377,6 +2055,8 @@ def _decision_reference_reasons(
 
 def _recompute_expected_costs(
     decision: DecisionClosure,
+    *,
+    holding_interval: timedelta | None = None,
 ) -> tuple[
     dict[str, Decimal],
     dict[str, dict[CostComponentKind, Decimal]],
@@ -1394,6 +2074,7 @@ def _recompute_expected_costs(
             target_quantity=decision.target_position[index],
             decision_time=decision.decision_time,
             internal_cross_quantity=supplied.internal_cross_quantity,
+            holding_interval=holding_interval,
         )
         if _cost_state_payload(supplied) != _cost_state_payload(authoritative):
             raise ValueError(f"expected cost state identity does not bind economics for {asset}")
@@ -1404,6 +2085,7 @@ def _recompute_expected_costs(
         computed: dict[CostComponentKind, Decimal] = {}
         details: list[ComponentCostReconciliation] = []
         supplied_by_kind = {item.component: item for item in supplied.components}
+        authoritative_by_kind = {item.component: item for item in authoritative.components}
         for component in model.components:
             quantity = (
                 abs(decision.target_position[index])
@@ -1414,7 +2096,16 @@ def _recompute_expected_costs(
                 raise ValueError(
                     f"cost component unavailable for {asset}: {component.component.value}"
                 )
-            money = component.evaluate(quantity) * component.conversion_rate
+            if holding_interval is None:
+                money = component.evaluate(quantity) * component.conversion_rate
+            else:
+                authoritative_component = authoritative_by_kind[component.component]
+                if authoritative_component.reporting_amount is None:
+                    raise ValueError(
+                        f"cost component amount is unavailable for "
+                        f"{asset}: {component.component.value}"
+                    )
+                money = authoritative_component.reporting_amount
             state_component = supplied_by_kind[component.component]
             if state_component.reporting_amount != money:
                 raise ValueError(
@@ -1430,6 +2121,12 @@ def _recompute_expected_costs(
                 raise ValueError(
                     f"cost component basis is unavailable for {asset}: {component.component.value}"
                 )
+            if holding_interval is None:
+                cost_return = money / aud_basis
+            else:
+                with localcontext() as context:
+                    context.prec = 60
+                    cost_return = money / aud_basis
             details.append(
                 ComponentCostReconciliation(
                     component=component.component,
@@ -1440,7 +2137,7 @@ def _recompute_expected_costs(
                     reporting_amount=money,
                     reporting_currency=state_component.reporting_currency,
                     conversion_rate=state_component.conversion_rate,
-                    cost_return=money / aud_basis,
+                    cost_return=cost_return,
                     aud_notional_basis=aud_basis,
                 )
             )
@@ -1579,6 +2276,8 @@ def _allocate_sleeve_reconciliations(
     decision: DecisionClosure,
     assets: Sequence[AssetReconciliation],
     computed_components: Mapping[str, Mapping[CostComponentKind, Decimal]],
+    *,
+    cost_holding_interval: timedelta | None = None,
 ) -> tuple[SleeveReconciliation, ...]:
     """Allocate canonical physical costs and P&L to final R3.D sleeve movements."""
     result: list[SleeveReconciliation] = []
@@ -1588,13 +2287,38 @@ def _allocate_sleeve_reconciliations(
         siblings = tuple(item for item in decision.attributions if item.asset_id == asset)
         denominator = sum((abs(item.external_delta_share) for item in siblings), Decimal("0"))
         weight = (
-            abs(attribution.external_delta_share) / denominator if denominator else Decimal("0")
+            abs(attribution.external_delta_share) / denominator
+            if denominator
+            else Decimal("1") / Decimal(len(siblings))
         )
-        components = {
-            kind.value: computed_components[asset][kind] * weight for kind in CostComponentKind
-        }
+        components: dict[str, Decimal] = {}
+        for kind in CostComponentKind:
+            if (
+                cost_holding_interval is not None
+                and attribution.sleeve_id == siblings[-1].sleeve_id
+            ):
+                prior = sum(
+                    (
+                        item.expected_cost_components[kind.value]
+                        for item in result
+                        if item.asset_id == asset
+                    ),
+                    Decimal("0"),
+                )
+                components[kind.value] = computed_components[asset][kind] - prior
+            else:
+                components[kind.value] = computed_components[asset][kind] * weight
+        if cost_holding_interval is not None and attribution.sleeve_id == siblings[-1].sleeve_id:
+            prior_total = sum(
+                (item.expected_cost for item in result if item.asset_id == asset),
+                Decimal("0"),
+            )
+            components[CostComponentKind.FINANCING.value] += sum(
+                computed_components[asset].values(), Decimal("0")
+            ) - (prior_total + sum(components.values(), Decimal("0")))
         realised = assets[index].realised
         allocated = None
+        previous: tuple[PnlBreakdown, ...] = ()
         if realised is not None:
             delta = decision.physical_delta[index]
             gross = (
@@ -1613,7 +2337,50 @@ def _allocate_sleeve_reconciliations(
             financing = realised.financing * weight
             impact = realised.impact * weight
             fx = realised.fx_translation * weight
-            net = gross - spread - slippage - commission - financing - impact - fx
+            if (
+                cost_holding_interval is not None
+                and attribution.sleeve_id == siblings[-1].sleeve_id
+            ):
+                previous = tuple(
+                    item.realised
+                    for item in result
+                    if item.asset_id == asset and item.realised is not None
+                )
+                gross = realised.gross_midpoint_pnl - sum(
+                    (item.gross_midpoint_pnl for item in previous), Decimal("0")
+                )
+                latency = realised.latency_movement - sum(
+                    (item.latency_movement for item in previous), Decimal("0")
+                )
+                spread = realised.spread - sum((item.spread for item in previous), Decimal("0"))
+                slippage = realised.adverse_slippage - sum(
+                    (item.adverse_slippage for item in previous), Decimal("0")
+                )
+                commission = realised.commission - sum(
+                    (item.commission for item in previous), Decimal("0")
+                )
+                financing = realised.financing - sum(
+                    (item.financing for item in previous), Decimal("0")
+                )
+                impact = realised.impact - sum((item.impact for item in previous), Decimal("0"))
+                fx = realised.fx_translation - sum(
+                    (item.fx_translation for item in previous), Decimal("0")
+                )
+            if cost_holding_interval is None:
+                net = gross - spread - slippage - commission - financing - impact - fx
+            else:
+                net = gross - (spread + slippage + commission + financing + impact + fx)
+            if (
+                cost_holding_interval is not None
+                and attribution.sleeve_id == siblings[-1].sleeve_id
+            ):
+                target_net = realised.net_pnl - sum(
+                    (item.net_pnl for item in previous), Decimal("0")
+                )
+                for _ in range(20):
+                    net = gross - (spread + slippage + commission + financing + impact + fx)
+                    financing -= target_net - net
+                net = gross - (spread + slippage + commission + financing + impact + fx)
             allocated = PnlBreakdown(
                 gross, spread, latency, slippage, commission, financing, impact, fx, net
             )
@@ -1635,6 +2402,14 @@ def _allocate_sleeve_reconciliations(
     return tuple(sorted(result, key=lambda item: item.canonical_key))
 
 
+def _outcome_target_time(decision: DecisionClosure, latency: timedelta) -> datetime:
+    if decision.expiry_time > decision.decision_time:
+        return decision.expiry_time
+    if latency <= timedelta(0):
+        raise ValueError("terminal outcome requires positive latency")
+    return decision.decision_time + latency
+
+
 def evaluate_independently(
     decision: DecisionClosure,
     quotes: Sequence[QuoteEvidence],
@@ -1643,12 +2418,16 @@ def evaluate_independently(
     adverse_slippage_increments: int = 0,
     fx_translation: Mapping[str, Decimal] | None = None,
     fx_translation_identity: str | None = None,
+    cost_holding_interval: timedelta | None = None,
 ) -> EvaluationReport:
     """Recompute position, expected costs and executable-side P&L independently."""
     if latency < timedelta(0) or adverse_slippage_increments < 0:
         raise ValueError("latency and slippage must be non-negative")
+    outcome_target_time = _outcome_target_time(decision, latency)
     reconcile_positions(decision)
-    expected, computed_components, component_details = _recompute_expected_costs(decision)
+    expected, computed_components, component_details = _recompute_expected_costs(
+        decision, holding_interval=cost_holding_interval
+    )
     fx = dict(fx_translation or {})
     for asset, value in fx.items():
         _decimal(value, f"FX translation for {asset}")
@@ -1669,7 +2448,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 None,
                 None,
@@ -1705,7 +2484,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 None,
                 None,
@@ -1733,7 +2512,7 @@ def evaluate_independently(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
-            maximum_time=decision.expiry_time,
+            maximum_time=outcome_target_time,
             direction=direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -1741,7 +2520,7 @@ def evaluate_independently(
         exit_quote, exit_reasons = _select_quote(
             quotes,
             asset_id=asset,
-            minimum_time=decision.expiry_time,
+            minimum_time=outcome_target_time,
             direction=-direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -1756,7 +2535,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,
@@ -1797,7 +2576,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,
@@ -1836,14 +2615,17 @@ def evaluate_independently(
         impact = by_component[CostComponentKind.IMPACT]
         fx_cost = fx.get(asset, Decimal("0"))
         _decimal(fx_cost, f"FX translation for {asset}")
-        net = gross_mid - spread - slip - commission - financing - impact - fx_cost
+        if cost_holding_interval is None:
+            net = gross_mid - spread - slip - commission - financing - impact - fx_cost
+        else:
+            net = gross_mid - (spread + slip + commission + financing + impact + fx_cost)
         pnl = PnlBreakdown(
             gross_mid, spread, latency_movement, slip, commission, financing, impact, fx_cost, net
         )
         outcome = OutcomeClosure(
             asset,
             decision.decision_time,
-            decision.expiry_time,
+            outcome_target_time,
             latency,
             entry,
             exit_quote,
@@ -1867,7 +2649,9 @@ def evaluate_independently(
                 outcome_identity=outcome.semantic_identity,
             )
         )
-    sleeve_allocations = _allocate_sleeve_reconciliations(decision, assets, computed_components)
+    sleeve_allocations = _allocate_sleeve_reconciliations(
+        decision, assets, computed_components, cost_holding_interval=cost_holding_interval
+    )
     risk = _risk_projection(decision)
     return EvaluationReport(
         source_class=decision.source_class,
@@ -1917,6 +2701,11 @@ def evaluate_independently(
         risk_state_identity=(decision.risk_state.semantic_identity or "")
         if decision.risk_state is not None
         else "",
+        horizon_state_identities=()
+        if not decision.horizon_states
+        else tuple(
+            (item.semantic_identity, item.closure_identity) for item in decision.horizon_states
+        ),
     )
 
 
@@ -1950,6 +2739,7 @@ def build_outcome_closures(
     """Build immutable per-asset outcome closures using the causal quote rule."""
     if latency < timedelta(0):
         raise ValueError("latency must be non-negative")
+    outcome_target_time = _outcome_target_time(decision, latency)
     outcomes: list[OutcomeClosure] = []
     for index, asset in enumerate(decision.asset_order):
         direction = (
@@ -1964,7 +2754,7 @@ def build_outcome_closures(
                 OutcomeClosure(
                     asset,
                     decision.decision_time,
-                    decision.expiry_time,
+                    outcome_target_time,
                     latency,
                     None,
                     None,
@@ -1982,7 +2772,7 @@ def build_outcome_closures(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
-            maximum_time=decision.expiry_time,
+            maximum_time=outcome_target_time,
             direction=direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -1990,7 +2780,7 @@ def build_outcome_closures(
         exit_quote, exit_reasons = _select_quote(
             quotes,
             asset_id=asset,
-            minimum_time=decision.expiry_time,
+            minimum_time=outcome_target_time,
             direction=-direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -2005,7 +2795,7 @@ def build_outcome_closures(
             OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,
