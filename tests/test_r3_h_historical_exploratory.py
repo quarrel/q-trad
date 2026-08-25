@@ -2118,6 +2118,8 @@ def _mutate_fixture_native_source(
     monkeypatch: pytest.MonkeyPatch,
     config: FreezeConfig,
     mutation: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None],
+    *,
+    preserve_target_order: bool = False,
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     import qtrad.application.r3_historical_exploratory as implementation
 
@@ -2143,6 +2145,8 @@ def _mutate_fixture_native_source(
         target_rows = cast(list[dict[str, Any]], target_document["rows"])
         opportunity_rows = cast(list[dict[str, Any]], opportunity_document["rows"])
         mutation(target_rows, opportunity_rows)
+        if not preserve_target_order:
+            target_rows.sort(key=lambda row: str(row["target_id"]))
         target_document["rows"] = target_rows
         opportunity_document["rows"] = opportunity_rows
         for path, reference, document in (
@@ -2305,3 +2309,68 @@ def test_native_extra_target_domain_identity_is_still_validated(
 
     with pytest.raises(FreezeError, match="target row domain identity"):
         _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize("mutation", ("unordered", "duplicate"))
+def test_native_target_source_requires_strict_target_id_order(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "unordered":
+            target_rows[0], target_rows[1] = target_rows[1], target_rows[0]
+        else:
+            target_rows.append(deepcopy(target_rows[-1]))
+
+    with pytest.raises(FreezeError, match="strictly increasing"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate, preserve_target_order=True)
+
+
+def test_native_target_source_rejects_repeated_eligible_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        duplicate = deepcopy(target_rows[0])
+        duplicate["target_id"] = hashlib.sha256(b"duplicate-eligible-target").hexdigest()
+        target_rows.append(duplicate)
+
+    with pytest.raises(FreezeError, match="repeats eligible instrument"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("max_elapsed_seconds", 1, "elapsed-time bound"),
+        ("max_memory_mb", 1, "memory bound"),
+    ),
+)
+def test_native_loader_uses_exact_frozen_compute_limits(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: int, match: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    base_config = FreezeConfig.from_path(CONFIG)
+    document = json.loads(CONFIG.read_text(encoding="utf-8"))
+    cast(dict[str, Any], document["compute_limits"])[field] = value
+    config = FreezeConfig(document=document, semantic_identity=base_config.semantic_identity)
+    if field == "max_elapsed_seconds":
+        clock = [0]
+
+        def fake_monotonic() -> float:
+            clock[0] += 1
+            return 0.0 if clock[0] < 4 else 2.0
+
+        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+    else:
+        monkeypatch.setattr(
+            implementation.resource,
+            "getrusage",
+            lambda _resource: SimpleNamespace(ru_maxrss=2048),
+        )
+
+    with pytest.raises(FreezeError, match=match):
+        implementation.load_fixture_rows(synthetic_fixture(), config)

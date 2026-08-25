@@ -4249,26 +4249,34 @@ def _load_native_retained_rows(
     }
     state_peak = 0
     target_index: dict[str, tuple[datetime, str, int, str | None]] = {}
-    opportunity_ids: set[str] = set()
-    target_groups: dict[str, dict[str, list[str]]] = {}
+    target_groups: dict[str, dict[str, str]] = {}
     forecast_coverage: dict[str, set[str]] = {}
+    compute_limits = cast(Mapping[str, Any], config.document["compute_limits"])
+    max_elapsed_seconds = float(compute_limits["max_elapsed_seconds"])
+    max_memory_mb = float(compute_limits["max_memory_mb"])
+    scan_check_interval = 8192
+    scan_rows = 0
 
     def check_state() -> None:
         nonlocal state_peak
         elapsed = time.monotonic() - started
-        if elapsed > float(streaming.get("max_elapsed_seconds", 1e12)):
+        if elapsed > max_elapsed_seconds:
             raise FreezeError("native bounded scan exceeds elapsed-time bound")
-        state_entries = (
-            len(target_index)
-            + len(opportunity_ids)
-            + sum(len(values) for values in forecast_coverage.values())
+        state_entries = len(target_index) + sum(
+            len(values) for values in forecast_coverage.values()
         )
         state_peak = max(state_peak, state_entries)
         if state_entries > max_rows:
             raise FreezeError("native bounded ID state exceeds frozen row bound")
         memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-        if memory_mb > float(streaming.get("max_memory_mb", 1e12)):
+        if memory_mb > max_memory_mb:
             raise FreezeError("native bounded scan exceeds memory bound")
+
+    def check_scan_progress() -> None:
+        nonlocal scan_rows
+        scan_rows += 1
+        if scan_rows % scan_check_interval == 0:
+            check_state()
 
     def source_limits(name: str) -> dict[str, Any]:
         declaration = cast(Mapping[str, Any], wrappers[name])
@@ -4276,7 +4284,7 @@ def _load_native_retained_rows(
             **decoder,
             "max_source_rows": max_rows,
             "max_source_bytes": max_bytes,
-            "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+            "max_elapsed_seconds": max_elapsed_seconds,
             "max_consumed_parts": streaming["max_consumed_parts"],
             "max_read_operations": int(physical_budget["max_read_operations"]),
             "expected_wrapper_contract": declaration["contract"],
@@ -4301,7 +4309,7 @@ def _load_native_retained_rows(
             **decoder,
             "max_source_rows": max_rows,
             "max_source_bytes": max_bytes,
-            "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+            "max_elapsed_seconds": max_elapsed_seconds,
             "max_consumed_parts": streaming["max_consumed_parts"],
             "max_read_operations": int(physical_budget["max_read_operations"]),
             "expected_wrapper_contract": declaration["contract"],
@@ -4374,8 +4382,8 @@ def _load_native_retained_rows(
         eligible_instruments = set(cast(list[str], wrapper_instruments))
         selected_targets: dict[str, Mapping[str, Any]] = {}
         selected_opportunities: dict[str, Mapping[str, Any]] = {}
-        seen_target_ids: set[str] = set()
-        seen_opportunity_ids: set[str] = set()
+        previous_target_id: str | None = None
+        remaining_eligible_ids: set[str] | None = None
         for row in target_rows:
             required = {
                 "target_id",
@@ -4420,9 +4428,9 @@ def _load_native_retained_rows(
             if not isinstance(target_available_at, str):
                 raise FreezeError("native target availability is malformed")
             _native_utc_timestamp(target_available_at, "target availability")
-            if target_id in seen_target_ids:
-                raise FreezeError("native target-source target IDs are duplicated")
-            seen_target_ids.add(target_id)
+            if previous_target_id is not None and target_id <= previous_target_id:
+                raise FreezeError("native target-source target IDs are not strictly increasing")
+            previous_target_id = target_id
             if not fixture:
                 from qtrad.domain.r2_holdout import R2HoldoutTargetIdentity
 
@@ -4446,15 +4454,21 @@ def _load_native_retained_rows(
                         target_horizon,
                         fixture_target_id,
                     )
-                    target_groups.setdefault(decision_time, {}).setdefault(instrument, []).append(
-                        target_id
-                    )
+                    decision_group = target_groups.setdefault(decision_time, {})
+                    if instrument in decision_group:
+                        raise FreezeError(
+                            "native target-source decision group repeats eligible instrument"
+                        )
+                    decision_group[instrument] = target_id
             elif target_id in selected_ids:
                 if not eligible:
                     raise FreezeError("native selected target is outside authenticated eligibility")
                 if target_id in selected_targets:
                     raise FreezeError("native selected target ID is duplicated")
                 selected_targets[target_id] = dict(row)
+            check_scan_progress()
+        if selected_ids is None:
+            remaining_eligible_ids = set(target_index)
         for row in opportunity_rows:
             required = {
                 "target_id",
@@ -4485,9 +4499,6 @@ def _load_native_retained_rows(
                 or (parsed_opportunity_time, instrument, target_horizon) != target_identity[:3]
             ):
                 raise FreezeError("native opportunity identity differs from target")
-            if target_id in seen_opportunity_ids:
-                raise FreezeError("native target-source opportunity IDs are duplicated")
-            seen_opportunity_ids.add(target_id)
             if not fixture:
                 from qtrad.domain.r2_holdout import HoldoutTargetOpportunity
 
@@ -4496,17 +4507,21 @@ def _load_native_retained_rows(
                 except (TypeError, ValueError) as exc:
                     raise FreezeError("native opportunity domain identity is malformed") from exc
             if selected_ids is None:
-                opportunity_ids.add(target_id)
+                assert remaining_eligible_ids is not None
+                if target_id not in remaining_eligible_ids:
+                    raise FreezeError("native target-source opportunity IDs are duplicated")
+                remaining_eligible_ids.remove(target_id)
             elif target_id in selected_ids:
                 if target_id in selected_opportunities:
                     raise FreezeError("native selected opportunity ID is duplicated")
                 selected_opportunities[target_id] = dict(row)
+            check_scan_progress()
+        if selected_ids is None and remaining_eligible_ids:
+            raise FreezeError("native target-source eligible target/opportunity universes differ")
         check_state()
         return selected_targets, selected_opportunities, inventory
 
     _unused_targets, _unused_opportunities, first_inventory = target_pass(None)
-    if set(target_index) != opportunity_ids:
-        raise FreezeError("native target-source eligible target/opportunity universes differ")
     if not target_index:
         raise FreezeError("native target source is empty")
     target_receipt = cast(Mapping[str, Any], first_inventory["target_receipt"])
@@ -4520,7 +4535,7 @@ def _load_native_retained_rows(
             "opportunity_parts": opportunity_receipt["parts"],
             "opportunity_bytes": opportunity_receipt["bytes"],
             "target_unique_ids": len(target_index),
-            "opportunity_unique_ids": len(opportunity_ids),
+            "opportunity_unique_ids": len(target_index),
         }
     )
     first_inventory["combined_rows"] = int(first_inventory["target_rows"]) + int(
@@ -4610,27 +4625,20 @@ def _load_native_retained_rows(
     periods = {decision: f"period-{index}" for index, decision in enumerate(ordered_decisions)}
     for decision in ordered_decisions:
         instrument_map = target_groups[decision]
-        complete_group = (
-            set(instrument_map) == target_instruments
-            and all(len(ids) == 1 for ids in instrument_map.values())
-            and all(
-                target_id in forecast_coverage[name]
-                for ids in instrument_map.values()
-                for target_id in ids
-                for name in forecast_coverage
-            )
+        complete_group = set(instrument_map) == target_instruments and all(
+            target_id in forecast_coverage[name]
+            for target_id in instrument_map.values()
+            for name in forecast_coverage
         )
         group_ids = tuple(
-            instrument_map[instrument][0]
-            for instrument in _TARGET_IDS
-            if instrument in instrument_map
+            instrument_map[instrument] for instrument in _TARGET_IDS if instrument in instrument_map
         )
         if not complete_group:
             incomplete.append(
                 {
                     "decision_time": decision,
                     "disposition": "INCOMPLETE_NOT_SELECTED",
-                    "row_count": sum(len(ids) for ids in instrument_map.values()),
+                    "row_count": len(instrument_map),
                 }
             )
         else:
@@ -4658,7 +4666,7 @@ def _load_native_retained_rows(
         **decoder,
         "max_source_rows": max_rows,
         "max_source_bytes": max_bytes,
-        "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+        "max_elapsed_seconds": max_elapsed_seconds,
         "max_consumed_parts": streaming["max_consumed_parts"],
         "expected_wrapper_contract": wrappers["outcome_evidence"]["contract"],
         "expected_identity_field": wrappers["outcome_evidence"]["identity_field"],
@@ -4889,7 +4897,7 @@ def _load_native_retained_rows(
         },
         "source_scan_unique_rows": {
             "target_source_targets": len(target_index),
-            "target_source_opportunities": len(opportunity_ids),
+            "target_source_opportunities": len(target_index),
             **{
                 name: int(source_receipts[name].get("unique_ids", 0))
                 for name in ("local_forecast", "pooled_forecast", "zero_forecast")
@@ -5525,6 +5533,7 @@ def load_fixture_rows(
                 "row_count": len(rows_value),
             }
 
+        target_source_rows.sort(key=lambda row: str(row["target_id"]))
         target_ref = write_source_part("targets", target_source_rows)
         opportunity_ref = write_source_part("opportunities", opportunity_source_rows)
         fixture_decisions = [
