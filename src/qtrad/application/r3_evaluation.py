@@ -749,6 +749,8 @@ def _build_lifecycle_events(
                 _outcome_components=outcomes,
                 _report_component=event_report,
                 _receipt_component=event_receipt,
+                _sleeve_transaction_cost_component=transaction_allocation,
+                _sleeve_financing_cost_component=financing_allocation,
             )
         )
         positions.update({intent.key: intent.requested_quantity for intent in intents})

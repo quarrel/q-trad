@@ -430,6 +430,26 @@ def test_lifecycle_event_identity_chain_rejects_mutation(tmp_path):
         replace(events[0], target_identity="0" * 64)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("physical_position", (("ASSET_A", Decimal("0")),)),
+        ("physical_delta", (("ASSET_A", Decimal("0")),)),
+        ("transaction_cost", (("ASSET_A", Decimal("0")),)),
+        ("financing_cost", (("ASSET_A", Decimal("0")),)),
+        ("sleeve_allocations", ()),
+        ("sleeve_transaction_costs", ()),
+        ("sleeve_financing_costs", ()),
+    ),
+)
+def test_lifecycle_event_rejects_forged_public_values(tmp_path, field, value):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match=r"(authoritative|attribution)"):
+        replace(events[0], **{field: value})
+
+
 def test_horizon_permutation_replays_identical_canonical_report(tmp_path):
     canonical = run_fixture(tmp_path / "canonical", (5, 15, 30, 60))
     permuted = run_fixture(tmp_path / "permuted", (60, 30, 5, 15))

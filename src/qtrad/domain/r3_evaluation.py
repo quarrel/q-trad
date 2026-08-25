@@ -937,6 +937,12 @@ class LifecycleEvent:
     )
     _report_component: EvaluationReport | None = field(default=None, repr=False, compare=False)
     _receipt_component: VerificationReceipt | None = field(default=None, repr=False, compare=False)
+    _sleeve_transaction_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _sleeve_financing_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         require_utc(self.event_time, "lifecycle event time")
@@ -1016,6 +1022,8 @@ class LifecycleEvent:
                 self._outcome_components,
                 self._report_component,
                 self._receipt_component,
+                self._sleeve_transaction_cost_component,
+                self._sleeve_financing_cost_component,
             )
         ):
             raise ValueError("lifecycle event requires authoritative component objects")
@@ -1057,6 +1065,130 @@ class LifecycleEvent:
         }
         if supplied != expected_values:
             raise ValueError("lifecycle identity chain does not bind authoritative components")
+
+        assert self._netting_component is not None
+        assert self._continuous_target_component is not None
+        assert self._rounded_target_component is not None
+        assert self._decision_component is not None
+        assert self._sleeve_transaction_cost_component is not None
+        assert self._sleeve_financing_cost_component is not None
+        netting = self._netting_component
+        continuous = self._continuous_target_component
+        rounded = self._rounded_target_component
+        decision = self._decision_component
+
+        authorities = (continuous, rounded, decision)
+        asset_order = rounded.asset_order
+        if any(authority.asset_order != asset_order for authority in authorities) or (
+            netting.asset_order != asset_order
+        ):
+            raise ValueError("lifecycle vectors do not share authoritative asset order")
+        expected_position = tuple(zip(asset_order, rounded.target_position, strict=True))
+        expected_delta = tuple(zip(asset_order, rounded.physical_delta, strict=True))
+        if self.physical_position != expected_position:
+            raise ValueError("lifecycle physical position does not bind authoritative target")
+        if self.physical_delta != expected_delta:
+            raise ValueError("lifecycle physical delta does not bind authoritative target")
+        if any(
+            authority.target_position != rounded.target_position
+            or authority.physical_delta != rounded.physical_delta
+            for authority in authorities
+        ):
+            raise ValueError("lifecycle vectors do not bind authoritative targets")
+        if tuple(zip(asset_order, netting.external_deltas, strict=True)) != expected_delta:
+            raise ValueError("lifecycle physical delta does not bind authoritative netting")
+
+        def expected_cost_parts(
+            states: Mapping[str, ExpectedCostState],
+        ) -> tuple[tuple[tuple[str, Decimal], ...], tuple[tuple[str, Decimal], ...]]:
+            transactions: list[tuple[str, Decimal]] = []
+            financing: list[tuple[str, Decimal]] = []
+            if tuple(states) != asset_order:
+                raise ValueError("lifecycle cost states do not cover authoritative assets")
+            for asset in asset_order:
+                state = states[asset]
+                total = state.require_total_reporting()
+                finance_component = next(
+                    component
+                    for component in state.components
+                    if component.component is CostComponentKind.FINANCING
+                )
+                if finance_component.reporting_amount is None:
+                    raise ValueError("lifecycle financing amount is required")
+                transactions.append((asset, total - finance_component.reporting_amount))
+                financing.append((asset, finance_component.reporting_amount))
+            return tuple(transactions), tuple(financing)
+
+        expected_transaction, expected_financing = expected_cost_parts(rounded.expected_costs)
+        if (
+            self.transaction_cost != expected_transaction
+            or self.financing_cost != expected_financing
+        ):
+            raise ValueError("lifecycle costs do not bind authoritative cost states")
+        for authority in (continuous, rounded):
+            if authority.expected_cost_reporting != sum(
+                (value for _, value in expected_transaction), Decimal("0")
+            ) or authority.expected_financing_reporting != sum(
+                (value for _, value in expected_financing), Decimal("0")
+            ):
+                raise ValueError("lifecycle costs do not bind authoritative target totals")
+        if expected_cost_parts(decision.expected_costs) != (
+            expected_transaction,
+            expected_financing,
+        ):
+            raise ValueError("lifecycle costs do not bind authoritative decision states")
+
+        if any(item.key is None for item in decision.attributions) or any(
+            item.key is None for item in allocations
+        ):
+            raise ValueError("lifecycle sleeve allocations require full authoritative keys")
+        decision_attributions = {
+            item.key.canonical_tuple: item for item in decision.attributions if item.key is not None
+        }
+        rounded_attributions = {item.key.canonical_tuple: item for item in rounded.attributions}
+        netting_attributions = {item.key.canonical_tuple: item for item in netting.sleeves}
+        public_attributions = {
+            item.key.canonical_tuple: item for item in allocations if item.key is not None
+        }
+        if (
+            len(public_attributions) != len(allocations)
+            or set(public_attributions) != set(decision_attributions)
+            or set(public_attributions) != set(rounded_attributions)
+            or set(public_attributions) != set(netting_attributions)
+        ):
+            raise ValueError("lifecycle sleeve allocations do not bind authoritative sleeves")
+        for key, actual in public_attributions.items():
+            expected = decision_attributions[key]
+            repaired = rounded_attributions[key]
+            parent = netting_attributions[key]
+            if (
+                actual != expected
+                or actual.requested_delta != repaired.requested_delta
+                or actual.internal_cross_quantity != repaired.internal_cross_quantity
+                or actual.external_delta_share != repaired.external_delta_share
+                or actual.repair_delta != repaired.repair_delta
+                or actual.reason_codes != repaired.reason_codes
+                or actual.requested_delta != parent.requested_delta
+                or actual.internal_cross_quantity != parent.internal_cross_quantity
+                or actual.external_delta_share - actual.repair_delta != parent.external_delta_share
+            ):
+                raise ValueError("lifecycle sleeve allocations do not bind authoritative sleeves")
+
+        expected_transaction_sleeves = self._sleeve_transaction_cost_component
+        expected_financing_sleeves = self._sleeve_financing_cost_component
+        if (
+            self.sleeve_transaction_costs != expected_transaction_sleeves
+            or self.sleeve_financing_costs != expected_financing_sleeves
+        ):
+            raise ValueError(
+                "lifecycle sleeve cost allocations do not bind authoritative allocations"
+            )
+        sleeve_ids = {item.sleeve_id for item in allocations}
+        if (
+            not {sleeve_id for sleeve_id, _ in expected_transaction_sleeves} <= sleeve_ids
+            or not {sleeve_id for sleeve_id, _ in expected_financing_sleeves} <= sleeve_ids
+        ):
+            raise ValueError("lifecycle sleeve cost allocations do not cover authoritative sleeves")
 
     def _identity_payload(self) -> dict[str, object]:
         return {
