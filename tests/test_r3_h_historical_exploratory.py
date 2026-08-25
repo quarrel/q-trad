@@ -15,7 +15,7 @@ from dataclasses import replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -2112,3 +2112,196 @@ def test_native_json_open_surface_has_one_authenticated_read_boundary() -> None:
             }:
                 violations.append(f"{node.name}:{target.attr}")
     assert violations == []
+
+
+def _mutate_fixture_native_source(
+    monkeypatch: pytest.MonkeyPatch,
+    config: FreezeConfig,
+    mutation: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        actual_locators = dict(locators)
+        manifest_path = Path(actual_locators["target_source"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        target_reference = manifest["target_parts"][0]
+        opportunity_reference = manifest["opportunity_parts"][0]
+        target_path = manifest_path.parent / target_reference["path"]
+        opportunity_path = manifest_path.parent / opportunity_reference["path"]
+        target_document = json.loads(target_path.read_text(encoding="utf-8"))
+        opportunity_document = json.loads(opportunity_path.read_text(encoding="utf-8"))
+        target_rows = cast(list[dict[str, Any]], target_document["rows"])
+        opportunity_rows = cast(list[dict[str, Any]], opportunity_document["rows"])
+        mutation(target_rows, opportunity_rows)
+        target_document["rows"] = target_rows
+        opportunity_document["rows"] = opportunity_rows
+        for path, reference, document in (
+            (target_path, target_reference, target_document),
+            (opportunity_path, opportunity_reference, opportunity_document),
+        ):
+            encoded = implementation._canonical_bytes(document)
+            path.write_bytes(encoded)
+            reference["sha256"] = hashlib.sha256(encoded).hexdigest()
+            reference["row_count"] = len(document["rows"])
+        manifest["target_count"] = len(target_rows)
+        manifest["opportunity_count"] = len(opportunity_rows)
+        manifest["closure_id"] = implementation._native_source_closure(manifest)
+        manifest_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    return implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+def _extra_fixture_target(
+    target_rows: list[dict[str, Any]],
+    *,
+    decision_time: str,
+    horizon: int,
+) -> dict[str, Any]:
+    extra = deepcopy(target_rows[0])
+    extra["target_id"] = hashlib.sha256(
+        f"extra-target-{decision_time}-{horizon}".encode()
+    ).hexdigest()
+    extra["fixture_target_id"] = f"extra-{horizon}"
+    extra["decision_time"] = decision_time
+    extra["target_horizon_seconds"] = horizon
+    extra["target_start_time"] = decision_time
+    extra["target_end_time"] = extra["target_available_at"]
+    extra["target_freeze_at"] = extra["target_available_at"]
+    return extra
+
+
+def test_native_non_primary_target_is_validated_but_not_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.append(
+            _extra_fixture_target(
+                target_rows,
+                decision_time="2026-01-01T00:00:00Z",
+                horizon=901,
+            )
+        )
+
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    assert len(rows) == len(synthetic_fixture())
+    assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
+    assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+
+
+def test_native_out_of_range_target_is_validated_but_not_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.append(
+            _extra_fixture_target(
+                target_rows,
+                decision_time="2099-01-01T00:00:00Z",
+                horizon=900,
+            )
+        )
+
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    assert len(rows) == len(synthetic_fixture())
+    assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
+    assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+
+
+def test_native_missing_eligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows.pop()
+
+    with pytest.raises(FreezeError, match="eligible target/opportunity universes differ"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_ineligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2099-01-01T00:00:00Z",
+            horizon=900,
+        )
+        target_rows.append(extra)
+        opportunity = deepcopy(opportunity_rows[0])
+        opportunity.update(
+            {
+                "target_id": extra["target_id"],
+                "fixture_target_id": extra["fixture_target_id"],
+                "decision_time": extra["decision_time"],
+                "target_horizon_seconds": extra["target_horizon_seconds"],
+            }
+        )
+        opportunity_rows.append(opportunity)
+
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_second_pass_recovers_exact_selected_target_opportunity_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    observed: list[tuple[set[str], set[str]]] = []
+    original_row = implementation._native_fixture_row
+
+    def capture(
+        target_id: str,
+        targets: Mapping[str, Mapping[str, Any]],
+        opportunities: Mapping[str, Mapping[str, Any]],
+        forecasts: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        outcomes: Mapping[str, float],
+        periods: Mapping[str, str],
+    ) -> Any:
+        observed.append((set(targets), set(opportunities)))
+        return original_row(target_id, targets, opportunities, forecasts, outcomes, periods)
+
+    monkeypatch.setattr(implementation, "_native_fixture_row", capture)
+    rows, _metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+    assert len(rows) == len(synthetic_fixture())
+    assert observed
+    assert all(target_ids == opportunity_ids for target_ids, opportunity_ids in observed)
+    assert {row.target_id for row in rows} == {row.target_id for row in synthetic_fixture()}
+
+
+def test_native_extra_target_domain_identity_is_still_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["target_basis"] = "UNSUPPORTED"
+        target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)

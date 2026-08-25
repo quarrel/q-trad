@@ -19,6 +19,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -58,6 +59,17 @@ _SOURCE_CAUSAL_PANEL_ID: Final = "bb757d25b4e922740905dbab929f7a50492f61f3d60537
 
 def _canonical_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _native_utc_timestamp(value: str, field_name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise FreezeError(f"native {field_name} is not a canonical timestamp") from exc
+    offset = parsed.utcoffset()
+    if parsed.tzinfo is None or offset is None or offset.total_seconds() != 0:
+        raise FreezeError(f"native {field_name} is not a UTC timestamp")
+    return parsed.astimezone(UTC)
 
 
 _NON_EXECUTABLE_CLAIMS: Final = (
@@ -4236,7 +4248,7 @@ def _load_native_retained_rows(
         "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
     }
     state_peak = 0
-    target_index: dict[str, tuple[str, str, int, str | None]] = {}
+    target_index: dict[str, tuple[datetime, str, int, str | None]] = {}
     opportunity_ids: set[str] = set()
     target_groups: dict[str, dict[str, list[str]]] = {}
     forecast_coverage: dict[str, set[str]] = {}
@@ -4332,14 +4344,38 @@ def _load_native_retained_rows(
     def target_pass(
         selected_ids: set[str] | None,
     ) -> tuple[dict[str, Mapping[str, Any]], dict[str, Mapping[str, Any]], dict[str, Any]]:
-        _manifest, target_rows, opportunity_rows, inventory = _load_native_target_source(
+        manifest, target_rows, opportunity_rows, inventory = _load_native_target_source(
             source_path,
             target_source_expected,
             fixture=fixture,
             physical_budget=physical_budget,
         )
+        raw_holdout_range_value = manifest["holdout_range"]
+        if not isinstance(raw_holdout_range_value, list):
+            raise FreezeError("native target-source holdout range is malformed")
+        raw_holdout_range = cast(list[Any], raw_holdout_range_value)
+        if len(raw_holdout_range) != 2 or not all(
+            isinstance(value, str) for value in raw_holdout_range
+        ):
+            raise FreezeError("native target-source holdout range is malformed")
+        holdout_start = _native_utc_timestamp(raw_holdout_range[0], "holdout range start")
+        holdout_end = _native_utc_timestamp(raw_holdout_range[1], "holdout range end")
+        if holdout_start >= holdout_end:
+            raise FreezeError("native target-source holdout range is not positive")
+        primary_horizon = manifest["primary_horizon_seconds"]
+        if type(primary_horizon) is not int or primary_horizon <= 0:
+            raise FreezeError("native target-source primary horizon is malformed")
+        raw_wrapper_instruments = manifest["target_instruments"]
+        if not isinstance(raw_wrapper_instruments, list):
+            raise FreezeError("native target-source target instruments are malformed")
+        wrapper_instruments = cast(list[Any], raw_wrapper_instruments)
+        if not all(isinstance(instrument, str) for instrument in wrapper_instruments):
+            raise FreezeError("native target-source target instruments are malformed")
+        eligible_instruments = set(cast(list[str], wrapper_instruments))
         selected_targets: dict[str, Mapping[str, Any]] = {}
         selected_opportunities: dict[str, Mapping[str, Any]] = {}
+        seen_target_ids: set[str] = set()
+        seen_opportunity_ids: set[str] = set()
         for row in target_rows:
             required = {
                 "target_id",
@@ -4365,26 +4401,57 @@ def _load_native_retained_rows(
                 or target_horizon <= 0
             ):
                 raise FreezeError("native target row identity is malformed")
-            if selected_ids is None:
-                if target_id in target_index:
-                    raise FreezeError("native target-source target IDs are duplicated")
-                fixture_target_id = row.get("fixture_target_id")
-                if fixture_target_id is not None and not isinstance(fixture_target_id, str):
-                    raise FreezeError("native target fixture identity is malformed")
-                target_index[target_id] = (
-                    decision_time,
-                    instrument,
-                    target_horizon,
-                    fixture_target_id,
-                )
-                target_groups.setdefault(decision_time, {}).setdefault(instrument, []).append(
-                    target_id
-                )
-                if not fixture:
-                    from qtrad.domain.r2_holdout import R2HoldoutTargetIdentity
+            if (
+                row.get("contract") != "qtrad-r2-holdout-target-identity-v1"
+                or row.get("schema_version") != 1
+            ):
+                raise FreezeError("native target row contract is malformed")
+            if fixture and (
+                row.get("target_basis") != "MIDPOINT_OHLC"
+                or row.get("target_revision_policy") != "FIXED"
+                or row.get("target_start_time") != decision_time
+                or row.get("target_end_time") != row["target_available_at"]
+                or row.get("target_freeze_at") != row["target_available_at"]
+                or row.get("target_availability_disposition") != "ELIGIBLE"
+            ):
+                raise FreezeError("native target row domain identity is malformed")
+            parsed_decision_time = _native_utc_timestamp(decision_time, "target decision time")
+            target_available_at = row["target_available_at"]
+            if not isinstance(target_available_at, str):
+                raise FreezeError("native target availability is malformed")
+            _native_utc_timestamp(target_available_at, "target availability")
+            if target_id in seen_target_ids:
+                raise FreezeError("native target-source target IDs are duplicated")
+            seen_target_ids.add(target_id)
+            if not fixture:
+                from qtrad.domain.r2_holdout import R2HoldoutTargetIdentity
 
+                try:
                     R2HoldoutTargetIdentity.from_json(row)
+                except (TypeError, ValueError) as exc:
+                    raise FreezeError("native target row domain identity is malformed") from exc
+            eligible = (
+                target_horizon == primary_horizon
+                and instrument in eligible_instruments
+                and holdout_start <= parsed_decision_time < holdout_end
+            )
+            if selected_ids is None:
+                if eligible:
+                    fixture_target_id = row.get("fixture_target_id")
+                    if fixture_target_id is not None and not isinstance(fixture_target_id, str):
+                        raise FreezeError("native target fixture identity is malformed")
+                    target_index[target_id] = (
+                        parsed_decision_time,
+                        instrument,
+                        target_horizon,
+                        fixture_target_id,
+                    )
+                    target_groups.setdefault(decision_time, {}).setdefault(instrument, []).append(
+                        target_id
+                    )
             elif target_id in selected_ids:
+                if not eligible:
+                    raise FreezeError("native selected target is outside authenticated eligibility")
                 if target_id in selected_targets:
                     raise FreezeError("native selected target ID is duplicated")
                 selected_targets[target_id] = dict(row)
@@ -4404,24 +4471,32 @@ def _load_native_retained_rows(
             instrument = row["instrument_id"]
             decision_time = row["decision_time"]
             target_horizon = row["target_horizon_seconds"]
+            if not isinstance(decision_time, str):
+                raise FreezeError("native opportunity identity is malformed")
+            parsed_opportunity_time = _native_utc_timestamp(
+                decision_time, "opportunity decision time"
+            )
             target_identity = target_index.get(target_id) if isinstance(target_id, str) else None
             if (
                 not isinstance(target_id, str)
                 or not isinstance(instrument, str)
-                or not isinstance(decision_time, str)
                 or type(target_horizon) is not int
                 or target_identity is None
-                or (decision_time, instrument, target_horizon) != target_identity[:3]
+                or (parsed_opportunity_time, instrument, target_horizon) != target_identity[:3]
             ):
                 raise FreezeError("native opportunity identity differs from target")
-            if selected_ids is None:
-                if target_id in opportunity_ids:
-                    raise FreezeError("native target-source opportunity IDs are duplicated")
-                opportunity_ids.add(target_id)
-                if not fixture:
-                    from qtrad.domain.r2_holdout import HoldoutTargetOpportunity
+            if target_id in seen_opportunity_ids:
+                raise FreezeError("native target-source opportunity IDs are duplicated")
+            seen_opportunity_ids.add(target_id)
+            if not fixture:
+                from qtrad.domain.r2_holdout import HoldoutTargetOpportunity
 
+                try:
                     HoldoutTargetOpportunity.from_json(row)
+                except (TypeError, ValueError) as exc:
+                    raise FreezeError("native opportunity domain identity is malformed") from exc
+            if selected_ids is None:
+                opportunity_ids.add(target_id)
             elif target_id in selected_ids:
                 if target_id in selected_opportunities:
                     raise FreezeError("native selected opportunity ID is duplicated")
@@ -4431,7 +4506,7 @@ def _load_native_retained_rows(
 
     _unused_targets, _unused_opportunities, first_inventory = target_pass(None)
     if set(target_index) != opportunity_ids:
-        raise FreezeError("native target-source target/opportunity universes differ")
+        raise FreezeError("native target-source eligible target/opportunity universes differ")
     if not target_index:
         raise FreezeError("native target source is empty")
     target_receipt = cast(Mapping[str, Any], first_inventory["target_receipt"])
@@ -5452,6 +5527,14 @@ def load_fixture_rows(
 
         target_ref = write_source_part("targets", target_source_rows)
         opportunity_ref = write_source_part("opportunities", opportunity_source_rows)
+        fixture_decisions = [
+            _native_utc_timestamp(str(row["decision_time"]), "fixture target decision time")
+            for row in target_source_rows
+        ]
+        fixture_holdout_range = [
+            min(fixture_decisions).isoformat(),
+            (max(fixture_decisions) + timedelta(microseconds=1)).isoformat(),
+        ]
         source_manifest: dict[str, Any] = {
             "contract": _TARGET_SOURCE_CONTRACT,
             "schema_version": 1,
@@ -5464,7 +5547,7 @@ def load_fixture_rows(
             "availability_evidence_id": _SOURCE_AVAILABILITY_ID,
             "target_index_dataset_id": _SOURCE_TARGET_INDEX_ID,
             "causal_metadata_dataset_id": _SOURCE_CAUSAL_METADATA_ID,
-            "holdout_range": ["2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"],
+            "holdout_range": fixture_holdout_range,
             "primary_horizon_seconds": 900,
             "target_instruments": list(_TARGET_IDS),
             "pre_holdout_target_dataset_id": "0" * 64,
