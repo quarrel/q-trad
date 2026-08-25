@@ -2,7 +2,8 @@
 
 Status: `FIRST_ATTEMPT_REJECTED — EXPLORATORY_POST_HOC_ONLY`
 
-The first full LAB-U output at `/workspace/tmp/qtrad-r2-lab/LAB-U` is preserved but must not be used.
+The rejected first output at `/workspace/tmp/qtrad-r2-lab/LAB-U` and its run log were removed on
+2026-08-25 after the corrected replacement was validated. They must not be restored or used.
 Development selection included the final 20 CORE_6 decisions per instrument in `DEV_3`; their targets
 became available at or after the former-holdout start. CORE_6 development support was therefore
 239,655 instead of the genuine LAB-0 baseline support of 239,535. The first finalist freeze and its
