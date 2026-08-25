@@ -2266,6 +2266,52 @@ def test_native_missing_eligible_opportunity_fails_closed(
         _mutate_fixture_native_source(monkeypatch, config, mutate)
 
 
+@pytest.mark.parametrize("invalid_target_id", ("A" * 64, "g" * 64, "0" * 63))
+def test_native_fixture_rejects_noncanonical_target_ids(
+    monkeypatch: pytest.MonkeyPatch, invalid_target_id: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows[0]["target_id"] = invalid_target_id
+
+    with pytest.raises(FreezeError, match="canonical SHA-256"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_fixture_rejects_noncanonical_opportunity_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows[0]["opportunity_id"] = "A" * 64
+
+    with pytest.raises(FreezeError, match="canonical SHA-256"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_canonical_binary_ids_remain_distinct() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    first = implementation._native_canonical_sha256_id("00" * 32, "target ID")
+    second = implementation._native_canonical_sha256_id("01" + "00" * 31, "target ID")
+    assert first != second
+    assert len(first) == len(second) == 32
+
+
+def test_native_duplicate_eligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows.append(deepcopy(opportunity_rows[0]))
+
+    with pytest.raises(FreezeError, match="opportunity IDs are duplicated"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
 def test_native_ineligible_opportunity_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
