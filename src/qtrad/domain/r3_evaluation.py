@@ -875,6 +875,41 @@ class SleeveReconciliation:
         }
 
 
+def lifecycle_component_identities(payload: Mapping[str, object]) -> dict[str, object]:
+    """Derive the immutable component identity chain for one lifecycle event."""
+    target = identity({"contract": "r3-f-target-event-v1", **payload})
+    cost = identity({"contract": "r3-f-cost-event-v1", "target": target, **payload})
+    risk = identity({"contract": "r3-f-risk-event-v1", "target": target, "cost": cost, **payload})
+    decision = identity(
+        {
+            "contract": "r3-f-decision-event-v1",
+            "target": target,
+            "risk": risk,
+            "cost": cost,
+            **payload,
+        }
+    )
+    outcomes = (identity({"contract": "r3-f-outcome-event-v1", "decision": decision, **payload}),)
+    report = identity(
+        {
+            "contract": "r3-f-report-event-v1",
+            "decision": decision,
+            "outcomes": outcomes,
+            **payload,
+        }
+    )
+    receipt = identity({"contract": "r3-f-receipt-event-v1", "report": report})
+    return {
+        "target": target,
+        "cost": cost,
+        "risk": risk,
+        "decision": decision,
+        "outcomes": outcomes,
+        "report": report,
+        "receipt": receipt,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
     """One deterministic virtual-to-physical lifecycle boundary."""
@@ -892,6 +927,8 @@ class LifecycleEvent:
     target_identity: str
     risk_state_identity: str
     decision_identity: str
+    cost_state_identity: str
+    netting_identity: str
     outcome_identities: tuple[str, ...] = ()
     report_identity: str = ""
     receipt_identity: str = ""
@@ -961,6 +998,37 @@ class LifecycleEvent:
         for name, value in (("report", self.report_identity), ("receipt", self.receipt_identity)):
             if value:
                 _digest(value, f"lifecycle {name} identity")
+        _digest(self.cost_state_identity, "lifecycle cost identity")
+        _digest(self.netting_identity, "lifecycle netting identity")
+        expected = lifecycle_component_identities(self._identity_payload())
+        supplied = {
+            "target": self.target_identity,
+            "cost": self.cost_state_identity,
+            "risk": self.risk_state_identity,
+            "decision": self.decision_identity,
+            "outcomes": self.outcome_identities,
+            "report": self.report_identity,
+            "receipt": self.receipt_identity,
+        }
+        if supplied != expected:
+            raise ValueError("lifecycle identity chain does not bind canonical event")
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "event_time": self.event_time,
+            "next_event_time": self.next_event_time,
+            "active_state_identities": self.active_state_identities,
+            "reviewed_state_identities": self.reviewed_state_identities,
+            "expired_state_identities": self.expired_state_identities,
+            "physical_position": self.physical_position,
+            "physical_delta": self.physical_delta,
+            "transaction_cost": self.transaction_cost,
+            "financing_cost": self.financing_cost,
+            "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
+            "netting_identity": self.netting_identity,
+            "sleeve_transaction_costs": self.sleeve_transaction_costs,
+            "sleeve_financing_costs": self.sleeve_financing_costs,
+        }
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -978,6 +1046,8 @@ class LifecycleEvent:
             "target_identity": self.target_identity,
             "risk_state_identity": self.risk_state_identity,
             "decision_identity": self.decision_identity,
+            "cost_state_identity": self.cost_state_identity,
+            "netting_identity": self.netting_identity,
             "outcome_identities": self.outcome_identities,
             "report_identity": self.report_identity,
             "receipt_identity": self.receipt_identity,
@@ -1310,6 +1380,29 @@ class EvaluationReport:
             raise ValueError("report lifecycle events must be time ordered")
         if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
             raise ValueError("report lifecycle events must use unique event times")
+        previous_position: dict[str, Decimal] = {}
+        for index, event in enumerate(lifecycle_events):
+            if (
+                not event.outcome_identities
+                or not event.report_identity
+                or not event.receipt_identity
+            ):
+                raise ValueError("report lifecycle event must bind outcome, report and receipt")
+            if index and event.event_time != lifecycle_events[index - 1].next_event_time:
+                raise ValueError("report lifecycle events must form a contiguous sequence")
+            current = dict(event.physical_position)
+            delta = dict(event.physical_delta)
+            if set(current) != set(delta) and set(current) | set(delta):
+                raise ValueError("report lifecycle position and delta assets must match")
+            expected = {
+                asset: previous_position.get(asset, Decimal("0")) + delta.get(asset, Decimal("0"))
+                for asset in sorted(set(previous_position) | set(delta) | set(current))
+            }
+            if current != expected:
+                raise ValueError("report lifecycle physical position does not follow delta")
+            previous_position = current
+        if lifecycle_events and any(value != Decimal("0") for value in previous_position.values()):
+            raise ValueError("report lifecycle sequence must close all physical positions")
         object.__setattr__(self, "lifecycle_events", lifecycle_events)
 
     @property

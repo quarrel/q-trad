@@ -347,3 +347,73 @@ def test_nonzero_r3d_repair_reconciles_and_reports_allocations():
     assert allocations["long"].repair_delta == Decimal("0.1")
     assert allocations["short"].physical_delta == Decimal("0")
     assert allocations["short"].repair_delta == Decimal("0")
+
+
+def test_legacy_fixture_identity_and_canonical_replay(tmp_path):
+    first = run_fixture(tmp_path / "first")
+    second = run_fixture(tmp_path / "second")
+    assert first.semantic_identity == (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    assert first.canonical_bytes == second.canonical_bytes
+    assert first.semantic_identity == second.semantic_identity
+
+
+def test_multihorizon_lifecycle_nets_once_per_event_and_finances_held_sleeves(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    decision, _ = build_fixture_inputs((5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    assert tuple(event.event_time for event in events) == (
+        decision.decision_time,
+        *sorted({item.expiry_time for item in decision.horizon_states}),
+    )
+    assert events[-1].physical_position == (("ASSET_A", Decimal("0")),)
+    assert events[-1].physical_delta == (("ASSET_A", Decimal("-0.125")),)
+    for index, event in enumerate(events):
+        previous = Decimal("0") if index == 0 else events[index - 1].physical_position[0][1]
+        assert event.physical_position[0][1] - previous == event.physical_delta[0][1]
+        assert (
+            sum((value for _, value in event.sleeve_transaction_costs), Decimal("0"))
+            == event.transaction_cost[0][1]
+        )
+        assert (
+            sum((value for _, value in event.sleeve_financing_costs), Decimal("0"))
+            == event.financing_cost[0][1]
+        )
+        assert event.target_identity and event.cost_state_identity
+        assert event.netting_identity and event.decision_identity
+    assert any(
+        sum((value for _, value in event.sleeve_financing_costs), Decimal("0")) > 0
+        for event in events[1:]
+    )
+
+
+def test_lifecycle_event_identity_chain_rejects_mutation(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match="identity chain"):
+        replace(events[0], target_identity="0" * 64)
+
+
+def test_horizon_permutation_replays_identical_canonical_report(tmp_path):
+    canonical = run_fixture(tmp_path / "canonical", (5, 15, 30, 60))
+    permuted = run_fixture(tmp_path / "permuted", (60, 30, 5, 15))
+    assert canonical.canonical_bytes == permuted.canonical_bytes
+    assert canonical.semantic_identity == permuted.semantic_identity
+
+
+def test_lifecycle_cost_largest_remainder_uses_stable_ties_without_residual():
+    weights = (
+        ("sleeve-a", Decimal("1")),
+        ("sleeve-b", Decimal("1")),
+        ("sleeve-c", Decimal("1")),
+    )
+    allocated = evaluation_app._allocate_lifecycle_cost(Decimal("4e-28"), weights, Decimal("3"))
+    assert allocated == (
+        ("sleeve-a", Decimal("2e-28")),
+        ("sleeve-b", Decimal("1e-28")),
+        ("sleeve-c", Decimal("1e-28")),
+    )
+    assert sum((value for _, value in allocated), Decimal("0")) == Decimal("4e-28")

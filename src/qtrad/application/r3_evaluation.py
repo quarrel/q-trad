@@ -6,8 +6,9 @@ import json
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, getcontext
 from pathlib import Path
+from typing import cast
 
 from qtrad.domain.economics import (
     ContinuousCostComponent,
@@ -42,6 +43,7 @@ from qtrad.domain.r3_evaluation import (
     build_outcome_closures,
     evaluate_independently,
     identity,
+    lifecycle_component_identities,
 )
 from qtrad.domain.r3_rounding import (
     ROUNDING_CONTRACT,
@@ -191,9 +193,9 @@ def _normalise_fixture_horizons(
         if type(value) is not timedelta or value not in CONFIGURED_HORIZONS:
             raise ValueError("fixture horizons must be configured 5m, 15m, 30m or 60m")
         parsed.append(value)
-    result = tuple(parsed)
-    if not result or tuple(sorted(result, key=CONFIGURED_HORIZONS.index)) != result:
-        raise ValueError("fixture horizons must be non-empty, unique and canonical")
+    result = tuple(sorted(parsed, key=CONFIGURED_HORIZONS.index))
+    if not result:
+        raise ValueError("fixture horizons must be non-empty")
     if len(set(result)) != len(result):
         raise ValueError("fixture horizons must be unique")
     return result
@@ -208,13 +210,14 @@ def build_fixture_inputs(
     asset = "ASSET_A"
     assets = (asset,)
     current = (Decimal("0"),)
-    target_position = (Decimal("0.5"),)
+    target_amount = Decimal("0.5") if legacy else Decimal("0.125") * len(configured)
+    target_position = (target_amount,)
     model = _model(asset)
     expected_state = model.evaluate(
         current_quantity=current[0],
         target_quantity=target_position[0],
         decision_time=_FIXTURE_TIME,
-        internal_cross_quantity=Decimal("0.5"),
+        internal_cross_quantity=target_amount,
     )
     expected = {asset: expected_state}
     source = MarketDataSourceClass.IG_NATIVE_CAPTURE
@@ -253,7 +256,7 @@ def build_fixture_inputs(
     netting = NettingResult(
         source,
         purpose,
-        (AssetNetting(asset, Decimal("0.5"), Decimal("0.5"), Decimal("0.5"), parents),),
+        (AssetNetting(asset, target_amount, target_amount, target_amount, parents),),
         parents,
     )
     repaired = tuple(
@@ -392,15 +395,50 @@ def _allocate_lifecycle_cost(
     sleeve_weights: tuple[tuple[str, Decimal], ...],
     weight_total: Decimal,
 ) -> tuple[tuple[str, Decimal], ...]:
+    """Allocate money with Decimal largest-remainder units and stable ties."""
+    ordered = tuple(sorted(sleeve_weights, key=lambda item: item[0]))
+    if not ordered:
+        return ()
+    if any(weight < 0 for _, weight in ordered):
+        raise ValueError("lifecycle sleeve weights must be non-negative")
     if weight_total == 0:
-        return tuple((sleeve_id, Decimal("0")) for sleeve_id, _ in sleeve_weights)
-    allocated: list[tuple[str, Decimal]] = []
-    remainder = amount
-    for index, (sleeve_id, weight) in enumerate(sleeve_weights):
-        value = remainder if index == len(sleeve_weights) - 1 else amount * weight / weight_total
-        allocated.append((sleeve_id, value))
-        remainder -= value
-    return tuple(allocated)
+        if amount != 0:
+            raise ValueError("non-zero lifecycle cost has no causal sleeve holdings")
+        return tuple((sleeve_id, Decimal("0")) for sleeve_id, _ in ordered)
+    if weight_total != sum((weight for _, weight in ordered), Decimal("0")):
+        raise ValueError("lifecycle sleeve weight total does not reconcile")
+    if amount == 0:
+        return tuple((sleeve_id, Decimal("0")) for sleeve_id, _ in ordered)
+
+    exponent = min(int(amount.as_tuple().exponent), -getcontext().prec)
+    quantum = Decimal(1).scaleb(Decimal(exponent))
+    sign = Decimal("-1") if amount < 0 else Decimal("1")
+    magnitude = abs(amount)
+    total_units = magnitude / quantum
+    if total_units != total_units.to_integral_value():
+        raise ValueError("lifecycle cost is not representable at Decimal allocation precision")
+    exact_units = [
+        (sleeve_id, total_units * weight / weight_total) for sleeve_id, weight in ordered
+    ]
+    base_units = [(sleeve_id, int(units)) for sleeve_id, units in exact_units]
+    remaining = int(total_units) - sum(units for _, units in base_units)
+    ranked = sorted(
+        ((units - int(units), sleeve_id) for (sleeve_id, units) in exact_units),
+        key=lambda item: (-item[0], item[1]),
+    )
+    extras = {sleeve_id: 0 for sleeve_id, _ in ordered}
+    for _, sleeve_id in ranked[:remaining]:
+        extras[sleeve_id] += 1
+    allocated = tuple(
+        (
+            sleeve_id,
+            sign * quantum * (units + extras[sleeve_id]),
+        )
+        for sleeve_id, units in base_units
+    )
+    if sum((value for _, value in allocated), Decimal("0")) != amount:
+        raise ValueError("lifecycle cost allocation does not reconcile")
+    return allocated
 
 
 def _build_lifecycle_events(
@@ -476,44 +514,6 @@ def _build_lifecycle_events(
         )
         if financing is None:
             raise ValueError("fixture financing component is required")
-        sleeve_weights = tuple(
-            (item.key.configuration_id, abs(item.external_delta_share)) for item in netting.sleeves
-        )
-        weight_total = sum((weight for _, weight in sleeve_weights), Decimal("0"))
-
-        transaction_allocation = _allocate_lifecycle_cost(
-            total - financing, sleeve_weights, weight_total
-        )
-        financing_allocation = _allocate_lifecycle_cost(financing, sleeve_weights, weight_total)
-
-        event_payload = {
-            "event_time": event_time,
-            "next_event_time": next_time,
-            "target": ((asset, target),),
-            "delta": ((asset, external),),
-            "netting": netting.semantic_identity,
-            "cost": identity(
-                {"current": physical, "target": target, "total": total, "interval": interval}
-            ),
-            "active": tuple(state.semantic_identity for state in active),
-            "reviewed": tuple(state.semantic_identity for state in reviewed),
-            "expired": tuple(state.semantic_identity for state in expired),
-        }
-        target_id = identity({"contract": "r3-f-target-event-v1", **event_payload})
-        risk_id = identity({"contract": "r3-f-risk-event-v1", **event_payload})
-        decision_id = identity(
-            {
-                "contract": "r3-f-decision-event-v1",
-                "target": target_id,
-                "risk": risk_id,
-                **event_payload,
-            }
-        )
-        report_id = identity(
-            {"contract": "r3-f-report-event-v1", "decision": decision_id, **event_payload}
-        )
-        receipt_id = identity({"contract": "r3-f-receipt-event-v1", "report": report_id})
-        outcome_id = identity({"contract": "r3-f-outcome-event-v1", **event_payload})
         allocations = tuple(
             SleeveAttribution(
                 item.key.configuration_id,
@@ -525,34 +525,102 @@ def _build_lifecycle_events(
             )
             for item in netting.sleeves
         )
+        transaction_weights = tuple(
+            (item.key.configuration_id, abs(item.external_delta_share)) for item in netting.sleeves
+        )
+        transaction_total = sum((weight for _, weight in transaction_weights), Decimal("0"))
+        desired = {intent.key: intent.requested_quantity for intent in intents}
+        holding_weights = tuple(
+            (state.key.configuration_id, abs(desired[state.key])) for state in active
+        )
+        holding_total = sum((weight for _, weight in holding_weights), Decimal("0"))
+        transaction_allocation = _allocate_lifecycle_cost(
+            total - financing, transaction_weights, transaction_total
+        )
+        financing_allocation = _allocate_lifecycle_cost(financing, holding_weights, holding_total)
+        netting_identity = identity(
+            {
+                "contract": "r3-f-netting-event-v1",
+                "assets": tuple(
+                    {
+                        "asset_id": item.asset_id,
+                        "requested_delta": item.requested_delta,
+                        "external_delta": item.external_delta,
+                        "internal_cross_quantity": item.internal_cross_quantity,
+                        "attributions": tuple(
+                            {
+                                "key": attribution.key.as_json(),
+                                "requested_delta": attribution.requested_delta,
+                                "internal_cross_quantity": attribution.internal_cross_quantity,
+                                "external_delta_share": attribution.external_delta_share,
+                            }
+                            for attribution in item.attributions
+                        ),
+                    }
+                    for item in netting.assets
+                ),
+                "sleeves": tuple(
+                    {
+                        "key": item.key.as_json(),
+                        "requested_delta": item.requested_delta,
+                        "internal_cross_quantity": item.internal_cross_quantity,
+                        "external_delta_share": item.external_delta_share,
+                    }
+                    for item in netting.sleeves
+                ),
+            }
+        )
+        active_ids = tuple(sorted(state.semantic_identity for state in active))
+        reviewed_ids = tuple(sorted(state.semantic_identity for state in reviewed))
+        expired_ids = tuple(sorted(state.semantic_identity for state in expired))
+        base_payload = {
+            "event_time": event_time,
+            "next_event_time": next_time,
+            "active_state_identities": active_ids,
+            "reviewed_state_identities": reviewed_ids,
+            "expired_state_identities": expired_ids,
+            "physical_position": ((asset, target),),
+            "physical_delta": ((asset, external),),
+            "transaction_cost": ((asset, total - financing),),
+            "financing_cost": ((asset, financing),),
+            "sleeve_allocations": tuple(item.canonical_payload for item in allocations),
+            "netting_identity": netting_identity,
+            "sleeve_transaction_costs": transaction_allocation,
+            "sleeve_financing_costs": financing_allocation,
+        }
+        ids = lifecycle_component_identities(base_payload)
+        target_identity = cast(str, ids["target"])
+        cost_identity = cast(str, ids["cost"])
+        risk_identity = cast(str, ids["risk"])
+        decision_identity = cast(str, ids["decision"])
+        outcome_identities = cast(tuple[str, ...], ids["outcomes"])
+        report_identity = cast(str, ids["report"])
+        receipt_identity = cast(str, ids["receipt"])
         events.append(
             LifecycleEvent(
                 event_time=event_time,
                 next_event_time=next_time,
-                active_state_identities=tuple(sorted(state.semantic_identity for state in active)),
-                reviewed_state_identities=tuple(
-                    sorted(state.semantic_identity for state in reviewed)
-                ),
-                expired_state_identities=tuple(
-                    sorted(state.semantic_identity for state in expired)
-                ),
+                active_state_identities=active_ids,
+                reviewed_state_identities=reviewed_ids,
+                expired_state_identities=expired_ids,
                 physical_position=((asset, target),),
                 physical_delta=((asset, external),),
                 transaction_cost=((asset, total - financing),),
                 financing_cost=((asset, financing),),
                 sleeve_allocations=allocations,
-                target_identity=target_id,
-                risk_state_identity=risk_id,
-                decision_identity=decision_id,
-                report_identity=report_id,
-                receipt_identity=receipt_id,
-                outcome_identities=(outcome_id,),
+                target_identity=target_identity,
+                risk_state_identity=risk_identity,
+                decision_identity=decision_identity,
+                cost_state_identity=cost_identity,
+                netting_identity=netting_identity,
+                outcome_identities=outcome_identities,
+                report_identity=report_identity,
+                receipt_identity=receipt_identity,
                 sleeve_transaction_costs=transaction_allocation,
                 sleeve_financing_costs=financing_allocation,
             )
         )
-        for intent in intents:
-            positions[intent.key] = intent.requested_quantity
+        positions.update({intent.key: intent.requested_quantity for intent in intents})
         physical = target
     if physical != Decimal("0"):
         raise ValueError("lifecycle final physical position must reconcile to zero")
