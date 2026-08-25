@@ -9,7 +9,7 @@ import json
 import os
 import runpy
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -2193,6 +2193,37 @@ def _mutate_fixture_native_source(
     return implementation.load_fixture_rows(synthetic_fixture(), config)
 
 
+def _drop_fixture_native_forecast_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate: Callable[[Mapping[str, Any]], bool],
+    *,
+    roles: tuple[str, ...] = ("local_forecast", "pooled_forecast", "zero_forecast"),
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_open = implementation._open_partitioned_json_document
+
+    def filtered_open(
+        path: Path, limits: Mapping[str, Any]
+    ) -> tuple[
+        dict[str, Any],
+        Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]],
+        int,
+        str,
+    ]:
+        metadata, parts, wrapper_size, wrapper_digest = original_open(path, limits)
+        if limits.get("_inventory_child") not in roles:
+            return metadata, parts, wrapper_size, wrapper_digest
+
+        def filtered_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
+            for descriptor, rows, part_size in parts:
+                yield descriptor, [row for row in rows if not predicate(row)], part_size
+
+        return metadata, filtered_parts(), wrapper_size, wrapper_digest
+
+    monkeypatch.setattr(implementation, "_open_partitioned_json_document", filtered_open)
+
+
 def _extra_fixture_target(
     target_rows: list[dict[str, Any]],
     *,
@@ -2210,6 +2241,62 @@ def _extra_fixture_target(
     extra["target_end_time"] = extra["target_available_at"]
     extra["target_freeze_at"] = extra["target_available_at"]
     return extra
+
+
+def test_native_target_complete_group_missing_forecast_role_fails_globally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    fixture_rows = synthetic_fixture()
+    early_decision = min(row.decision_time for row in fixture_rows)
+    missing_instrument = next(
+        row.asset for row in fixture_rows if row.decision_time == early_decision
+    )
+    _drop_fixture_native_forecast_rows(
+        monkeypatch,
+        lambda row: (
+            row["decision_time"] == early_decision
+            and row["target_instrument_id"] == missing_instrument
+        ),
+        roles=("local_forecast",),
+    )
+
+    with pytest.raises(FreezeError, match="native forecast coverage is incomplete"):
+        implementation.load_fixture_rows(fixture_rows, config)
+
+
+def test_native_early_target_incomplete_group_is_excluded_before_forecast_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+    fixture_rows = synthetic_fixture()
+    early_decision = min(row.decision_time for row in fixture_rows)
+    missing_instrument = next(
+        row.asset for row in fixture_rows if row.decision_time == early_decision
+    )
+
+    def mutate(target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows[:] = [
+            row
+            for row in target_rows
+            if not (
+                row["decision_time"] == early_decision
+                and row["instrument_id"] == missing_instrument
+            )
+        ]
+        opportunity_rows[:] = [
+            row
+            for row in opportunity_rows
+            if not (
+                row["decision_time"] == early_decision
+                and row["instrument_id"] == missing_instrument
+            )
+        ]
+
+    with pytest.raises(FreezeError, match="fewer than three complete groups"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
 
 
 def test_native_non_primary_target_is_validated_but_not_retained(
