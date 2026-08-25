@@ -1562,6 +1562,147 @@ def test_native_parts_root_rejects_orphans_and_ancestor_symlinks(tmp_path: Path)
         implementation._validate_native_authorised_root(symlink_parent / "target-source.json")
 
 
+def test_native_parts_root_allows_only_declared_forbidden_family_without_touching_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    forbidden = parts_root / "pre-holdout-target"
+    forbidden.symlink_to(tmp_path / "outside", target_is_directory=True)
+    lstat_calls: list[Path] = []
+
+    def reject_forbidden_path(path: Path, *args: Any, **kwargs: Any) -> Any:
+        path_value = Path(path)
+        if "pre-holdout-target" in path_value.parts:
+            raise AssertionError("pre-holdout family was inspected")
+        lstat_calls.append(path_value)
+        return original_lstat(path, *args, **kwargs)
+
+    original_lstat = implementation.os.lstat
+    monkeypatch.setattr(implementation.os, "lstat", reject_forbidden_path)
+    implementation._validate_native_authorised_root(wrapper)
+
+    (parts_root / "unknown").mkdir()
+    with pytest.raises(FreezeError, match="undeclared entry"):
+        implementation._validate_native_authorised_root(wrapper)
+    assert all("unknown" not in path.parts for path in lstat_calls)
+
+
+@pytest.mark.parametrize("family", ("targets", "opportunities"))
+def test_native_parts_root_still_checks_authorised_families(tmp_path: Path, family: str) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    invalid_family = parts_root / family
+    invalid_family.rmdir()
+    invalid_family.write_text("not-a-directory", encoding="utf-8")
+
+    with pytest.raises(FreezeError, match="family is unsafe"):
+        implementation._validate_native_authorised_root(wrapper)
+
+
+@pytest.mark.parametrize(
+    "target_instruments",
+    (
+        tuple(),
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "commodity:us-crude",
+        ][:-1],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "commodity:us-crude",
+            "extra:asset",
+        ],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "fx:aud-usd",
+        ],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            42,
+        ],
+        "not-a-list",
+    ),
+    ids=("empty", "missing", "extra", "duplicate", "non_string", "non_list"),
+)
+def test_native_target_source_requires_exact_six_string_universe(
+    target_instruments: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert locators is not None and _fixture
+        source_path = Path(locators["target_source"])
+        manifest = json.loads(source_path.read_bytes())
+        manifest["target_instruments"] = target_instruments
+        source_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    with pytest.raises(FreezeError, match="exact six-instrument universe"):
+        load_fixture_rows(synthetic_fixture(), FreezeConfig.from_path(CONFIG))
+
+
+def test_native_target_source_accepts_reordered_exact_six_string_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    original_loader = implementation.load_retained_rows
+    reordered = list(reversed(implementation._TARGET_IDS))
+
+    def reordered_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert locators is not None and _fixture
+        source_path = Path(locators["target_source"])
+        manifest = json.loads(source_path.read_bytes())
+        manifest["target_instruments"] = reordered
+        source_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", reordered_loader)
+    rows, _metadata = load_fixture_rows(synthetic_fixture(), FreezeConfig.from_path(CONFIG))
+    assert len(rows) == 18
+
+
 def test_native_physical_parts_shape_and_pre_holdout_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3517,16 +3517,20 @@ def _validate_native_authorised_root(
         entries = tuple(root.iterdir())
     except (OSError, ValueError) as exc:
         raise FreezeError("native target-source parts root is unavailable") from exc
-    allowed = {"targets", "opportunities"}
+    allowed = {"targets", "opportunities", "pre-holdout-target"}
+    authorised = {"targets", "opportunities"}
     for entry in entries:
         # Reject unknown entries before any filesystem operation on that path.  This
-        # includes the forbidden pre-holdout family and preserves its no-touch boundary.
+        # includes the closure-declared forbidden family, which is allowed by name
+        # only and preserves its no-touch boundary.
         if entry.name not in allowed:
             raise FreezeError("native target-source parts root contains an undeclared entry")
+        if entry.name == "pre-holdout-target":
+            continue
         entry_stat = os.lstat(entry)
         if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
             raise FreezeError("native target-source parts root family is unsafe")
-    if {entry.name for entry in entries} != allowed:
+    if not authorised <= {entry.name for entry in entries}:
         raise FreezeError("native target-source parts root families are incomplete")
 
 
@@ -3759,9 +3763,13 @@ def _load_native_target_source(
         or manifest["source_id"] != expected["source_id"]
     ):
         raise FreezeError("native target-source wrapper contract or identity differs")
+    target_instruments = manifest["target_instruments"]
     if (
-        not isinstance(manifest["target_instruments"], list)
-        or tuple(cast(list[str], manifest["target_instruments"])) != _TARGET_IDS
+        not isinstance(target_instruments, list)
+        or len(target_instruments) != len(_TARGET_IDS)
+        or any(not isinstance(instrument_id, str) for instrument_id in target_instruments)
+        or len(set(target_instruments)) != len(_TARGET_IDS)
+        or set(target_instruments) != set(_TARGET_IDS)
     ):
         raise FreezeError("native target source does not establish exact six-instrument universe")
     expected_lineage = {
