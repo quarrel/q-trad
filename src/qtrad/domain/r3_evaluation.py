@@ -1111,7 +1111,7 @@ class EvaluationReport:
     risk_state_identity: str = ""
     report_contract: str = REPORT_CONTRACT
     horizon_state_identities: tuple[tuple[str, str], ...] = ()
-    lifecycle_events: tuple[LifecycleEvent, ...] = ()
+    lifecycle_events: tuple[LifecycleEvent, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1375,34 +1375,42 @@ class EvaluationReport:
             _digest(semantic_id, "report horizon semantic identity")
             _digest(closure_id, "report horizon closure identity")
         object.__setattr__(self, "horizon_state_identities", horizon_identities)
-        lifecycle_events = tuple(self.lifecycle_events)
-        if lifecycle_events != tuple(sorted(lifecycle_events, key=lambda item: item.event_time)):
-            raise ValueError("report lifecycle events must be time ordered")
-        if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
-            raise ValueError("report lifecycle events must use unique event times")
-        previous_position: dict[str, Decimal] = {}
-        for index, event in enumerate(lifecycle_events):
-            if (
-                not event.outcome_identities
-                or not event.report_identity
-                or not event.receipt_identity
+        lifecycle_events = None if self.lifecycle_events is None else tuple(self.lifecycle_events)
+        if lifecycle_events is not None:
+            if self.horizon_state_identities and not lifecycle_events:
+                raise ValueError("report lifecycle events are required for horizon states")
+            if lifecycle_events != tuple(
+                sorted(lifecycle_events, key=lambda item: item.event_time)
             ):
-                raise ValueError("report lifecycle event must bind outcome, report and receipt")
-            if index and event.event_time != lifecycle_events[index - 1].next_event_time:
-                raise ValueError("report lifecycle events must form a contiguous sequence")
-            current = dict(event.physical_position)
-            delta = dict(event.physical_delta)
-            if set(current) != set(delta) and set(current) | set(delta):
-                raise ValueError("report lifecycle position and delta assets must match")
-            expected = {
-                asset: previous_position.get(asset, Decimal("0")) + delta.get(asset, Decimal("0"))
-                for asset in sorted(set(previous_position) | set(delta) | set(current))
-            }
-            if current != expected:
-                raise ValueError("report lifecycle physical position does not follow delta")
-            previous_position = current
-        if lifecycle_events and any(value != Decimal("0") for value in previous_position.values()):
-            raise ValueError("report lifecycle sequence must close all physical positions")
+                raise ValueError("report lifecycle events must be time ordered")
+            if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
+                raise ValueError("report lifecycle events must use unique event times")
+            previous_position: dict[str, Decimal] = {}
+            for index, event in enumerate(lifecycle_events):
+                if (
+                    not event.outcome_identities
+                    or not event.report_identity
+                    or not event.receipt_identity
+                ):
+                    raise ValueError("report lifecycle event must bind outcome, report and receipt")
+                if index and event.event_time != lifecycle_events[index - 1].next_event_time:
+                    raise ValueError("report lifecycle events must form a contiguous sequence")
+                current = dict(event.physical_position)
+                delta = dict(event.physical_delta)
+                if set(current) != set(delta) and set(current) | set(delta):
+                    raise ValueError("report lifecycle position and delta assets must match")
+                expected = {
+                    asset: previous_position.get(asset, Decimal("0"))
+                    + delta.get(asset, Decimal("0"))
+                    for asset in sorted(set(previous_position) | set(delta) | set(current))
+                }
+                if current != expected:
+                    raise ValueError("report lifecycle physical position does not follow delta")
+                previous_position = current
+            if lifecycle_events and any(
+                value != Decimal("0") for value in previous_position.values()
+            ):
+                raise ValueError("report lifecycle sequence must close all physical positions")
         object.__setattr__(self, "lifecycle_events", lifecycle_events)
 
     @property

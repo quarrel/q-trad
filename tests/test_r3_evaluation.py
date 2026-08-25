@@ -417,3 +417,47 @@ def test_lifecycle_cost_largest_remainder_uses_stable_ties_without_residual():
         ("sleeve-c", Decimal("1e-28")),
     )
     assert sum((value for _, value in allocated), Decimal("0")) == Decimal("4e-28")
+
+
+def test_lifecycle_report_rejects_omitted_or_stale_event_sequence(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match="required"):
+        replace(report, lifecycle_events=())
+    with pytest.raises(ValueError, match="close all physical positions"):
+        replace(report, lifecycle_events=events[:-1])
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "target_identity",
+        "risk_state_identity",
+        "outcome_identities",
+        "report_identity",
+        "receipt_identity",
+    ),
+)
+def test_lifecycle_event_rejects_forged_component_links(tmp_path, field):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    value = ("0" * 64,) if field == "outcome_identities" else "0" * 64
+    with pytest.raises(ValueError, match="identity chain"):
+        replace(events[0], **{field: value})
+
+
+def test_lifecycle_crossing_and_no_trade_financing_are_explicit(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    first = events[0]
+    assert sum(
+        (item.internal_cross_quantity for item in first.sleeve_allocations), Decimal("0")
+    ) == Decimal("1.000")
+    assert first.physical_delta == (("ASSET_A", Decimal("0.500")),)
+    later = events[2]
+    assert later.physical_delta == (("ASSET_A", Decimal("-0.125")),)
+    assert later.financing_cost[0][1] > Decimal("0")
+    assert any(value != Decimal("0") for _, value in later.sleeve_financing_costs)
