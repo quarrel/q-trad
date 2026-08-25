@@ -50,3 +50,17 @@ incomplete attempt and disposable smoke outputs were intentionally cleaned so th
 for final results. Its completed configurations still count as attempted exploratory variants. The
 former consumed holdout remains inaccessible unless a sequence configuration first passes every
 declared development screening condition and is create-only frozen by the shared LAB harness.
+
+## LAB-U universe experiment
+
+Run the authenticated smoke and the complete universe matrix from the LAB-U worktree:
+
+    uv run -m experiments.r2_historical_lab.universe smoke --config experiments/r2_historical_lab/universe-config.json
+    uv run -m experiments.r2_historical_lab.universe run --config experiments/r2_historical_lab/universe-config.json
+
+LAB-U recomputes the original cross-market availability count for each declared training universe,
+fits only chronological and horizon-mature rows, and excludes every non-terminal target whose outcome
+is not available strictly before the former-holdout start. It freezes no more than three finalists
+from DEV_1 through DEV_3, and only then loads the former consumed holdout as a terminal post-hoc
+development block. Outputs remain non-authoritative under the create-only path configured in
+`universe-config.json`.
