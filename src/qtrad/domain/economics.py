@@ -1333,14 +1333,24 @@ class ContinuousCostModel:
         target_quantity: Decimal,
         decision_time: datetime,
         internal_cross_quantity: Decimal = Decimal(0),
+        holding_interval: timedelta | None = None,
     ) -> ExpectedCostState:
-        """Evaluate costs and bind a new complete point state to the final target."""
+        """Evaluate costs at one physical boundary.
+
+        holding_interval is the actual interval for which the resulting physical
+        position is held. The default preserves the model's configured horizon for
+        the R3.E one-horizon contract; lifecycle callers provide each event's next
+        boundary interval explicitly.
+        """
         _finite_decimal(current_quantity, "continuous current quantity")
         _finite_decimal(target_quantity, "continuous target quantity")
         _finite_decimal(internal_cross_quantity, "continuous internal cross quantity")
         if internal_cross_quantity < 0:
             raise ValueError("continuous internal cross quantity must be non-negative")
         require_utc(decision_time, "continuous cost decision time")
+        interval = self.horizon if holding_interval is None else holding_interval
+        if type(interval) is not timedelta or interval < timedelta(0):
+            raise ValueError("continuous holding interval must be a non-negative timedelta")
         if any(
             component.status in (InputStatus.MISSING, InputStatus.UNSUPPORTED)
             for component in self.components
@@ -1352,9 +1362,17 @@ class ContinuousCostModel:
             model = self.component(kind)
             quantity = delta if model.basis is CostBasis.PHYSICAL_DELTA else abs(target_quantity)
             native_amount = model.evaluate(quantity)
+            if (
+                kind is CostComponentKind.FINANCING
+                and holding_interval is not None
+                and self.horizon > timedelta(0)
+            ):
+                native_amount *= Decimal(interval.total_seconds()) / Decimal(
+                    self.horizon.total_seconds()
+                )
             reporting_amount = native_amount * model.conversion_rate
             quantity_basis = quantity if model.basis is CostBasis.PHYSICAL_DELTA else None
-            holding_interval = self.horizon if model.basis is CostBasis.PHYSICAL_HOLDING else None
+            holding = interval if model.basis is CostBasis.PHYSICAL_HOLDING else None
             if model.status is InputStatus.DOCUMENTED_ZERO:
                 costs.append(
                     ComponentCost.documented_zero(
@@ -1368,7 +1386,7 @@ class ContinuousCostModel:
                         conversion_source=model.conversion_source,
                         conversion_version=model.conversion_version,
                         quantity_basis=quantity_basis,
-                        holding_interval=holding_interval,
+                        holding_interval=holding,
                     )
                 )
             else:
@@ -1386,14 +1404,14 @@ class ContinuousCostModel:
                         version=model.version,
                         provenance=model.provenance,
                         quantity_basis=quantity_basis,
-                        holding_interval=holding_interval,
+                        holding_interval=holding,
                     )
                 )
         return ExpectedCostState(
             decision_time=decision_time,
             current_quantity=current_quantity,
             target_quantity=target_quantity,
-            holding_interval=self.horizon,
+            holding_interval=interval,
             reporting_currency=self.reporting_currency,
             components=tuple(costs),
             version=self.version,

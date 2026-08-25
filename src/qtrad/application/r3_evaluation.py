@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,6 +14,7 @@ from qtrad.domain.economics import (
     ContinuousCostModel,
     CostBasis,
     CostComponentKind,
+    GrossForecast,
     ImpactDisposition,
     InputStatus,
 )
@@ -21,14 +23,19 @@ from qtrad.domain.portfolio import (
     CONFIGURED_HORIZONS,
     ONE_HORIZON,
     AssetNetting,
+    HorizonIntent,
     HorizonState,
     NettingResult,
     SleeveKey,
+    VirtualPosition,
+    construct_horizon_intent,
+    match_internal_opposing_changes,
 )
 from qtrad.domain.portfolio import SleeveAttribution as ParentSleeveAttribution
 from qtrad.domain.r3_evaluation import (
     DecisionClosure,
     EvaluationReport,
+    LifecycleEvent,
     QuoteEvidence,
     SleeveAttribution,
     VerificationReceipt,
@@ -380,6 +387,178 @@ def build_fixture_inputs(
     return decision, quotes
 
 
+def _allocate_lifecycle_cost(
+    amount: Decimal,
+    sleeve_weights: tuple[tuple[str, Decimal], ...],
+    weight_total: Decimal,
+) -> tuple[tuple[str, Decimal], ...]:
+    if weight_total == 0:
+        return tuple((sleeve_id, Decimal("0")) for sleeve_id, _ in sleeve_weights)
+    allocated: list[tuple[str, Decimal]] = []
+    remainder = amount
+    for index, (sleeve_id, weight) in enumerate(sleeve_weights):
+        value = remainder if index == len(sleeve_weights) - 1 else amount * weight / weight_total
+        allocated.append((sleeve_id, value))
+        remainder -= value
+    return tuple(allocated)
+
+
+def _build_lifecycle_events(
+    decision: DecisionClosure,
+    lifecycle: tuple[HorizonState, ...],
+    model: ContinuousCostModel,
+) -> tuple[LifecycleEvent, ...]:
+    """Replay configured virtual sleeves at each physical boundary."""
+    if not lifecycle:
+        return ()
+    asset = decision.asset_order[0]
+    state_by_key = {state.key: state for state in lifecycle}
+    lifecycle_keys = tuple(state_by_key)
+    initial_requests = {
+        item.key: item.requested_delta for item in decision.attributions if item.key is not None
+    }
+    positions = {key: Decimal("0") for key in lifecycle_keys}
+    physical = decision.current_position[0]
+    events: list[LifecycleEvent] = []
+    boundaries = tuple(sorted({_FIXTURE_TIME, *(state.expiry_time for state in lifecycle)}))
+    for index, event_time in enumerate(boundaries):
+        next_time = boundaries[index + 1] if index + 1 < len(boundaries) else event_time
+        intents: list[HorizonIntent] = []
+        active: list[HorizonState] = []
+        reviewed: list[HorizonState] = []
+        expired: list[HorizonState] = []
+        for state in sorted(lifecycle, key=lambda item: item.key.canonical_tuple):
+            if state.expiry_time > event_time:
+                active.append(state)
+            elif state.expiry_time == event_time:
+                reviewed.append(state)
+                expired.append(state)
+            else:
+                expired.append(state)
+            if event_time == _FIXTURE_TIME:
+                requested = initial_requests[state.key]
+            elif state.expiry_time > event_time:
+                requested = positions[state.key]
+            else:
+                requested = Decimal("0")
+            forecast = GrossForecast(
+                expected_return=Decimal("0.02"),
+                horizon=state.key.horizon,
+                return_unit="LOG_RETURN",
+                model_identity=state.model_identity,
+            )
+            intents.append(
+                construct_horizon_intent(
+                    position=VirtualPosition(state.key, positions[state.key]),
+                    gross_forecast=forecast,
+                    requested_quantity=requested,
+                    gross_sleeve_value=Decimal("50"),
+                    decision_time=event_time,
+                    expiry_time=max(state.expiry_time, event_time + timedelta(seconds=1)),
+                )
+            )
+        netting = match_internal_opposing_changes(intents)
+        external = netting.assets[0].external_delta
+        target = physical + external
+        interval = next_time - event_time
+        costs = model.evaluate(
+            current_quantity=physical,
+            target_quantity=target,
+            decision_time=event_time,
+            internal_cross_quantity=netting.assets[0].internal_cross_quantity,
+            holding_interval=interval,
+        )
+        total = costs.require_total_reporting()
+        financing = next(
+            item.reporting_amount
+            for item in costs.components
+            if item.component is CostComponentKind.FINANCING
+        )
+        if financing is None:
+            raise ValueError("fixture financing component is required")
+        sleeve_weights = tuple(
+            (item.key.configuration_id, abs(item.external_delta_share)) for item in netting.sleeves
+        )
+        weight_total = sum((weight for _, weight in sleeve_weights), Decimal("0"))
+
+        transaction_allocation = _allocate_lifecycle_cost(
+            total - financing, sleeve_weights, weight_total
+        )
+        financing_allocation = _allocate_lifecycle_cost(financing, sleeve_weights, weight_total)
+
+        event_payload = {
+            "event_time": event_time,
+            "next_event_time": next_time,
+            "target": ((asset, target),),
+            "delta": ((asset, external),),
+            "netting": netting.semantic_identity,
+            "cost": identity(
+                {"current": physical, "target": target, "total": total, "interval": interval}
+            ),
+            "active": tuple(state.semantic_identity for state in active),
+            "reviewed": tuple(state.semantic_identity for state in reviewed),
+            "expired": tuple(state.semantic_identity for state in expired),
+        }
+        target_id = identity({"contract": "r3-f-target-event-v1", **event_payload})
+        risk_id = identity({"contract": "r3-f-risk-event-v1", **event_payload})
+        decision_id = identity(
+            {
+                "contract": "r3-f-decision-event-v1",
+                "target": target_id,
+                "risk": risk_id,
+                **event_payload,
+            }
+        )
+        report_id = identity(
+            {"contract": "r3-f-report-event-v1", "decision": decision_id, **event_payload}
+        )
+        receipt_id = identity({"contract": "r3-f-receipt-event-v1", "report": report_id})
+        outcome_id = identity({"contract": "r3-f-outcome-event-v1", **event_payload})
+        allocations = tuple(
+            SleeveAttribution(
+                item.key.configuration_id,
+                asset,
+                item.requested_delta,
+                item.internal_cross_quantity,
+                item.external_delta_share,
+                key=item.key,
+            )
+            for item in netting.sleeves
+        )
+        events.append(
+            LifecycleEvent(
+                event_time=event_time,
+                next_event_time=next_time,
+                active_state_identities=tuple(sorted(state.semantic_identity for state in active)),
+                reviewed_state_identities=tuple(
+                    sorted(state.semantic_identity for state in reviewed)
+                ),
+                expired_state_identities=tuple(
+                    sorted(state.semantic_identity for state in expired)
+                ),
+                physical_position=((asset, target),),
+                physical_delta=((asset, external),),
+                transaction_cost=((asset, total - financing),),
+                financing_cost=((asset, financing),),
+                sleeve_allocations=allocations,
+                target_identity=target_id,
+                risk_state_identity=risk_id,
+                decision_identity=decision_id,
+                report_identity=report_id,
+                receipt_identity=receipt_id,
+                outcome_identities=(outcome_id,),
+                sleeve_transaction_costs=transaction_allocation,
+                sleeve_financing_costs=financing_allocation,
+            )
+        )
+        for intent in intents:
+            positions[intent.key] = intent.requested_quantity
+        physical = target
+    if physical != Decimal("0"):
+        raise ValueError("lifecycle final physical position must reconcile to zero")
+    return tuple(events)
+
+
 def _write_create_only(path: Path, payload: bytes) -> str:
     if path.is_symlink() or path.exists():
         raise FileExistsError(f"create-only artifact already exists: {path}")
@@ -400,6 +579,9 @@ def run_fixture(
     latency = timedelta(seconds=1)
     outcomes = build_outcome_closures(decision, quotes, latency=latency)
     report = evaluate_independently(decision, quotes, latency=latency)
+    lifecycle_events = _build_lifecycle_events(decision, decision.horizon_states, _model("ASSET_A"))
+    if lifecycle_events:
+        report = replace(report, lifecycle_events=lifecycle_events)
     if (
         report.source_class is not decision.source_class
         or report.evidence_purpose is not decision.evidence_purpose

@@ -168,6 +168,19 @@ class SleeveAttribution:
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "sleeve_id": self.sleeve_id,
+            "asset_id": self.asset_id,
+            "key": self.key.as_json() if self.key is not None else None,
+            "requested_delta": self.requested_delta,
+            "internal_cross_quantity": self.internal_cross_quantity,
+            "external_delta_share": self.external_delta_share,
+            "repair_delta": self.repair_delta,
+            "reason_codes": self.reason_codes,
+        }
+
+    @property
     def canonical_key(self) -> tuple[object, ...]:
         return self.key.canonical_tuple if self.key is not None else (self.asset_id, self.sleeve_id)
 
@@ -863,6 +876,129 @@ class SleeveReconciliation:
 
 
 @dataclass(frozen=True, slots=True)
+class LifecycleEvent:
+    """One deterministic virtual-to-physical lifecycle boundary."""
+
+    event_time: datetime
+    next_event_time: datetime
+    active_state_identities: tuple[str, ...]
+    reviewed_state_identities: tuple[str, ...]
+    expired_state_identities: tuple[str, ...]
+    physical_position: tuple[tuple[str, Decimal], ...]
+    physical_delta: tuple[tuple[str, Decimal], ...]
+    transaction_cost: tuple[tuple[str, Decimal], ...]
+    financing_cost: tuple[tuple[str, Decimal], ...]
+    sleeve_allocations: tuple[SleeveAttribution, ...]
+    target_identity: str
+    risk_state_identity: str
+    decision_identity: str
+    outcome_identities: tuple[str, ...] = ()
+    report_identity: str = ""
+    receipt_identity: str = ""
+    sleeve_transaction_costs: tuple[tuple[str, Decimal], ...] = ()
+    sleeve_financing_costs: tuple[tuple[str, Decimal], ...] = ()
+
+    def __post_init__(self) -> None:
+        require_utc(self.event_time, "lifecycle event time")
+        require_utc(self.next_event_time, "lifecycle next event time")
+        if self.next_event_time < self.event_time:
+            raise ValueError("lifecycle next event must not precede event time")
+        for name, values in (
+            ("active state", self.active_state_identities),
+            ("reviewed state", self.reviewed_state_identities),
+            ("expired state", self.expired_state_identities),
+            ("outcome", self.outcome_identities),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered)) or len(set(ordered)) != len(ordered):
+                raise ValueError(f"lifecycle {name} identities must be canonical and unique")
+            for value in ordered:
+                _digest(value, f"lifecycle {name} identity")
+        for name, values in (
+            ("physical position", self.physical_position),
+            ("physical delta", self.physical_delta),
+            ("transaction cost", self.transaction_cost),
+            ("financing cost", self.financing_cost),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered, key=lambda item: item[0])):
+                raise ValueError(f"lifecycle {name} must use canonical asset order")
+            if len({item[0] for item in ordered}) != len(ordered):
+                raise ValueError(f"lifecycle {name} must use unique assets")
+            for _, value in ordered:
+                _decimal(value, f"lifecycle {name} value")
+        allocations = tuple(self.sleeve_allocations)
+        if allocations != tuple(sorted(allocations, key=lambda item: item.canonical_key)):
+            raise ValueError("lifecycle sleeve allocations must be canonical")
+        object.__setattr__(self, "sleeve_allocations", allocations)
+        for name, values in (
+            ("sleeve transaction cost", self.sleeve_transaction_costs),
+            ("sleeve financing cost", self.sleeve_financing_costs),
+        ):
+            ordered = tuple(values)
+            if ordered != tuple(sorted(ordered, key=lambda item: item[0])):
+                raise ValueError(f"{name} allocations must be canonical")
+            if len({item[0] for item in ordered}) != len(ordered):
+                raise ValueError(f"{name} allocations must use unique sleeves")
+            for _, value in ordered:
+                _decimal(value, name)
+        if sum((value for _, value in self.sleeve_transaction_costs), Decimal("0")) != sum(
+            value for _, value in self.transaction_cost
+        ):
+            raise ValueError("lifecycle transaction cost attribution does not reconcile")
+        if sum((value for _, value in self.sleeve_financing_costs), Decimal("0")) != sum(
+            value for _, value in self.financing_cost
+        ):
+            raise ValueError("lifecycle financing cost attribution does not reconcile")
+        object.__setattr__(self, "sleeve_transaction_costs", tuple(self.sleeve_transaction_costs))
+        object.__setattr__(self, "sleeve_financing_costs", tuple(self.sleeve_financing_costs))
+        for name, value in (
+            ("target", self.target_identity),
+            ("risk", self.risk_state_identity),
+            ("decision", self.decision_identity),
+        ):
+            _digest(value, f"lifecycle {name} identity")
+        for name, value in (("report", self.report_identity), ("receipt", self.receipt_identity)):
+            if value:
+                _digest(value, f"lifecycle {name} identity")
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "event_time": self.event_time,
+            "next_event_time": self.next_event_time,
+            "active_state_identities": self.active_state_identities,
+            "reviewed_state_identities": self.reviewed_state_identities,
+            "expired_state_identities": self.expired_state_identities,
+            "physical_position": self.physical_position,
+            "physical_delta": self.physical_delta,
+            "transaction_cost": self.transaction_cost,
+            "financing_cost": self.financing_cost,
+            "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
+            "target_identity": self.target_identity,
+            "risk_state_identity": self.risk_state_identity,
+            "decision_identity": self.decision_identity,
+            "outcome_identities": self.outcome_identities,
+            "report_identity": self.report_identity,
+            "receipt_identity": self.receipt_identity,
+            "sleeve_transaction_costs": self.sleeve_transaction_costs,
+            "sleeve_financing_costs": self.sleeve_financing_costs,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_bytes(self.canonical_payload)
+
+    @property
+    def semantic_identity(self) -> str:
+        return identity(self.canonical_payload)
+
+    @property
+    def closure_identity(self) -> str:
+        return hashlib.sha256(self.canonical_bytes).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     """Immutable report closure; all values are independently recomputed."""
 
@@ -905,6 +1041,7 @@ class EvaluationReport:
     risk_state_identity: str = ""
     report_contract: str = REPORT_CONTRACT
     horizon_state_identities: tuple[tuple[str, str], ...] = ()
+    lifecycle_events: tuple[LifecycleEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -1168,6 +1305,12 @@ class EvaluationReport:
             _digest(semantic_id, "report horizon semantic identity")
             _digest(closure_id, "report horizon closure identity")
         object.__setattr__(self, "horizon_state_identities", horizon_identities)
+        lifecycle_events = tuple(self.lifecycle_events)
+        if lifecycle_events != tuple(sorted(lifecycle_events, key=lambda item: item.event_time)):
+            raise ValueError("report lifecycle events must be time ordered")
+        if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
+            raise ValueError("report lifecycle events must use unique event times")
+        object.__setattr__(self, "lifecycle_events", lifecycle_events)
 
     @property
     def canonical_payload(self) -> dict[str, object]:
@@ -1216,6 +1359,15 @@ class EvaluationReport:
             **(
                 {"horizon_state_identities": self.horizon_state_identities}
                 if self.horizon_state_identities
+                else {}
+            ),
+            **(
+                {
+                    "lifecycle_events": tuple(
+                        item.canonical_payload for item in self.lifecycle_events
+                    )
+                }
+                if self.lifecycle_events
                 else {}
             ),
         }
