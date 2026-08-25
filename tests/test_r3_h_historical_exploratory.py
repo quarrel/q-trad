@@ -1519,3 +1519,33 @@ def test_native_physical_parts_shape_and_pre_holdout_guard(
         )
     ]
     assert calls == []
+
+
+def test_native_declared_inventory_qualifies_child_and_path(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    forecast_part = tmp_path / "local_forecast.json.parts" / "part-000000.json"
+    outcome_part = tmp_path / "outcome-evidence.json.parts" / "part-000000.json"
+    forecast_part.parent.mkdir(parents=True)
+    outcome_part.parent.mkdir(parents=True)
+    forecast_part.write_text("{}", encoding="utf-8")
+    outcome_part.write_text("{}", encoding="utf-8")
+    forecast_relative = forecast_part.relative_to(tmp_path).as_posix()
+    outcome_relative = outcome_part.relative_to(tmp_path).as_posix()
+    budget: dict[str, Any] = {"max_declared_parts": 1}
+
+    implementation._register_declared_inventory(budget, "local_forecast", [forecast_relative])
+    implementation._register_declared_inventory(budget, "local_forecast", [forecast_relative])
+    assert budget["declared_paths"] == {f"local_forecast:{forecast_relative}"}
+    with pytest.raises(FreezeError, match="declared source inventory"):
+        implementation._register_declared_inventory(budget, "outcome_evidence", [outcome_relative])
+
+
+def test_native_physical_budget_read_operations_fail_closed() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    budget: dict[str, Any] = {"read_operations": 0, "max_read_operations": 1}
+    implementation._charge_physical_budget(budget, read_operations=1)
+    assert budget["read_operations"] == 1
+    with pytest.raises(FreezeError, match="read_operations"):
+        implementation._charge_physical_budget(budget, read_operations=1)

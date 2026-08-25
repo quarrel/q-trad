@@ -2950,10 +2950,7 @@ def _register_declared_inventory(
         return
     mutable = cast(dict[str, Any], budget)
     seen = cast(set[str], mutable.setdefault("declared_paths", set()))
-    additions = {
-        f"{child}:{path}" if child == "target-source" else PurePosixPath(path).name
-        for path in paths
-    }
+    additions = {f"{child}:{PurePosixPath(path).as_posix()}" for path in paths}
     limit = mutable.get("max_declared_parts")
     if limit is not None and len(seen | additions) > int(limit):
         raise FreezeError("native declared source inventory exceeds frozen part bound")
@@ -4054,6 +4051,9 @@ def _load_native_retained_rows(
         "max_declared_parts": target_declared_cap + int(streaming["max_consumed_parts"]),
         # Target source is scanned twice; three forecast children twice; outcome once.
         "max_physical_parts": target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7,
+        "max_read_operations": (
+            target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7 + 2 + 7
+        ),
         "max_physical_rows": int(target_source_hard["max_rows"]) * 2 + max_rows * 7,
         "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
     }
@@ -4088,6 +4088,7 @@ def _load_native_retained_rows(
             "max_source_bytes": max_bytes,
             "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
             "max_consumed_parts": streaming["max_consumed_parts"],
+            "max_read_operations": int(physical_budget["max_read_operations"]),
             "expected_wrapper_contract": declaration["contract"],
             "expected_identity_field": declaration["identity_field"],
             "expected_wrapper_identity": None if fixture else declaration["identity"],
@@ -4598,6 +4599,7 @@ def _load_native_retained_rows(
             "max_bytes": max_bytes,
             "max_part_bytes": int(target_source_limits["max_part_bytes"]),
             "max_physical_parts": int(physical_budget["max_physical_parts"]),
+            "max_read_operations": int(physical_budget["max_read_operations"]),
             "max_declared_parts": int(physical_budget["max_declared_parts"]),
             "max_physical_rows": int(physical_budget["max_physical_rows"]),
             "max_physical_part_bytes": int(physical_budget["max_physical_part_bytes"]),
