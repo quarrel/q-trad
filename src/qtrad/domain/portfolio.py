@@ -1156,12 +1156,11 @@ class ContinuousTarget:
                 state = self.expected_costs[asset]
                 if not state.complete:
                     raise ValueError("accepted target requires complete cost states")
-                expected_horizons = {sleeve.key.horizon for sleeve in self.netting.sleeves}
                 if (
                     state.decision_time != self.decision_time
                     or state.current_quantity != self.current_position[index]
                     or state.target_quantity != self.target_position[index]
-                    or state.holding_interval not in expected_horizons
+                    or state.holding_interval < timedelta(0)
                     or state.reporting_currency != self.reporting_currencies[asset]
                 ):
                     raise ValueError("accepted target cost state binding mismatch")

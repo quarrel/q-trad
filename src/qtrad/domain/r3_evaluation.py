@@ -25,7 +25,7 @@ from qtrad.domain.economics import (
     InputStatus,
 )
 from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass, PriceBasis
-from qtrad.domain.portfolio import HorizonState, SleeveKey
+from qtrad.domain.portfolio import ContinuousTarget, HorizonState, NettingResult, SleeveKey
 from qtrad.domain.r3_rounding import RoundedTarget
 from qtrad.domain.risk import RiskState
 from qtrad.domain.time import require_utc
@@ -875,38 +875,27 @@ class SleeveReconciliation:
         }
 
 
-def lifecycle_component_identities(payload: Mapping[str, object]) -> dict[str, object]:
-    """Derive the immutable component identity chain for one lifecycle event."""
-    target = identity({"contract": "r3-f-target-event-v1", **payload})
-    cost = identity({"contract": "r3-f-cost-event-v1", "target": target, **payload})
-    risk = identity({"contract": "r3-f-risk-event-v1", "target": target, "cost": cost, **payload})
-    decision = identity(
-        {
-            "contract": "r3-f-decision-event-v1",
-            "target": target,
-            "risk": risk,
-            "cost": cost,
-            **payload,
-        }
-    )
-    outcomes = (identity({"contract": "r3-f-outcome-event-v1", "decision": decision, **payload}),)
-    report = identity(
-        {
-            "contract": "r3-f-report-event-v1",
-            "decision": decision,
-            "outcomes": outcomes,
-            **payload,
-        }
-    )
-    receipt = identity({"contract": "r3-f-receipt-event-v1", "report": report})
+def lifecycle_component_identities(components: Mapping[str, object]) -> dict[str, object]:
+    """Return authoritative identities for one lifecycle component graph."""
+    netting = cast(NettingResult, components["netting"])
+    continuous_target = cast(ContinuousTarget, components["continuous_target"])
+    rounded_target = cast(RoundedTarget, components["rounded_target"])
+    risk_state = cast(RiskState, components["risk_state"])
+    decision = cast(DecisionClosure, components["decision"])
+    outcomes = cast(tuple[OutcomeClosure, ...], components["outcomes"])
+    report = cast(EvaluationReport, components["report"])
+    receipt = cast(VerificationReceipt, components["receipt"])
     return {
-        "target": target,
-        "cost": cost,
-        "risk": risk,
-        "decision": decision,
-        "outcomes": outcomes,
-        "report": report,
-        "receipt": receipt,
+        "netting": netting.semantic_identity,
+        "continuous_target": continuous_target.semantic_identity,
+        "rounded_target": rounded_target.semantic_identity,
+        "target": rounded_target.semantic_identity,
+        "cost": rounded_target.cost_state_identity,
+        "risk": risk_state.semantic_identity,
+        "decision": decision.semantic_identity,
+        "outcomes": tuple(item.semantic_identity for item in outcomes),
+        "report": report.semantic_identity,
+        "receipt": receipt.receipt_identity,
     }
 
 
@@ -934,6 +923,20 @@ class LifecycleEvent:
     receipt_identity: str = ""
     sleeve_transaction_costs: tuple[tuple[str, Decimal], ...] = ()
     sleeve_financing_costs: tuple[tuple[str, Decimal], ...] = ()
+    continuous_target_identity: str = ""
+    rounded_target_identity: str = ""
+    _netting_component: NettingResult | None = field(default=None, repr=False, compare=False)
+    _continuous_target_component: ContinuousTarget | None = field(
+        default=None, repr=False, compare=False
+    )
+    _rounded_target_component: RoundedTarget | None = field(default=None, repr=False, compare=False)
+    _risk_state_component: RiskState | None = field(default=None, repr=False, compare=False)
+    _decision_component: DecisionClosure | None = field(default=None, repr=False, compare=False)
+    _outcome_components: tuple[OutcomeClosure, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _report_component: EvaluationReport | None = field(default=None, repr=False, compare=False)
+    _receipt_component: VerificationReceipt | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         require_utc(self.event_time, "lifecycle event time")
@@ -991,6 +994,8 @@ class LifecycleEvent:
         object.__setattr__(self, "sleeve_financing_costs", tuple(self.sleeve_financing_costs))
         for name, value in (
             ("target", self.target_identity),
+            ("continuous target", self.continuous_target_identity),
+            ("rounded target", self.rounded_target_identity),
             ("risk", self.risk_state_identity),
             ("decision", self.decision_identity),
         ):
@@ -1000,9 +1005,37 @@ class LifecycleEvent:
                 _digest(value, f"lifecycle {name} identity")
         _digest(self.cost_state_identity, "lifecycle cost identity")
         _digest(self.netting_identity, "lifecycle netting identity")
-        expected = lifecycle_component_identities(self._identity_payload())
+        if any(
+            component is None
+            for component in (
+                self._netting_component,
+                self._continuous_target_component,
+                self._rounded_target_component,
+                self._risk_state_component,
+                self._decision_component,
+                self._outcome_components,
+                self._report_component,
+                self._receipt_component,
+            )
+        ):
+            raise ValueError("lifecycle event requires authoritative component objects")
+        expected = lifecycle_component_identities(
+            {
+                "netting": self._netting_component,
+                "continuous_target": self._continuous_target_component,
+                "rounded_target": self._rounded_target_component,
+                "risk_state": self._risk_state_component,
+                "decision": self._decision_component,
+                "outcomes": self._outcome_components,
+                "report": self._report_component,
+                "receipt": self._receipt_component,
+            }
+        )
         supplied = {
+            "netting": self.netting_identity,
             "target": self.target_identity,
+            "continuous_target": self.continuous_target_identity,
+            "rounded_target": self.rounded_target_identity,
             "cost": self.cost_state_identity,
             "risk": self.risk_state_identity,
             "decision": self.decision_identity,
@@ -1010,8 +1043,20 @@ class LifecycleEvent:
             "report": self.report_identity,
             "receipt": self.receipt_identity,
         }
-        if supplied != expected:
-            raise ValueError("lifecycle identity chain does not bind canonical event")
+        expected_values = {
+            "netting": expected["netting"],
+            "target": expected["target"],
+            "continuous_target": expected["continuous_target"],
+            "rounded_target": expected["rounded_target"],
+            "cost": expected["cost"],
+            "risk": expected["risk"],
+            "decision": expected["decision"],
+            "outcomes": expected["outcomes"],
+            "report": expected["report"],
+            "receipt": expected["receipt"],
+        }
+        if supplied != expected_values:
+            raise ValueError("lifecycle identity chain does not bind authoritative components")
 
     def _identity_payload(self) -> dict[str, object]:
         return {
@@ -1044,6 +1089,8 @@ class LifecycleEvent:
             "financing_cost": self.financing_cost,
             "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
             "target_identity": self.target_identity,
+            "continuous_target_identity": self.continuous_target_identity,
+            "rounded_target_identity": self.rounded_target_identity,
             "risk_state_identity": self.risk_state_identity,
             "decision_identity": self.decision_identity,
             "cost_state_identity": self.cost_state_identity,

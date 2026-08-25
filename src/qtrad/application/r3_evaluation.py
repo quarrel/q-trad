@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, localcontext
 from pathlib import Path
 from typing import cast
 
@@ -24,10 +24,13 @@ from qtrad.domain.portfolio import (
     CONFIGURED_HORIZONS,
     ONE_HORIZON,
     AssetNetting,
+    ContinuousTarget,
+    DecisionDisposition,
     HorizonIntent,
     HorizonState,
     NettingResult,
     SleeveKey,
+    SolverResultStatus,
     VirtualPosition,
     construct_horizon_intent,
     match_internal_opposing_changes,
@@ -37,6 +40,7 @@ from qtrad.domain.r3_evaluation import (
     DecisionClosure,
     EvaluationReport,
     LifecycleEvent,
+    OutcomeClosure,
     QuoteEvidence,
     SleeveAttribution,
     VerificationReceipt,
@@ -210,7 +214,23 @@ def build_fixture_inputs(
     asset = "ASSET_A"
     assets = (asset,)
     current = (Decimal("0"),)
-    target_amount = Decimal("0.5") if legacy else Decimal("0.125") * len(configured)
+    target_amount = (
+        Decimal("0.5")
+        if legacy
+        else sum(
+            [
+                (
+                    Decimal("0")
+                    if len(configured) > 1 and horizon == timedelta(minutes=30)
+                    else Decimal("0.25")
+                    if horizon == timedelta(minutes=5)
+                    else Decimal("0.125")
+                )
+                for horizon in configured
+            ],
+            Decimal("0"),
+        )
+    )
     target_position = (target_amount,)
     model = _model(asset)
     expected_state = model.evaluate(
@@ -237,7 +257,15 @@ def build_fixture_inputs(
     deltas = {
         key: (Decimal("1") if key.configuration_id == "long" else Decimal("-0.5"))
         if legacy
-        else (Decimal("0.25") if key.configuration_id.startswith("long-") else Decimal("-0.125"))
+        else (
+            Decimal("0.375")
+            if key.configuration_id == "long-5m"
+            else Decimal("0.125")
+            if key.configuration_id == "long-30m"
+            else Decimal("0.25")
+            if key.configuration_id.startswith("long-")
+            else Decimal("-0.125")
+        )
         for key in keys
     }
     crosses = {key: (Decimal("0.5") if legacy else Decimal("0.125")) for key in keys}
@@ -301,6 +329,30 @@ def build_fixture_inputs(
             item.semantic_identity for item in lifecycle
         )
     decision_input_identity = identity(decision_input_payload)
+    continuous_target: ContinuousTarget | None = None
+    if not legacy:
+        continuous_target = ContinuousTarget(
+            source_class=source,
+            evidence_purpose=purpose,
+            asset_order=assets,
+            current_position=current,
+            requested_position=target_position,
+            target_position=target_position,
+            physical_delta=target_position,
+            decision_time=_FIXTURE_TIME,
+            expected_costs=expected,
+            expected_cost_reporting=total - financing,
+            expected_financing_reporting=financing,
+            solver_status=SolverResultStatus.OPTIMAL.value,
+            feasibility_residual=Decimal("0"),
+            solver_policy_identity=identity({"contract": "fixture-solver-policy-v1"}),
+            decision_input_identity=decision_input_identity,
+            cost_model_identities={asset: model.semantic_identity},
+            reporting_currencies={asset: "AUD" for asset in assets},
+            netting=netting,
+            disposition=DecisionDisposition.ACCEPTED,
+            reason_codes=(),
+        )
     target = RoundedTarget(
         source_class=source,
         evidence_purpose=purpose,
@@ -318,12 +370,16 @@ def build_fixture_inputs(
         attributions=repaired,
         policy_identity=identity({"contract": ROUNDING_CONTRACT, "policy": "fixture"}),
         decision_input_identity=decision_input_identity,
-        continuous_target_identity=identity(
-            {
-                "contract": "qtrad-continuous-target-v1",
-                "asset_order": assets,
-                "target": target_position,
-            }
+        continuous_target_identity=(
+            continuous_target.semantic_identity
+            if continuous_target is not None
+            else identity(
+                {
+                    "contract": "qtrad-continuous-target-v1",
+                    "asset_order": assets,
+                    "target": target_position,
+                }
+            )
         ),
         cost_state_identity=cost_states_identity(expected),
         horizon_state_identities=()
@@ -394,8 +450,14 @@ def _allocate_lifecycle_cost(
     amount: Decimal,
     sleeve_weights: tuple[tuple[str, Decimal], ...],
     weight_total: Decimal,
+    _allocation_precision: int | None = None,
 ) -> tuple[tuple[str, Decimal], ...]:
     """Allocate money with Decimal largest-remainder units and stable ties."""
+    precision = getcontext().prec if _allocation_precision is None else _allocation_precision
+    if getcontext().prec < 100:
+        with localcontext() as context:
+            context.prec = 100
+            return _allocate_lifecycle_cost(amount, sleeve_weights, weight_total, precision)
     ordered = tuple(sorted(sleeve_weights, key=lambda item: item[0]))
     if not ordered:
         return ()
@@ -410,7 +472,7 @@ def _allocate_lifecycle_cost(
     if amount == 0:
         return tuple((sleeve_id, Decimal("0")) for sleeve_id, _ in ordered)
 
-    exponent = min(int(amount.as_tuple().exponent), -getcontext().prec)
+    exponent = min(int(amount.as_tuple().exponent), -precision)
     quantum = Decimal(1).scaleb(Decimal(exponent))
     sign = Decimal("-1") if amount < 0 else Decimal("1")
     magnitude = abs(amount)
@@ -445,6 +507,8 @@ def _build_lifecycle_events(
     decision: DecisionClosure,
     lifecycle: tuple[HorizonState, ...],
     model: ContinuousCostModel,
+    outcomes: tuple[OutcomeClosure, ...],
+    report: EvaluationReport,
 ) -> tuple[LifecycleEvent, ...]:
     """Replay configured virtual sleeves at each physical boundary."""
     if not lifecycle:
@@ -497,11 +561,11 @@ def _build_lifecycle_events(
             )
         netting = match_internal_opposing_changes(intents)
         external = netting.assets[0].external_delta
-        target = physical + external
+        target_position = physical + external
         interval = next_time - event_time
         costs = model.evaluate(
             current_quantity=physical,
-            target_quantity=target,
+            target_quantity=target_position,
             decision_time=event_time,
             internal_cross_quantity=netting.assets[0].internal_cross_quantity,
             holding_interval=interval,
@@ -529,73 +593,130 @@ def _build_lifecycle_events(
             (item.key.configuration_id, abs(item.external_delta_share)) for item in netting.sleeves
         )
         transaction_total = sum((weight for _, weight in transaction_weights), Decimal("0"))
-        desired = {intent.key: intent.requested_quantity for intent in intents}
         holding_weights = tuple(
-            (state.key.configuration_id, abs(desired[state.key])) for state in active
+            (state.key.configuration_id, abs(target_position)) for state in active
         )
         holding_total = sum((weight for _, weight in holding_weights), Decimal("0"))
         transaction_allocation = _allocate_lifecycle_cost(
             total - financing, transaction_weights, transaction_total
         )
         financing_allocation = _allocate_lifecycle_cost(financing, holding_weights, holding_total)
-        netting_identity = identity(
-            {
-                "contract": "r3-f-netting-event-v1",
-                "assets": tuple(
-                    {
-                        "asset_id": item.asset_id,
-                        "requested_delta": item.requested_delta,
-                        "external_delta": item.external_delta,
-                        "internal_cross_quantity": item.internal_cross_quantity,
-                        "attributions": tuple(
-                            {
-                                "key": attribution.key.as_json(),
-                                "requested_delta": attribution.requested_delta,
-                                "internal_cross_quantity": attribution.internal_cross_quantity,
-                                "external_delta_share": attribution.external_delta_share,
-                            }
-                            for attribution in item.attributions
-                        ),
-                    }
-                    for item in netting.assets
-                ),
-                "sleeves": tuple(
-                    {
-                        "key": item.key.as_json(),
-                        "requested_delta": item.requested_delta,
-                        "internal_cross_quantity": item.internal_cross_quantity,
-                        "external_delta_share": item.external_delta_share,
-                    }
-                    for item in netting.sleeves
-                ),
-            }
+        event_risk = replace(
+            cast(RiskState, decision.risk_state),
+            horizon_state_identities=(),
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+        )
+        continuous_target = ContinuousTarget(
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
+            asset_order=(asset,),
+            current_position=(physical,),
+            requested_position=(target_position,),
+            target_position=(target_position,),
+            physical_delta=(external,),
+            decision_time=event_time,
+            expected_costs={asset: costs},
+            expected_cost_reporting=total - financing,
+            expected_financing_reporting=financing,
+            solver_status=SolverResultStatus.OPTIMAL.value,
+            feasibility_residual=Decimal("0"),
+            solver_policy_identity=identity({"contract": "qtrad-r3-lifecycle-solver-policy-v1"}),
+            decision_input_identity=decision.decision_input_identity,
+            cost_model_identities={asset: model.semantic_identity},
+            reporting_currencies={asset: model.reporting_currency},
+            netting=netting,
+            disposition=DecisionDisposition.ACCEPTED,
+            reason_codes=(),
+        )
+        rounded_target = RoundedTarget(
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
+            asset_order=(asset,),
+            current_position=(physical,),
+            continuous_target=(target_position,),
+            target_position=(target_position,),
+            physical_delta=(external,),
+            disposition=RoundingDisposition.ACCEPTED,
+            reason_codes=(),
+            expected_costs={asset: costs},
+            expected_cost_reporting=total - financing,
+            expected_financing_reporting=financing,
+            netting=netting,
+            attributions=tuple(
+                RepairedSleeveAttribution(
+                    key=item.key,
+                    requested_delta=item.requested_delta,
+                    internal_cross_quantity=item.internal_cross_quantity,
+                    external_delta_share=item.external_delta_share,
+                )
+                for item in netting.sleeves
+            ),
+            policy_identity=identity(
+                {"contract": ROUNDING_CONTRACT, "policy": "fixture-lifecycle"}
+            ),
+            decision_input_identity=decision.decision_input_identity,
+            continuous_target_identity=continuous_target.semantic_identity,
+            cost_state_identity=cost_states_identity({asset: costs}),
+            horizon_state_identities=(),
+        )
+        target_receipt = _target_receipt(rounded_target)
+        event_decision = DecisionClosure(
+            source_class=decision.source_class,
+            evidence_purpose=decision.evidence_purpose,
+            asset_order=(asset,),
+            current_position=(physical,),
+            target_position=(target_position,),
+            physical_delta=(external,),
+            decision_time=event_time,
+            expiry_time=event_time + max(interval, timedelta(seconds=1)),
+            holding_interval=max(interval, timedelta(seconds=1)),
+            gross_forecast_return={asset: Decimal("0.02")},
+            gross_contribution={asset: Decimal("1.00")},
+            physical_notional={asset: Decimal("50")},
+            expected_costs={asset: costs},
+            cost_models={asset: model},
+            attributions=allocations,
+            decision_input_identity=decision.decision_input_identity,
+            parent_verification_identity=target_receipt.receipt_identity,
+            rounded_target=rounded_target,
+            target_verification_identity=target_receipt.receipt_identity,
+            risk_state=event_risk,
+            horizon_states=(),
         )
         active_ids = tuple(sorted(state.semantic_identity for state in active))
         reviewed_ids = tuple(sorted(state.semantic_identity for state in reviewed))
         expired_ids = tuple(sorted(state.semantic_identity for state in expired))
-        base_payload = {
-            "event_time": event_time,
-            "next_event_time": next_time,
-            "active_state_identities": active_ids,
-            "reviewed_state_identities": reviewed_ids,
-            "expired_state_identities": expired_ids,
-            "physical_position": ((asset, target),),
-            "physical_delta": ((asset, external),),
-            "transaction_cost": ((asset, total - financing),),
-            "financing_cost": ((asset, financing),),
-            "sleeve_allocations": tuple(item.canonical_payload for item in allocations),
-            "netting_identity": netting_identity,
-            "sleeve_transaction_costs": transaction_allocation,
-            "sleeve_financing_costs": financing_allocation,
-        }
-        ids = lifecycle_component_identities(base_payload)
-        target_identity = cast(str, ids["target"])
-        cost_identity = cast(str, ids["cost"])
-        risk_identity = cast(str, ids["risk"])
-        decision_identity = cast(str, ids["decision"])
-        outcome_identities = cast(tuple[str, ...], ids["outcomes"])
-        report_identity = cast(str, ids["report"])
-        receipt_identity = cast(str, ids["receipt"])
+        event_report = replace(
+            report,
+            lifecycle_events=(),
+            horizon_state_identities=(),
+            decision_identity=event_decision.semantic_identity,
+            decision_closure_identity=event_decision.closure_identity,
+            risk_state=event_risk,
+            risk_state_identity=event_risk.semantic_identity,
+        )
+        event_receipt = VerificationReceipt(
+            artefact_contract="qtrad-r3-lifecycle-event-report-v1",
+            semantic_identity=event_report.semantic_identity,
+            closure_identity=event_report.closure_identity,
+            parent_verification_identity=event_decision.target_verification_identity,
+            verifier_contract="qtrad-r3-lifecycle-event-verifier-v1",
+            checks=("canonical-bytes", "event-reconciliation", "create-only"),
+        )
+        component_ids = lifecycle_component_identities(
+            {
+                "netting": netting,
+                "continuous_target": continuous_target,
+                "rounded_target": rounded_target,
+                "risk_state": event_risk,
+                "decision": event_decision,
+                "outcomes": outcomes,
+                "report": event_report,
+                "receipt": event_receipt,
+            }
+        )
         events.append(
             LifecycleEvent(
                 event_time=event_time,
@@ -603,25 +724,35 @@ def _build_lifecycle_events(
                 active_state_identities=active_ids,
                 reviewed_state_identities=reviewed_ids,
                 expired_state_identities=expired_ids,
-                physical_position=((asset, target),),
+                physical_position=((asset, target_position),),
                 physical_delta=((asset, external),),
                 transaction_cost=((asset, total - financing),),
                 financing_cost=((asset, financing),),
                 sleeve_allocations=allocations,
-                target_identity=target_identity,
-                risk_state_identity=risk_identity,
-                decision_identity=decision_identity,
-                cost_state_identity=cost_identity,
-                netting_identity=netting_identity,
-                outcome_identities=outcome_identities,
-                report_identity=report_identity,
-                receipt_identity=receipt_identity,
+                target_identity=cast(str, component_ids["target"]),
+                risk_state_identity=cast(str, component_ids["risk"]),
+                decision_identity=cast(str, component_ids["decision"]),
+                cost_state_identity=cast(str, component_ids["cost"]),
+                netting_identity=cast(str, component_ids["netting"]),
+                outcome_identities=cast(tuple[str, ...], component_ids["outcomes"]),
+                report_identity=cast(str, component_ids["report"]),
+                receipt_identity=cast(str, component_ids["receipt"]),
                 sleeve_transaction_costs=transaction_allocation,
                 sleeve_financing_costs=financing_allocation,
+                continuous_target_identity=cast(str, component_ids["continuous_target"]),
+                rounded_target_identity=cast(str, component_ids["rounded_target"]),
+                _netting_component=netting,
+                _continuous_target_component=continuous_target,
+                _rounded_target_component=rounded_target,
+                _risk_state_component=event_risk,
+                _decision_component=event_decision,
+                _outcome_components=outcomes,
+                _report_component=event_report,
+                _receipt_component=event_receipt,
             )
         )
         positions.update({intent.key: intent.requested_quantity for intent in intents})
-        physical = target
+        physical = target_position
     if physical != Decimal("0"):
         raise ValueError("lifecycle final physical position must reconcile to zero")
     return tuple(events)
@@ -647,7 +778,13 @@ def run_fixture(
     latency = timedelta(seconds=1)
     outcomes = build_outcome_closures(decision, quotes, latency=latency)
     report = evaluate_independently(decision, quotes, latency=latency)
-    lifecycle_events = _build_lifecycle_events(decision, decision.horizon_states, _model("ASSET_A"))
+    lifecycle_events = _build_lifecycle_events(
+        decision,
+        decision.horizon_states,
+        _model("ASSET_A"),
+        tuple(outcomes),
+        report,
+    )
     if lifecycle_events:
         report = replace(report, lifecycle_events=lifecycle_events)
     if (
