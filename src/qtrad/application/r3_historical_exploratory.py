@@ -72,6 +72,13 @@ def _native_utc_timestamp(value: str, field_name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+_NATIVE_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _native_utc_epoch_microseconds(value: datetime) -> int:
+    return int((value - _NATIVE_EPOCH) // timedelta(microseconds=1))
+
+
 _NON_EXECUTABLE_CLAIMS: Final = (
     "midpoint_only",
     "historical_exploratory",
@@ -86,6 +93,9 @@ _TARGET_IDS: Final = (
     "index:us-500",
     "commodity:spot-gold",
     "commodity:us-crude",
+)
+_TARGET_ORDINALS: Final = MappingProxyType(
+    {instrument: ordinal for ordinal, instrument in enumerate(_TARGET_IDS)}
 )
 _GROUP_IDS: Final = ("FX", "indices", "commodities")
 _TARGET_GROUP_MAP: Final = {
@@ -4248,8 +4258,8 @@ def _load_native_retained_rows(
         "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
     }
     state_peak = 0
-    target_index: dict[str, tuple[datetime, str, int, str | None]] = {}
-    target_groups: dict[str, dict[str, str]] = {}
+    target_index: dict[str, tuple[int, int]] = {}
+    target_groups: dict[str, dict[int, str]] = {}
     forecast_coverage: dict[str, set[str]] = {}
     compute_limits = cast(Mapping[str, Any], config.document["compute_limits"])
     max_elapsed_seconds = float(compute_limits["max_elapsed_seconds"])
@@ -4400,10 +4410,14 @@ def _load_native_retained_rows(
                 row["decision_time"],
                 row["target_horizon_seconds"],
             )
+            instrument_ordinal = (
+                _TARGET_ORDINALS.get(instrument) if isinstance(instrument, str) else None
+            )
             if (
                 not isinstance(target_id, str)
                 or not isinstance(instrument, str)
                 or instrument not in _TARGET_IDS
+                or instrument_ordinal is None
                 or not isinstance(decision_time, str)
                 or type(target_horizon) is not int
                 or target_horizon <= 0
@@ -4449,17 +4463,15 @@ def _load_native_retained_rows(
                     if fixture_target_id is not None and not isinstance(fixture_target_id, str):
                         raise FreezeError("native target fixture identity is malformed")
                     target_index[target_id] = (
-                        parsed_decision_time,
-                        instrument,
-                        target_horizon,
-                        fixture_target_id,
+                        _native_utc_epoch_microseconds(parsed_decision_time),
+                        instrument_ordinal,
                     )
                     decision_group = target_groups.setdefault(decision_time, {})
-                    if instrument in decision_group:
+                    if instrument_ordinal in decision_group:
                         raise FreezeError(
                             "native target-source decision group repeats eligible instrument"
                         )
-                    decision_group[instrument] = target_id
+                    decision_group[instrument_ordinal] = target_id
             elif target_id in selected_ids:
                 if not eligible:
                     raise FreezeError("native selected target is outside authenticated eligibility")
@@ -4490,13 +4502,22 @@ def _load_native_retained_rows(
             parsed_opportunity_time = _native_utc_timestamp(
                 decision_time, "opportunity decision time"
             )
+            opportunity_ordinal = (
+                _TARGET_ORDINALS.get(instrument) if isinstance(instrument, str) else None
+            )
             target_identity = target_index.get(target_id) if isinstance(target_id, str) else None
             if (
                 not isinstance(target_id, str)
                 or not isinstance(instrument, str)
+                or opportunity_ordinal is None
                 or type(target_horizon) is not int
                 or target_identity is None
-                or (parsed_opportunity_time, instrument, target_horizon) != target_identity[:3]
+                or target_identity
+                != (
+                    _native_utc_epoch_microseconds(parsed_opportunity_time),
+                    opportunity_ordinal,
+                )
+                or target_horizon != primary_horizon
             ):
                 raise FreezeError("native opportunity identity differs from target")
             if not fixture:
@@ -4615,7 +4636,7 @@ def _load_native_retained_rows(
         coverage, _unused_rows, receipt = forecast_pass(name, None)
         forecast_coverage[name] = coverage
         source_receipts[name] = receipt
-    target_instruments = set(_TARGET_IDS)
+    target_instruments = set(range(len(_TARGET_IDS)))
     required_groups = int(
         cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
     )
@@ -4631,7 +4652,9 @@ def _load_native_retained_rows(
             for name in forecast_coverage
         )
         group_ids = tuple(
-            instrument_map[instrument] for instrument in _TARGET_IDS if instrument in instrument_map
+            instrument_map[ordinal]
+            for ordinal in range(len(_TARGET_IDS))
+            if ordinal in instrument_map
         )
         if not complete_group:
             incomplete.append(

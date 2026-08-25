@@ -2293,6 +2293,30 @@ def test_native_ineligible_opportunity_fails_closed(
         _mutate_fixture_native_source(monkeypatch, config, mutate)
 
 
+@pytest.mark.parametrize("field", ("decision_time", "instrument_id", "target_horizon_seconds"))
+def test_native_opportunity_identity_mutations_fail_cross_binding(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity = opportunity_rows[0]
+        if field == "decision_time":
+            opportunity[field] = "2026-01-02T00:00:00Z"
+        elif field == "instrument_id":
+            original = opportunity[field]
+            opportunity[field] = next(
+                instrument for instrument in implementation._TARGET_IDS if instrument != original
+            )
+        else:
+            opportunity[field] = int(opportunity[field]) + 1
+
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
 def test_native_second_pass_recovers_exact_selected_target_opportunity_sets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
