@@ -15,7 +15,7 @@ from dataclasses import replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1562,6 +1562,147 @@ def test_native_parts_root_rejects_orphans_and_ancestor_symlinks(tmp_path: Path)
         implementation._validate_native_authorised_root(symlink_parent / "target-source.json")
 
 
+def test_native_parts_root_allows_only_declared_forbidden_family_without_touching_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    forbidden = parts_root / "pre-holdout-target"
+    forbidden.symlink_to(tmp_path / "outside", target_is_directory=True)
+    lstat_calls: list[Path] = []
+
+    def reject_forbidden_path(path: Path, *args: Any, **kwargs: Any) -> Any:
+        path_value = Path(path)
+        if "pre-holdout-target" in path_value.parts:
+            raise AssertionError("pre-holdout family was inspected")
+        lstat_calls.append(path_value)
+        return original_lstat(path, *args, **kwargs)
+
+    original_lstat = implementation.os.lstat
+    monkeypatch.setattr(implementation.os, "lstat", reject_forbidden_path)
+    implementation._validate_native_authorised_root(wrapper)
+
+    (parts_root / "unknown").mkdir()
+    with pytest.raises(FreezeError, match="undeclared entry"):
+        implementation._validate_native_authorised_root(wrapper)
+    assert all("unknown" not in path.parts for path in lstat_calls)
+
+
+@pytest.mark.parametrize("family", ("targets", "opportunities"))
+def test_native_parts_root_still_checks_authorised_families(tmp_path: Path, family: str) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    invalid_family = parts_root / family
+    invalid_family.rmdir()
+    invalid_family.write_text("not-a-directory", encoding="utf-8")
+
+    with pytest.raises(FreezeError, match="family is unsafe"):
+        implementation._validate_native_authorised_root(wrapper)
+
+
+@pytest.mark.parametrize(
+    "target_instruments",
+    (
+        tuple(),
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "commodity:us-crude",
+        ][:-1],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "commodity:us-crude",
+            "extra:asset",
+        ],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            "fx:aud-usd",
+        ],
+        [
+            "fx:aud-usd",
+            "fx:eur-usd",
+            "index:australia-200",
+            "index:us-500",
+            "commodity:spot-gold",
+            42,
+        ],
+        "not-a-list",
+    ),
+    ids=("empty", "missing", "extra", "duplicate", "non_string", "non_list"),
+)
+def test_native_target_source_requires_exact_six_string_universe(
+    target_instruments: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert locators is not None and _fixture
+        source_path = Path(locators["target_source"])
+        manifest = json.loads(source_path.read_bytes())
+        manifest["target_instruments"] = target_instruments
+        source_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    with pytest.raises(FreezeError, match="exact six-instrument universe"):
+        load_fixture_rows(synthetic_fixture(), FreezeConfig.from_path(CONFIG))
+
+
+def test_native_target_source_accepts_reordered_exact_six_string_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    original_loader = implementation.load_retained_rows
+    reordered = list(reversed(implementation._TARGET_IDS))
+
+    def reordered_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert locators is not None and _fixture
+        source_path = Path(locators["target_source"])
+        manifest = json.loads(source_path.read_bytes())
+        manifest["target_instruments"] = reordered
+        source_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", reordered_loader)
+    rows, _metadata = load_fixture_rows(synthetic_fixture(), FreezeConfig.from_path(CONFIG))
+    assert len(rows) == 18
+
+
 def test_native_physical_parts_shape_and_pre_holdout_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1971,3 +2112,628 @@ def test_native_json_open_surface_has_one_authenticated_read_boundary() -> None:
             }:
                 violations.append(f"{node.name}:{target.attr}")
     assert violations == []
+
+
+def _mutate_fixture_native_source(
+    monkeypatch: pytest.MonkeyPatch,
+    config: FreezeConfig,
+    mutation: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None],
+    *,
+    preserve_target_order: bool = False,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        actual_locators = dict(locators)
+        manifest_path = Path(actual_locators["target_source"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        target_references = cast(list[dict[str, Any]], manifest["target_parts"])
+        opportunity_reference = cast(dict[str, Any], manifest["opportunity_parts"][0])
+
+        def read_part_rows(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for reference in references:
+                part_path = manifest_path.parent / str(reference["path"])
+                document = json.loads(part_path.read_text(encoding="utf-8"))
+                rows.extend(cast(list[dict[str, Any]], document["rows"]))
+            return rows
+
+        target_rows = read_part_rows(target_references)
+        opportunity_path = manifest_path.parent / str(opportunity_reference["path"])
+        opportunity_document = json.loads(opportunity_path.read_text(encoding="utf-8"))
+        opportunity_rows = cast(list[dict[str, Any]], opportunity_document["rows"])
+        mutation(target_rows, opportunity_rows)
+        if not preserve_target_order:
+            target_rows.sort(key=lambda row: str(row["target_id"]))
+
+        target_template_path = manifest_path.parent / str(target_references[0]["path"])
+        target_template = json.loads(target_template_path.read_text(encoding="utf-8"))
+        target_boundary = max(1, len(target_rows) // 2)
+        target_chunks = (target_rows[:target_boundary], target_rows[target_boundary:])
+        target_references_rewritten: list[dict[str, Any]] = []
+        for part_index, part_rows in enumerate(target_chunks):
+            document = dict(target_template)
+            document["part_index"] = part_index
+            document["rows"] = part_rows
+            relative = f"{manifest_path.name}.parts/targets/part-{part_index:06d}.json"
+            part_path = manifest_path.parent / relative
+            encoded = implementation._canonical_bytes(document)
+            part_path.write_bytes(encoded)
+            target_references_rewritten.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                    "row_count": len(part_rows),
+                }
+            )
+
+        opportunity_document["rows"] = opportunity_rows
+        encoded_opportunity = implementation._canonical_bytes(opportunity_document)
+        opportunity_path.write_bytes(encoded_opportunity)
+        opportunity_reference["sha256"] = hashlib.sha256(encoded_opportunity).hexdigest()
+        opportunity_reference["row_count"] = len(opportunity_rows)
+
+        manifest["target_parts"] = target_references_rewritten
+        manifest["target_count"] = len(target_rows)
+        manifest["opportunity_count"] = len(opportunity_rows)
+        manifest["closure_id"] = implementation._native_source_closure(manifest)
+        manifest_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    return implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+def _extra_fixture_target(
+    target_rows: list[dict[str, Any]],
+    *,
+    decision_time: str,
+    horizon: int,
+) -> dict[str, Any]:
+    extra = deepcopy(target_rows[0])
+    extra["target_id"] = hashlib.sha256(
+        f"extra-target-{decision_time}-{horizon}".encode()
+    ).hexdigest()
+    extra["fixture_target_id"] = f"extra-{horizon}"
+    extra["decision_time"] = decision_time
+    extra["target_horizon_seconds"] = horizon
+    extra["target_start_time"] = decision_time
+    extra["target_end_time"] = extra["target_available_at"]
+    extra["target_freeze_at"] = extra["target_available_at"]
+    return extra
+
+
+def test_native_non_primary_target_is_validated_but_not_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.append(
+            _extra_fixture_target(
+                target_rows,
+                decision_time="2026-01-01T00:00:00Z",
+                horizon=901,
+            )
+        )
+
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    assert len(rows) == len(synthetic_fixture())
+    assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
+    assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+    assert metadata["native_target_source"]["target_parts"] == 2
+
+
+def test_native_out_of_range_target_is_validated_but_not_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.append(
+            _extra_fixture_target(
+                target_rows,
+                decision_time="2099-01-01T00:00:00Z",
+                horizon=900,
+            )
+        )
+
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    assert len(rows) == len(synthetic_fixture())
+    assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
+    assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+    assert metadata["native_target_source"]["target_parts"] == 2
+
+
+def test_native_missing_eligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows.pop()
+
+    with pytest.raises(FreezeError, match="eligible target/opportunity universes differ"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize("invalid_target_id", ("A" * 64, "g" * 64, "0" * 63))
+def test_native_fixture_rejects_noncanonical_target_ids(
+    monkeypatch: pytest.MonkeyPatch, invalid_target_id: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows[0]["target_id"] = invalid_target_id
+
+    with pytest.raises(FreezeError, match="canonical SHA-256"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_fixture_rejects_noncanonical_opportunity_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows[0]["opportunity_id"] = "A" * 64
+
+    with pytest.raises(FreezeError, match="canonical SHA-256"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_canonical_binary_ids_remain_distinct() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    first = implementation._native_canonical_sha256_id("00" * 32, "target ID")
+    second = implementation._native_canonical_sha256_id("01" + "00" * 31, "target ID")
+    assert first != second
+    assert len(first) == len(second) == 32
+
+
+def test_native_duplicate_eligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity_rows.append(deepcopy(opportunity_rows[0]))
+
+    with pytest.raises(FreezeError, match="opportunity IDs are duplicated"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_ineligible_opportunity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2099-01-01T00:00:00Z",
+            horizon=900,
+        )
+        target_rows.append(extra)
+        opportunity = deepcopy(opportunity_rows[0])
+        opportunity.update(
+            {
+                "target_id": extra["target_id"],
+                "fixture_target_id": extra["fixture_target_id"],
+                "decision_time": extra["decision_time"],
+                "target_horizon_seconds": extra["target_horizon_seconds"],
+            }
+        )
+        opportunity_rows.append(opportunity)
+
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize("field", ("decision_time", "instrument_id", "target_horizon_seconds"))
+def test_native_opportunity_identity_mutations_fail_cross_binding(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        opportunity = opportunity_rows[0]
+        if field == "decision_time":
+            opportunity[field] = "2026-01-02T00:00:00Z"
+        elif field == "instrument_id":
+            original = opportunity[field]
+            opportunity[field] = next(
+                instrument for instrument in implementation._TARGET_IDS if instrument != original
+            )
+        else:
+            opportunity[field] = int(opportunity[field]) + 1
+
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_second_pass_recovers_exact_selected_target_opportunity_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    observed: list[tuple[set[str], set[str]]] = []
+    original_row = implementation._native_fixture_row
+
+    def capture(
+        target_id: str,
+        targets: Mapping[str, Mapping[str, Any]],
+        opportunities: Mapping[str, Mapping[str, Any]],
+        forecasts: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        outcomes: Mapping[str, float],
+        periods: Mapping[str, str],
+    ) -> Any:
+        observed.append((set(targets), set(opportunities)))
+        return original_row(target_id, targets, opportunities, forecasts, outcomes, periods)
+
+    monkeypatch.setattr(implementation, "_native_fixture_row", capture)
+    rows, _metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+    assert len(rows) == len(synthetic_fixture())
+    assert observed
+    assert all(target_ids == opportunity_ids for target_ids, opportunity_ids in observed)
+    assert {row.target_id for row in rows} == {row.target_id for row in synthetic_fixture()}
+
+
+def test_native_extra_target_domain_identity_is_still_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["target_basis"] = "UNSUPPORTED"
+        target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize(
+    "mutation", ("unordered", "duplicate", "unordered_cross_part", "duplicate_cross_part")
+)
+def test_native_target_source_requires_strict_target_id_order(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "unordered":
+            target_rows[0], target_rows[1] = target_rows[1], target_rows[0]
+        elif mutation == "duplicate":
+            target_rows.append(deepcopy(target_rows[-1]))
+        elif mutation == "unordered_cross_part":
+            target_rows[8], target_rows[9] = target_rows[9], target_rows[8]
+        else:
+            target_rows[9] = deepcopy(target_rows[8])
+
+    with pytest.raises(FreezeError, match="strictly increasing"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate, preserve_target_order=True)
+
+
+def test_native_target_source_rejects_repeated_eligible_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        duplicate = deepcopy(target_rows[0])
+        duplicate["target_id"] = hashlib.sha256(b"duplicate-eligible-target").hexdigest()
+        target_rows.append(duplicate)
+
+    with pytest.raises(FreezeError, match="repeats eligible instrument"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("max_elapsed_seconds", 1, "elapsed-time bound"),
+        ("max_memory_mb", 1, "memory bound"),
+    ),
+)
+def test_native_loader_uses_exact_frozen_compute_limits(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: int, match: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    base_config = FreezeConfig.from_path(CONFIG)
+    document = json.loads(CONFIG.read_text(encoding="utf-8"))
+    cast(dict[str, Any], document["compute_limits"])[field] = value
+    config = FreezeConfig(document=document, semantic_identity=base_config.semantic_identity)
+    if field == "max_elapsed_seconds":
+        clock = [0]
+
+        def fake_monotonic() -> float:
+            clock[0] += 1
+            return 0.0 if clock[0] < 4 else 2.0
+
+        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+    else:
+        monkeypatch.setattr(
+            implementation.resource,
+            "getrusage",
+            lambda _resource: SimpleNamespace(ru_maxrss=2048),
+        )
+
+    with pytest.raises(FreezeError, match=match):
+        implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    ("limit_field", "match"),
+    (
+        ("max_elapsed_seconds", "elapsed-time bound"),
+        ("max_memory_mb", "memory bound"),
+    ),
+)
+def test_native_scan_bound_is_checked_at_8192_rows_before_child_completion(
+    monkeypatch: pytest.MonkeyPatch, limit_field: str, match: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    base_config = FreezeConfig.from_path(CONFIG)
+    document = json.loads(CONFIG.read_text(encoding="utf-8"))
+    cast(dict[str, Any], document["compute_limits"])[limit_field] = 1
+    config = FreezeConfig(document=document, semantic_identity=base_config.semantic_identity)
+    scanned_kinds: list[str] = []
+    original_iter = implementation._iter_native_source_parts
+
+    def tracking_iter(*args: Any, **kwargs: Any) -> Any:
+        kind = cast(str, kwargs["kind"])
+        for row in original_iter(*args, **kwargs):
+            scanned_kinds.append(kind)
+            yield row
+
+    monkeypatch.setattr(implementation, "_iter_native_source_parts", tracking_iter)
+    if limit_field == "max_elapsed_seconds":
+        clock = [0]
+
+        def fake_monotonic() -> float:
+            clock[0] += 1
+            return 0.0 if clock[0] == 1 else 2.0
+
+        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+    else:
+        monkeypatch.setattr(
+            implementation.resource,
+            "getrusage",
+            lambda _resource: SimpleNamespace(ru_maxrss=2048),
+        )
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        base = deepcopy(target_rows[0])
+        for index in range(8200):
+            extra = deepcopy(base)
+            extra["target_id"] = f"{(1 << 256) - 10000 + index:064x}"
+            extra["fixture_target_id"] = f"extra-{index}"
+            extra["target_horizon_seconds"] = 1
+            target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match=match):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+    assert len(scanned_kinds) == 8192
+    assert set(scanned_kinds) == {"targets"}
+
+
+def test_native_retained_loader_lifetime_state_is_role_mask_bounded() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    state = metadata["selection_state"]
+    assert state["bounded_id_state_peak"] == len(rows)
+    assert state["full_payload_materialisation"] is False
+
+
+def test_native_retained_loader_uses_pop_reconciliation_and_explicit_disposal() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    source = inspect.getsource(implementation._load_native_retained_rows)
+    assert "target_index.pop(opportunity_id_bytes, None)" in source
+    assert "remaining_eligible_ids" not in source
+    assert "forecast_coverage" not in source
+    assert "del first_target_groups, forecast_role_masks" in source
+    assert "0b111" in source
+
+
+def _mutate_native_source_on_second_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None],
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_loader = implementation._load_native_target_source
+    calls = 0
+
+    def second_pass_loader(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_loader(*args, **kwargs)
+        calls += 1
+        if calls != 2:
+            return result
+        manifest, target_rows, opportunity_rows, inventory = result
+        targets = [dict(row) for row in target_rows]
+        opportunities = [dict(row) for row in opportunity_rows]
+        mutation(targets, opportunities)
+        return manifest, iter(targets), iter(opportunities), inventory
+
+    monkeypatch.setattr(implementation, "_load_native_target_source", second_pass_loader)
+
+
+def test_native_selected_second_pass_target_domain_mutation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows[0]["target_basis"] = "UNSUPPORTED"
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize("mutation", ("swapped", "duplicate"))
+def test_native_selected_second_pass_target_order_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "swapped":
+            target_rows[0], target_rows[1] = target_rows[1], target_rows[0]
+        else:
+            target_rows.append(deepcopy(target_rows[-1]))
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="strictly increasing"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+def test_native_selected_second_pass_missing_target_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        target_rows.pop(0)
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize("mutation", ("swapped", "missing", "duplicate"))
+def test_native_selected_second_pass_opportunity_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(_target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        if mutation == "swapped":
+            first, second = opportunity_rows[:2]
+            first["target_id"], second["target_id"] = second["target_id"], first["target_id"]
+        elif mutation == "missing":
+            opportunity_rows.pop(0)
+        else:
+            opportunity_rows.append(deepcopy(opportunity_rows[0]))
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate)
+    expected = (
+        "identity differs from target"
+        if mutation == "swapped"
+        else "selected target/opportunity join is incomplete"
+    )
+    if mutation == "duplicate":
+        expected = "selected opportunity ID is duplicated"
+    with pytest.raises(FreezeError, match=expected):
+        from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+        load_fixture_rows(synthetic_fixture(), config)
+
+
+def test_native_second_pass_receipts_scan_all_physical_rows() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    expected_rows = len(rows)
+    source_receipts = metadata["source_scan_receipts"]
+    target_source = source_receipts["target_source"]
+    assert target_source["target_receipt"]["physical_rows"] == expected_rows * 2
+    assert target_source["opportunity_receipt"]["physical_rows"] == expected_rows * 2
+    for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
+        assert source_receipts[name]["physical_rows"] == expected_rows * 2
+        assert source_receipts[name]["second_pass"]["physical_rows"] == expected_rows
+
+
+def test_native_second_pass_skips_nonselected_fixture_row_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    extra_id = "extra-nonselected"
+    extra_target_ids: list[str] = []
+
+    def add_extra(
+        target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]
+    ) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["fixture_target_id"] = extra_id
+        extra_target_ids.append(cast(str, extra["target_id"]))
+        target_rows.append(extra)
+
+    _mutate_fixture_native_source(monkeypatch, config, add_extra)
+
+    def mutate_nonselected(
+        target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]
+    ) -> None:
+        next(row for row in target_rows if row.get("fixture_target_id") == extra_id)[
+            "target_basis"
+        ] = "UNSUPPORTED"
+
+    _mutate_native_source_on_second_pass(monkeypatch, mutate_nonselected)
+    observed: list[str] = []
+    original_row = implementation._native_fixture_row
+
+    def capture(target_id: str, *args: Any, **kwargs: Any) -> Any:
+        observed.append(target_id)
+        return original_row(target_id, *args, **kwargs)
+
+    monkeypatch.setattr(implementation, "_native_fixture_row", capture)
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    rows, _metadata = load_fixture_rows(synthetic_fixture(), config)
+    assert len(observed) == len(rows) == len(synthetic_fixture())
+    assert extra_target_ids[0] not in observed
+
+
+def test_native_nonselected_malformed_target_is_rejected_during_first_exhaustive_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        extra = _extra_fixture_target(
+            target_rows,
+            decision_time="2026-01-01T00:00:00Z",
+            horizon=901,
+        )
+        extra["target_basis"] = "UNSUPPORTED"
+        target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match="target row domain identity"):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
