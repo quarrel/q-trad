@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -526,3 +527,36 @@ def test_lifecycle_event_rejects_reused_component_from_another_event(tmp_path, c
     assert events is not None
     with pytest.raises(ValueError, match=r"(identity chain|does not bind)"):
         replace(events[0], **{component_field: getattr(events[1], component_field)})
+
+
+def test_lifecycle_persistence_binds_ordered_receipt_chain(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    event_dirs = sorted((tmp_path / "lifecycle-events").iterdir())
+    assert len(event_dirs) == len(events)
+    for event_dir in event_dirs:
+        target_receipt = json.loads((event_dir / "target-receipt.json").read_bytes())
+        decision_receipt = json.loads((event_dir / "decision-receipt.json").read_bytes())
+        outcome_receipt = json.loads((event_dir / "outcome-ASSET_A-receipt.json").read_bytes())
+        assert (
+            decision_receipt["parent_verification_identity"] == target_receipt["receipt_identity"]
+        )
+        assert (
+            outcome_receipt["parent_verification_identity"] == decision_receipt["receipt_identity"]
+        )
+
+
+def test_legacy_projection_cannot_replace_unified_report_closure(monkeypatch, tmp_path):
+    original = evaluation_app._legacy_projection_bytes
+
+    def forged_projection(*args, **kwargs):
+        files = original(*args, **kwargs)
+        payload = json.loads(files["report.json"])
+        payload["report_identity"] = "0" * 64
+        files["report.json"] = evaluation_app.canonical_bytes(payload)
+        return files
+
+    monkeypatch.setattr(evaluation_app, "_legacy_projection_bytes", forged_projection)
+    with pytest.raises(ValueError, match="projection report"):
+        run_fixture(tmp_path)

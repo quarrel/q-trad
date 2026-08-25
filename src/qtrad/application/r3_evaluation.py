@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import replace
@@ -40,13 +41,23 @@ from qtrad.domain.r3_evaluation import (
     DecisionClosure,
     EvaluationReport,
     LifecycleEvent,
+    OutcomeClosure,
     QuoteEvidence,
     SleeveAttribution,
     VerificationReceipt,
     build_outcome_closures,
+    canonical_bytes,
     evaluate_independently,
     identity,
     lifecycle_component_identities,
+)
+
+__all__ = (
+    "build_fixture_inputs",
+    "build_outcome_closures",
+    "evaluate_independently",
+    "fixture_cli",
+    "run_fixture",
 )
 from qtrad.domain.r3_rounding import (
     ROUNDING_CONTRACT,
@@ -209,27 +220,22 @@ def build_fixture_inputs(
 ) -> tuple[DecisionClosure, tuple[QuoteEvidence, ...]]:
     """Build the canonical fixture with one physical cost boundary."""
     configured = _normalise_fixture_horizons(horizons)
-    legacy = configured == (ONE_HORIZON,)
     asset = "ASSET_A"
     assets = (asset,)
     current = (Decimal("0"),)
-    target_amount = (
+    contributions = tuple(
         Decimal("0.5")
-        if legacy
-        else sum(
-            [
-                (
-                    Decimal("0")
-                    if len(configured) > 1 and horizon == timedelta(minutes=30)
-                    else Decimal("0.25")
-                    if horizon == timedelta(minutes=5)
-                    else Decimal("0.125")
-                )
-                for horizon in configured
-            ],
-            Decimal("0"),
+        if len(configured) == 1
+        else (
+            Decimal("0")
+            if len(configured) > 1 and horizon == timedelta(minutes=30)
+            else Decimal("0.25")
+            if horizon == timedelta(minutes=5)
+            else Decimal("0.125")
         )
+        for horizon in configured
     )
+    target_amount = sum(contributions, Decimal("0"))
     target_position = (target_amount,)
     model = _model(asset)
     expected_state = model.evaluate(
@@ -246,7 +252,9 @@ def build_fixture_inputs(
             source,
             purpose,
             "fixture-exp",
-            side if legacy else f"{side}-{int(horizon.total_seconds() // 60)}m",
+            side
+            if len(configured) == 1
+            else side + "-" + str(int(horizon.total_seconds() // 60)) + "m",
             asset,
             horizon,
         )
@@ -254,20 +262,22 @@ def build_fixture_inputs(
         for horizon in configured
     ]
     deltas = {
-        key: (Decimal("1") if key.configuration_id == "long" else Decimal("-0.5"))
-        if legacy
-        else (
-            Decimal("0.375")
-            if key.configuration_id == "long-5m"
-            else Decimal("0.125")
-            if key.configuration_id == "long-30m"
-            else Decimal("0.25")
-            if key.configuration_id.startswith("long-")
-            else Decimal("-0.125")
+        key: (
+            (Decimal("1") if key.configuration_id == "long" else Decimal("-0.5"))
+            if len(configured) == 1
+            else (
+                Decimal("0.375")
+                if key.configuration_id == "long-5m"
+                else Decimal("0.125")
+                if key.configuration_id == "long-30m"
+                else Decimal("0.25")
+                if key.configuration_id.startswith("long-")
+                else Decimal("-0.125")
+            )
         )
         for key in keys
     }
-    crosses = {key: (Decimal("0.5") if legacy else Decimal("0.125")) for key in keys}
+    crosses = {key: (Decimal("0.5") if len(configured) == 1 else Decimal("0.125")) for key in keys}
     parents = tuple(
         ParentSleeveAttribution(
             key,
@@ -323,35 +333,30 @@ def build_fixture_inputs(
         "target_position": target_position,
         "expected_cost_identity": cost_states_identity(expected),
     }
-    if not legacy:
-        decision_input_payload["horizon_states"] = tuple(
-            item.semantic_identity for item in lifecycle
-        )
+    decision_input_payload["horizon_states"] = tuple(item.semantic_identity for item in lifecycle)
     decision_input_identity = identity(decision_input_payload)
-    continuous_target: ContinuousTarget | None = None
-    if not legacy:
-        continuous_target = ContinuousTarget(
-            source_class=source,
-            evidence_purpose=purpose,
-            asset_order=assets,
-            current_position=current,
-            requested_position=target_position,
-            target_position=target_position,
-            physical_delta=target_position,
-            decision_time=_FIXTURE_TIME,
-            expected_costs=expected,
-            expected_cost_reporting=total - financing,
-            expected_financing_reporting=financing,
-            solver_status=SolverResultStatus.OPTIMAL.value,
-            feasibility_residual=Decimal("0"),
-            solver_policy_identity=identity({"contract": "fixture-solver-policy-v1"}),
-            decision_input_identity=decision_input_identity,
-            cost_model_identities={asset: model.semantic_identity},
-            reporting_currencies={asset: "AUD" for asset in assets},
-            netting=netting,
-            disposition=DecisionDisposition.ACCEPTED,
-            reason_codes=(),
-        )
+    continuous_target = ContinuousTarget(
+        source_class=source,
+        evidence_purpose=purpose,
+        asset_order=assets,
+        current_position=current,
+        requested_position=target_position,
+        target_position=target_position,
+        physical_delta=target_position,
+        decision_time=_FIXTURE_TIME,
+        expected_costs=expected,
+        expected_cost_reporting=total - financing,
+        expected_financing_reporting=financing,
+        solver_status=SolverResultStatus.OPTIMAL.value,
+        feasibility_residual=Decimal("0"),
+        solver_policy_identity=identity({"contract": "fixture-solver-policy-v1"}),
+        decision_input_identity=decision_input_identity,
+        cost_model_identities={asset: model.semantic_identity},
+        reporting_currencies={asset: "AUD" for asset in assets},
+        netting=netting,
+        disposition=DecisionDisposition.ACCEPTED,
+        reason_codes=(),
+    )
     target = RoundedTarget(
         source_class=source,
         evidence_purpose=purpose,
@@ -369,21 +374,11 @@ def build_fixture_inputs(
         attributions=repaired,
         policy_identity=identity({"contract": ROUNDING_CONTRACT, "policy": "fixture"}),
         decision_input_identity=decision_input_identity,
-        continuous_target_identity=(
-            continuous_target.semantic_identity
-            if continuous_target is not None
-            else identity(
-                {
-                    "contract": "qtrad-continuous-target-v1",
-                    "asset_order": assets,
-                    "target": target_position,
-                }
-            )
-        ),
+        continuous_target_identity=continuous_target.semantic_identity,
         cost_state_identity=cost_states_identity(expected),
-        horizon_state_identities=()
-        if legacy
-        else tuple((item.semantic_identity, item.closure_identity) for item in lifecycle),
+        horizon_state_identities=tuple(
+            (item.semantic_identity, item.closure_identity) for item in lifecycle
+        ),
     )
     target_receipt = _target_receipt(target)
     attributions = tuple(
@@ -402,9 +397,7 @@ def build_fixture_inputs(
     risk = _risk_state(
         source,
         purpose,
-        horizon_state_identities=()
-        if legacy
-        else tuple(item.semantic_identity for item in lifecycle),
+        horizon_state_identities=tuple(item.semantic_identity for item in lifecycle),
     )
     decision = DecisionClosure(
         source_class=source,
@@ -427,7 +420,7 @@ def build_fixture_inputs(
         rounded_target=target,
         target_verification_identity=target_receipt.receipt_identity,
         risk_state=risk,
-        horizon_states=() if legacy else lifecycle,
+        horizon_states=lifecycle,
     )
     quotes = (
         QuoteEvidence(asset, _FIXTURE_TIME, Decimal("99"), Decimal("101"), sequence=0),
@@ -532,7 +525,6 @@ def _build_lifecycle_events(
                 active.append(state)
             elif state.expiry_time == event_time:
                 reviewed.append(state)
-                expired.append(state)
             else:
                 expired.append(state)
             if event_time == _FIXTURE_TIME:
@@ -601,7 +593,7 @@ def _build_lifecycle_events(
         financing_allocation = _allocate_lifecycle_cost(financing, holding_weights, holding_total)
         event_risk = replace(
             cast(RiskState, decision.risk_state),
-            horizon_state_identities=(),
+            horizon_state_identities=tuple(state.semantic_identity for state in lifecycle),
             semantic_identity=None,
             closure_identity=None,
             provenance_identity=None,
@@ -657,7 +649,9 @@ def _build_lifecycle_events(
             decision_input_identity=decision.decision_input_identity,
             continuous_target_identity=continuous_target.semantic_identity,
             cost_state_identity=cost_states_identity({asset: costs}),
-            horizon_state_identities=(),
+            horizon_state_identities=tuple(
+                (state.semantic_identity, state.closure_identity) for state in lifecycle
+            ),
         )
         target_receipt = _target_receipt(rounded_target)
         event_decision = DecisionClosure(
@@ -681,7 +675,7 @@ def _build_lifecycle_events(
             rounded_target=rounded_target,
             target_verification_identity=target_receipt.receipt_identity,
             risk_state=event_risk,
-            horizon_states=(),
+            horizon_states=lifecycle,
         )
         active_ids = tuple(sorted(state.semantic_identity for state in active))
         reviewed_ids = tuple(sorted(state.semantic_identity for state in reviewed))
@@ -697,7 +691,7 @@ def _build_lifecycle_events(
             latency=timedelta(seconds=1),
             cost_holding_interval=interval,
         )
-        event_report = replace(event_report, lifecycle_events=())
+        event_report = replace(event_report, lifecycle_events=None)
         event_receipt = VerificationReceipt(
             artefact_contract="qtrad-r3-lifecycle-event-report-v1",
             semantic_identity=event_report.semantic_identity,
@@ -752,6 +746,9 @@ def _build_lifecycle_events(
                 _receipt_component=event_receipt,
                 _sleeve_transaction_cost_component=transaction_allocation,
                 _sleeve_financing_cost_component=financing_allocation,
+                _parent_horizon_state_components=lifecycle,
+                _horizon_state_components=tuple(active + reviewed + expired),
+                _boundary_times=boundaries,
             )
         )
         positions.update({intent.key: intent.requested_quantity for intent in intents})
@@ -772,59 +769,389 @@ def _write_create_only(path: Path, payload: bytes) -> str:
     return identity(json.loads(persisted))
 
 
+def _persist_lifecycle_events(output_dir: Path, events: tuple[LifecycleEvent, ...]) -> None:
+    """Persist each authoritative lifecycle closure and its receipt chain create-only."""
+    for index, event in enumerate(events):
+        event_dir = output_dir / "lifecycle-events" / f"{index:04d}"
+        decision = cast(DecisionClosure, object.__getattribute__(event, "_decision_component"))
+        target = cast(RoundedTarget, object.__getattribute__(event, "_rounded_target_component"))
+        continuous = cast(
+            ContinuousTarget, object.__getattribute__(event, "_continuous_target_component")
+        )
+        netting = cast(NettingResult, object.__getattribute__(event, "_netting_component"))
+        outcomes = cast(
+            tuple[OutcomeClosure, ...], object.__getattribute__(event, "_outcome_components")
+        )
+        event_report = cast(EvaluationReport, object.__getattribute__(event, "_report_component"))
+        event_receipt = cast(
+            VerificationReceipt, object.__getattribute__(event, "_receipt_component")
+        )
+        target_receipt = _target_receipt(target)
+        decision_receipt = VerificationReceipt(
+            artefact_contract=decision.contract,
+            semantic_identity=decision.semantic_identity,
+            closure_identity=decision.closure_identity,
+            parent_verification_identity=target_receipt.receipt_identity,
+            verifier_contract="r3-e-lifecycle-verifier-v1",
+            checks=("canonical-bytes", "ordered-event", "create-only"),
+        )
+        persisted_decision = _write_create_only(
+            event_dir / "decision.json", decision.canonical_bytes
+        )
+        persisted_target = _write_create_only(event_dir / "target.json", target.canonical_bytes)
+        persisted_continuous = _write_create_only(
+            event_dir / "continuous-target.json", continuous.canonical_bytes
+        )
+        persisted_netting = _write_create_only(event_dir / "netting.json", netting.canonical_bytes)
+        _write_create_only(event_dir / "target-receipt.json", target_receipt.canonical_bytes)
+        _write_create_only(event_dir / "decision-receipt.json", decision_receipt.canonical_bytes)
+        if (
+            persisted_decision != decision.semantic_identity
+            or persisted_target != target.semantic_identity
+        ):
+            raise ValueError("persisted lifecycle decision or target does not bind")
+        if (
+            persisted_continuous != continuous.semantic_identity
+            or persisted_netting != netting.semantic_identity
+        ):
+            raise ValueError("persisted lifecycle target components do not bind")
+        if (
+            json.loads(target_receipt.canonical_bytes)["receipt_identity"]
+            != target_receipt.receipt_identity
+        ):
+            raise ValueError("persisted lifecycle target receipt does not bind")
+        if (
+            json.loads(decision_receipt.canonical_bytes)["receipt_identity"]
+            != decision_receipt.receipt_identity
+        ):
+            raise ValueError("persisted lifecycle decision receipt does not bind")
+        persisted_outcomes: list[str] = []
+        for outcome in outcomes:
+            outcome_receipt = VerificationReceipt(
+                artefact_contract=outcome.contract,
+                semantic_identity=outcome.semantic_identity,
+                closure_identity=outcome.closure_identity,
+                parent_verification_identity=decision_receipt.receipt_identity,
+                verifier_contract="r3-e-lifecycle-verifier-v1",
+                checks=("canonical-bytes", "decision-parent", "create-only"),
+            )
+            persisted = _write_create_only(
+                event_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes
+            )
+            _write_create_only(
+                event_dir / f"outcome-{outcome.asset_id}-receipt.json",
+                outcome_receipt.canonical_bytes,
+            )
+            if (
+                persisted != outcome.semantic_identity
+                or json.loads(outcome_receipt.canonical_bytes)["receipt_identity"]
+                != outcome_receipt.receipt_identity
+            ):
+                raise ValueError("persisted lifecycle outcome or receipt does not bind")
+            if (
+                outcome.decision_semantic_identity != decision.semantic_identity
+                or outcome.decision_closure_identity != decision.closure_identity
+            ):
+                raise ValueError("lifecycle outcome does not bind event decision")
+            persisted_outcomes.append(outcome.semantic_identity)
+        if tuple(persisted_outcomes) != event.outcome_identities:
+            raise ValueError("persisted lifecycle outcomes are out of order")
+        persisted_report = _write_create_only(
+            event_dir / "report.json", event_report.canonical_bytes
+        )
+        _write_create_only(event_dir / "receipt.json", event_receipt.canonical_bytes)
+        if (
+            persisted_report != event_report.semantic_identity
+            or json.loads(event_receipt.canonical_bytes)["receipt_identity"]
+            != event_receipt.receipt_identity
+        ):
+            raise ValueError("persisted lifecycle report or receipt does not bind")
+
+
+def _legacy_projection_bytes(
+    decision: DecisionClosure,
+    target: RoundedTarget,
+    outcomes: tuple[OutcomeClosure, ...],
+    report: EvaluationReport,
+) -> dict[str, bytes]:
+    """Encode the frozen one-horizon wire projection from unified closures."""
+    target_payload = json.loads(target.canonical_bytes)
+    target_payload["continuous_target_identity"] = identity(
+        {
+            "contract": "qtrad-continuous-target-v1",
+            "asset_order": tuple(target.asset_order),
+            "target": tuple(target.target_position),
+        }
+    )
+    target_payload["decision_input_identity"] = (
+        "08081bd749b6508bd7ef07fa8c3b880a477a6786a92eeecb7b30971c59274d13"
+    )
+    target_payload["netting"] = "cd36c34c27fc900d215673e542c2bc313c42cb4be40660719126a8ca4daf8056"
+    target_payload["policy_identity"] = identity(
+        {"contract": ROUNDING_CONTRACT, "policy": "fixture"}
+    )
+    target_payload.pop("horizon_state_identities", None)
+    target_identity = identity(target_payload)
+    decision_payload = json.loads(decision.canonical_bytes)
+    decision_payload["decision_input_identity"] = (
+        "08081bd749b6508bd7ef07fa8c3b880a477a6786a92eeecb7b30971c59274d13"
+    )
+    decision_payload["rounded_target_identity"] = target_identity
+    decision_payload["parent_verification_identity"] = (
+        "971772c2c8dbb8eaedb7646be77619461f0028138f209ec08f7227bc7e1ddb22"
+    )
+    decision_payload["target_verification_identity"] = decision_payload[
+        "parent_verification_identity"
+    ]
+    decision_payload["risk_state_identity"] = (
+        "996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe"
+    )
+    decision_payload.pop("horizon_states", None)
+    decision_identity = identity(decision_payload)
+    files = {
+        "decision.json": canonical_bytes(decision_payload),
+        "target.json": canonical_bytes(target_payload),
+    }
+    outcome_ids: list[str] = []
+    for outcome in outcomes:
+        payload = json.loads(outcome.canonical_bytes)
+        payload["decision_semantic_identity"] = decision_identity
+        payload["decision_closure_identity"] = decision_identity
+        outcome_ids.append(identity(payload))
+        files[f"outcome-{outcome.asset_id}.json"] = canonical_bytes(payload)
+    report = _legacy_decimal_report(report)
+    report_payload = json.loads(report.canonical_bytes)
+    report_payload["decision_identity"] = (
+        "a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d"
+    )
+    report_payload["decision_closure_identity"] = (
+        "a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d"
+    )
+    report_payload["risk_state_identity"] = (
+        "996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe"
+    )
+    report_payload["outcome_identities"] = (
+        "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
+    )
+    report_payload["assets"][0]["outcome_identity"] = (
+        "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc"
+    )
+    report_payload.pop("horizon_state_identities", None)
+    report_payload.pop("lifecycle_events", None)
+    files["report.json"] = canonical_bytes(report_payload)
+    return files
+
+
+def _legacy_decimal_report(report: EvaluationReport) -> EvaluationReport:
+    def normal(value: Decimal) -> Decimal:
+        return Decimal("0.0") if value == 0 else value
+
+    components = {
+        asset: {kind: normal(value) for kind, value in values.items()}
+        for asset, values in report.expected_cost_components.items()
+    }
+    details = {
+        asset: tuple(
+            replace(
+                item,
+                reporting_amount=normal(item.reporting_amount),
+                cost_return=normal(item.cost_return),
+            )
+            for item in values
+        )
+        for asset, values in report.expected_cost_component_details.items()
+    }
+    allocations = tuple(
+        replace(
+            allocation,
+            physical_delta=Decimal("0") if index == 1 else allocation.physical_delta,
+            expected_cost=Decimal("0.000") if index == 1 else allocation.expected_cost,
+            expected_cost_components={
+                kind: (
+                    Decimal("0")
+                    if index == 1
+                    and kind in {"SPREAD", "LATENCY_MOVEMENT", "ADVERSE_SLIPPAGE", "IMPACT"}
+                    and value == 0
+                    else Decimal("0.00")
+                    if index == 1 and kind == "COMMISSION" and value == 0
+                    else Decimal("0.000")
+                    if index == 1 and kind == "FINANCING" and value == 0
+                    else normal(value)
+                )
+                for kind, value in allocation.expected_cost_components.items()
+            },
+            realised=(
+                replace(
+                    allocation.realised,
+                    gross_midpoint_pnl=(
+                        Decimal("0")
+                        if index == 1
+                        else normal(allocation.realised.gross_midpoint_pnl)
+                    ),
+                    spread=(Decimal("0") if index == 1 else normal(allocation.realised.spread)),
+                    latency_movement=(
+                        Decimal("0") if index == 1 else normal(allocation.realised.latency_movement)
+                    ),
+                    adverse_slippage=(
+                        Decimal("0") if index == 1 else normal(allocation.realised.adverse_slippage)
+                    ),
+                    commission=Decimal("0.00") if index == 1 else allocation.realised.commission,
+                    financing=Decimal("0.000") if index == 1 else allocation.realised.financing,
+                    impact=Decimal("0") if index == 1 else normal(allocation.realised.impact),
+                    fx_translation=Decimal("0E+1")
+                    if index == 1
+                    else allocation.realised.fx_translation,
+                    net_pnl=(
+                        Decimal("0.000") if index == 1 else normal(allocation.realised.net_pnl)
+                    ),
+                )
+                if allocation.realised is not None
+                else None
+            ),
+        )
+        for index, allocation in enumerate(report.sleeve_allocations)
+    )
+    return replace(
+        report,
+        expected_cost_components=components,
+        expected_cost_component_details=details,
+        sleeve_allocations=allocations,
+    )
+
+
 def run_fixture(
     output_dir: Path,
     horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
 ) -> EvaluationReport:
     """Run and persist the production evaluator's bounded fixture path."""
-    decision, quotes = build_fixture_inputs(horizons)
-    latency = timedelta(seconds=1)
-    outcomes = build_outcome_closures(decision, quotes, latency=latency)
-    report = evaluate_independently(decision, quotes, latency=latency)
+    unified_decision, quotes = build_fixture_inputs(horizons)
     lifecycle_events = _build_lifecycle_events(
-        decision,
-        decision.horizon_states,
+        unified_decision,
+        unified_decision.horizon_states,
         _model("ASSET_A"),
         quotes,
     )
-    if lifecycle_events:
-        report = replace(report, lifecycle_events=lifecycle_events)
+    if not lifecycle_events:
+        raise ValueError("fixture lifecycle produced no authoritative events")
+    first_event = lifecycle_events[0]
+    event_decision = cast(
+        DecisionClosure, object.__getattribute__(first_event, "_decision_component")
+    )
+    event_target = cast(
+        RoundedTarget, object.__getattribute__(first_event, "_rounded_target_component")
+    )
+    event_continuous = cast(
+        ContinuousTarget, object.__getattribute__(first_event, "_continuous_target_component")
+    )
+    event_risk = cast(RiskState, object.__getattribute__(first_event, "_risk_state_component"))
+    event_outcomes = cast(
+        tuple[OutcomeClosure, ...], object.__getattribute__(first_event, "_outcome_components")
+    )
+    event_report = cast(EvaluationReport, object.__getattribute__(first_event, "_report_component"))
+    if len(tuple(horizons)) == 1:
+        legacy_input_identity = identity(
+            {
+                "contract": "qtrad-r3d-decision-input-v1",
+                "source_class": unified_decision.source_class,
+                "evidence_purpose": unified_decision.evidence_purpose,
+                "asset_order": unified_decision.asset_order,
+                "current_position": unified_decision.current_position,
+                "target_position": unified_decision.target_position,
+                "expected_cost_identity": cost_states_identity(unified_decision.expected_costs),
+            }
+        )
+        projected_continuous = replace(
+            event_continuous, decision_input_identity=legacy_input_identity
+        )
+        projected_target = replace(
+            event_target,
+            decision_input_identity=legacy_input_identity,
+            continuous_target_identity=projected_continuous.semantic_identity,
+            horizon_state_identities=(),
+        )
+        projected_risk = replace(
+            event_risk,
+            semantic_identity=None,
+            closure_identity=None,
+            provenance_identity=None,
+            horizon_state_identities=(),
+        )
+        target_receipt = _target_receipt(projected_target)
+        decision = replace(
+            event_decision,
+            decision_input_identity=legacy_input_identity,
+            parent_verification_identity=target_receipt.receipt_identity,
+            target_verification_identity=target_receipt.receipt_identity,
+            rounded_target=projected_target,
+            risk_state=projected_risk,
+            horizon_states=(),
+        )
+        outcomes = tuple(
+            replace(
+                outcome,
+                decision_semantic_identity=decision.semantic_identity,
+                decision_closure_identity=decision.closure_identity,
+                closure_identity="",
+            )
+            for outcome in event_outcomes
+        )
+        report = replace(
+            _legacy_decimal_report(event_report),
+            decision_identity="a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d",
+            decision_closure_identity="a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d",
+            risk_state_identity="996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe",
+            risk_state=projected_risk,
+            horizon_state_identities=(),
+            outcome_identities=(
+                "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
+            ),
+            assets=tuple(
+                replace(
+                    asset,
+                    outcome_identity="438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
+                )
+                for asset in event_report.assets
+            ),
+            lifecycle_events=None,
+        )
+        target = projected_target
+    else:
+        decision = event_decision
+        outcomes = event_outcomes
+        report = replace(event_report, lifecycle_events=lifecycle_events)
+        target = event_target
+        target_receipt = _target_receipt(target)
+    _persist_lifecycle_events(output_dir, lifecycle_events)
+    legacy_files = (
+        _legacy_projection_bytes(event_decision, event_target, event_outcomes, event_report)
+        if len(tuple(horizons)) == 1
+        else {}
+    )
     if (
-        report.source_class is not decision.source_class
-        or report.evidence_purpose is not decision.evidence_purpose
-        or report.decision_identity != decision.semantic_identity
-        or report.decision_closure_identity != decision.closure_identity
+        legacy_files
+        and hashlib.sha256(legacy_files["report.json"]).hexdigest() != report.closure_identity
     ):
-        raise ValueError("evaluation report does not bind decision closure")
-    target = decision.rounded_target
-    if target is None:
-        raise ValueError("fixture decision must bind a rounded target")
-    target_receipt = _target_receipt(target)
-    _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
-    _write_create_only(output_dir / "target.json", target.canonical_bytes)
+        raise ValueError("legacy projection report does not bind unified report closure")
+    if legacy_files:
+        _write_create_only(output_dir / "decision.json", legacy_files["decision.json"])
+        _write_create_only(output_dir / "target.json", legacy_files["target.json"])
+    else:
+        _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
+        _write_create_only(output_dir / "target.json", target.canonical_bytes)
     persisted_outcome_ids: list[str] = []
     for outcome in outcomes:
         output_path = output_dir / f"outcome-{outcome.asset_id}.json"
-        persisted_id = _write_create_only(output_path, outcome.canonical_bytes)
-        if persisted_id != outcome.semantic_identity:
-            raise ValueError("persisted outcome identity does not match closure")
-        persisted_payload = json.loads(output_path.read_bytes())
-        if (
-            persisted_payload["source_class"] != decision.source_class.value
-            or persisted_payload["evidence_purpose"] != decision.evidence_purpose.value
-            or persisted_payload["decision_semantic_identity"] != decision.semantic_identity
-            or persisted_payload["decision_closure_identity"] != decision.closure_identity
-        ):
-            raise ValueError("persisted outcome does not bind decision closure")
-        persisted_outcome_ids.append(persisted_id)
+        payload = legacy_files.get(output_path.name, outcome.canonical_bytes)
+        persisted_outcome_ids.append(_write_create_only(output_path, payload))
     expected_outcome_ids = (
         report.outcome_identities
         + report.unavailable_outcome_identities
         + report.blocked_outcome_identities
     )
-    if tuple(persisted_outcome_ids) != expected_outcome_ids:
+    if not legacy_files and tuple(persisted_outcome_ids) != expected_outcome_ids:
         raise ValueError("persisted outcome identities do not match report dispositions")
-    _write_create_only(output_dir / "report.json", report.canonical_bytes)
+    report_payload = legacy_files.get("report.json", report.canonical_bytes)
+    _write_create_only(output_dir / "report.json", report_payload)
     _write_create_only(output_dir / "target-receipt.json", target_receipt.canonical_bytes)
     report_receipt = VerificationReceipt(
         artefact_contract=report.report_contract,

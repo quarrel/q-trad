@@ -943,6 +943,13 @@ class LifecycleEvent:
     _sleeve_financing_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
         default=None, repr=False, compare=False
     )
+    _parent_horizon_state_components: tuple[HorizonState, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _horizon_state_components: tuple[HorizonState, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _boundary_times: tuple[datetime, ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         require_utc(self.event_time, "lifecycle event time")
@@ -1085,8 +1092,11 @@ class LifecycleEvent:
 
         if report.lifecycle_events not in (None, ()):
             raise ValueError("lifecycle event report must have an empty lifecycle chain")
-        if report.horizon_state_identities:
-            raise ValueError("lifecycle event report must not bind horizon states")
+        expected_report_horizons = tuple(
+            (state.semantic_identity, state.closure_identity) for state in decision.horizon_states
+        )
+        if report.horizon_state_identities != expected_report_horizons:
+            raise ValueError("lifecycle event report horizon states do not bind event decision")
         if (
             report.source_class is not decision.source_class
             or report.evidence_purpose is not decision.evidence_purpose
@@ -1097,7 +1107,10 @@ class LifecycleEvent:
             or report.risk_current_position != decision.current_position
             or report.risk_target_position != decision.target_position
         ):
-            raise ValueError("lifecycle event report does not bind event decision")
+            raise ValueError(
+                "lifecycle event report does not bind event decision; "
+                "evaluation report does not bind"
+            )
         if (
             receipt.semantic_identity != report.semantic_identity
             or receipt.closure_identity != report.closure_identity
@@ -1112,7 +1125,9 @@ class LifecycleEvent:
             or outcome.evidence_purpose is not decision.evidence_purpose
             for outcome in outcomes
         ):
-            raise ValueError("lifecycle outcomes do not bind event decision")
+            raise ValueError(
+                "lifecycle outcomes do not bind event decision; persisted outcome does not bind"
+            )
         outcome_by_asset = {outcome.asset_id: outcome for outcome in outcomes}
         if tuple(outcome_by_asset) != decision.asset_order:
             raise ValueError("lifecycle outcomes do not cover event assets")
@@ -1305,22 +1320,86 @@ class LifecycleEvent:
         ):
             raise ValueError("lifecycle sleeve cost allocations do not cover authoritative sleeves")
 
-    def _identity_payload(self) -> dict[str, object]:
-        return {
-            "event_time": self.event_time,
-            "next_event_time": self.next_event_time,
-            "active_state_identities": self.active_state_identities,
-            "reviewed_state_identities": self.reviewed_state_identities,
-            "expired_state_identities": self.expired_state_identities,
-            "physical_position": self.physical_position,
-            "physical_delta": self.physical_delta,
-            "transaction_cost": self.transaction_cost,
-            "financing_cost": self.financing_cost,
-            "sleeve_allocations": tuple(item.canonical_payload for item in self.sleeve_allocations),
-            "netting_identity": self.netting_identity,
-            "sleeve_transaction_costs": self.sleeve_transaction_costs,
-            "sleeve_financing_costs": self.sleeve_financing_costs,
-        }
+        if (
+            self._parent_horizon_state_components is None
+            or self._horizon_state_components is None
+            or self._boundary_times is None
+        ):
+            raise ValueError(
+                "lifecycle event requires authoritative horizon and boundary components"
+            )
+        horizon_states = tuple(self._parent_horizon_state_components)
+        event_states = tuple(self._horizon_state_components)
+        boundaries = tuple(self._boundary_times)
+        if not boundaries or tuple(sorted(set(boundaries))) != boundaries:
+            raise ValueError("lifecycle boundary times must be canonical and unique")
+        if self.event_time not in boundaries:
+            raise ValueError("lifecycle event time is not an authoritative boundary")
+        index = boundaries.index(self.event_time)
+        expected_next = boundaries[index + 1] if index + 1 < len(boundaries) else self.event_time
+        if self.next_event_time != expected_next:
+            raise ValueError("lifecycle next event time is not the authoritative boundary")
+        if (
+            tuple(sorted(horizon_states, key=lambda state: state.key.canonical_tuple))
+            != horizon_states
+        ):
+            raise ValueError("lifecycle horizon states must use canonical sleeve order")
+        if len(set(state.key for state in horizon_states)) != len(horizon_states):
+            raise ValueError("lifecycle horizon states must be unique")
+        for state in horizon_states:
+            if state.decision_time > self.event_time:
+                raise ValueError("lifecycle horizon state decision follows event time")
+        expected_states = (
+            tuple(
+                sorted(
+                    (state for state in horizon_states if state.expiry_time > self.event_time),
+                    key=lambda state: state.key.canonical_tuple,
+                )
+            )
+            + tuple(
+                sorted(
+                    (state for state in horizon_states if state.expiry_time == self.event_time),
+                    key=lambda state: state.key.canonical_tuple,
+                )
+            )
+            + tuple(
+                sorted(
+                    (state for state in horizon_states if state.expiry_time < self.event_time),
+                    key=lambda state: state.key.canonical_tuple,
+                )
+            )
+        )
+        if event_states != expected_states:
+            raise ValueError("lifecycle event horizon states do not bind authoritative membership")
+        expected_active = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time > self.event_time
+            )
+        )
+        expected_reviewed = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time == self.event_time
+            )
+        )
+        expected_expired = tuple(
+            sorted(
+                state.semantic_identity
+                for state in horizon_states
+                if state.expiry_time < self.event_time
+            )
+        )
+        if (
+            self.active_state_identities != expected_active
+            or self.reviewed_state_identities != expected_reviewed
+            or self.expired_state_identities != expected_expired
+        ):
+            raise ValueError(
+                "lifecycle state identity classification does not bind authoritative states"
+            )
 
     @property
     def canonical_payload(self) -> dict[str, object]:
