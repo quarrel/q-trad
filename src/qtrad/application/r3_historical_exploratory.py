@@ -2910,6 +2910,56 @@ def _declared_partition_paths(
     return declared
 
 
+def _charge_physical_budget(
+    budget: Mapping[str, Any] | None,
+    *,
+    parts: int = 0,
+    rows: int = 0,
+    part_bytes: int = 0,
+    wrapper_bytes: int = 0,
+    read_operations: int = 0,
+) -> None:
+    """Account one physical pass and fail closed at derived cumulative limits."""
+    if budget is None:
+        return
+    mutable = cast(dict[str, Any], budget)
+    increments = {
+        "physical_parts": parts,
+        "physical_rows": rows,
+        "physical_part_bytes": part_bytes,
+        "wrapper_bytes": wrapper_bytes,
+        "read_operations": read_operations,
+    }
+    candidates = {
+        key: int(mutable.get(key, 0)) + increment for key, increment in increments.items()
+    }
+    for key, candidate in candidates.items():
+        limit = mutable.get(f"max_{key}")
+        if limit is not None and candidate > int(limit):
+            raise FreezeError(f"native cumulative {key} exceeds frozen bound")
+    mutable.update(candidates)
+
+
+def _register_declared_inventory(
+    budget: Mapping[str, Any] | None,
+    child: str,
+    paths: Sequence[str],
+) -> None:
+    """Count distinct declared physical parts once, including target-source families."""
+    if budget is None:
+        return
+    mutable = cast(dict[str, Any], budget)
+    seen = cast(set[str], mutable.setdefault("declared_paths", set()))
+    additions = {
+        f"{child}:{path}" if child == "target-source" else PurePosixPath(path).name
+        for path in paths
+    }
+    limit = mutable.get("max_declared_parts")
+    if limit is not None and len(seen | additions) > int(limit):
+        raise FreezeError("native declared source inventory exceeds frozen part bound")
+    seen.update(additions)
+
+
 def _open_partitioned_json_document(
     path: Path, limits: Mapping[str, Any]
 ) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
@@ -2979,6 +3029,11 @@ def _open_partitioned_json_document(
         raise FreezeError("retained compact manifest part declarations are invalid") from exc
     if len(declared_paths) > int(limits["max_consumed_parts"]):
         raise FreezeError("retained compact manifest exceeds frozen part bound")
+    _register_declared_inventory(
+        limits.get("_physical_budget"),
+        str(limits.get("_inventory_child", manifest_relative)),
+        declared_paths,
+    )
     expected_record_keys = cast(Sequence[str], limits["required_record_keys"])
     outcome_tags = set(cast(Sequence[str], limits.get("partition_fields", ())))
 
@@ -3062,6 +3117,13 @@ def _open_partitioned_json_document(
                 logical_rows.append(dict(cast(Mapping[str, Any], value)))
             _validate_part_rows(
                 logical_rows, {**limits, "required_record_keys": expected_record_keys}
+            )
+            _charge_physical_budget(
+                limits.get("_physical_budget"),
+                parts=1,
+                rows=len(physical_rows),
+                part_bytes=len(part_bytes),
+                read_operations=1,
             )
             yield (
                 {
@@ -3354,6 +3416,29 @@ def _native_source_references(
     return result
 
 
+def _validate_native_authorised_root(
+    manifest_path: Path,
+) -> None:
+    """Require exactly the authorised target/opportunity families at the parts root."""
+    relative_root = PurePosixPath(f"{manifest_path.name}.parts")
+    try:
+        _reject_symlink_components(manifest_path.parent, relative_root)
+        root = manifest_path.parent / relative_root
+        entries = tuple(root.iterdir())
+    except (OSError, ValueError) as exc:
+        raise FreezeError("native target-source parts root is unavailable") from exc
+    allowed = {"targets", "opportunities"}
+    for entry in entries:
+        # Reject unknown entries before any filesystem operation on that path.  This
+        # includes the forbidden pre-holdout family and preserves its no-touch boundary.
+        if entry.name not in allowed:
+            raise FreezeError("native target-source parts root contains an undeclared entry")
+        if entry.is_symlink() or not entry.is_dir():
+            raise FreezeError("native target-source parts root family is unsafe")
+    if {entry.name for entry in entries} != allowed:
+        raise FreezeError("native target-source parts root families are incomplete")
+
+
 def _validate_native_authorised_tree(
     manifest_path: Path,
     references: Sequence[tuple[str, str, int]],
@@ -3389,9 +3474,15 @@ def _iter_native_source_parts(
     kind: str,
     source_id: str,
     receipt: dict[str, Any],
+    physical_budget: Mapping[str, Any] | None = None,
 ) -> Iterator[Mapping[str, Any]]:
     """Stream one authorised target-source part at a time with truthful receipts."""
+    max_parts = int(receipt.get("max_parts", len(references)))
+    if len(references) > max_parts:
+        raise FreezeError(f"native target-source {kind} exceeds frozen part bound")
     for index, (relative, expected_hash, expected_count) in enumerate(references):
+        if int(receipt.get("parts", 0)) >= max_parts:
+            raise FreezeError(f"native target-source {kind} exceeds cumulative part bound")
         try:
             _reject_symlink_components(manifest_path.parent, PurePosixPath(relative))
         except (OSError, ValueError) as exc:
@@ -3431,13 +3522,24 @@ def _iter_native_source_parts(
             or len(cast(list[Any], physical_rows)) != expected_count
         ):
             raise FreezeError(f"native target-source {kind} part lineage/count differs")
+        if len(encoded) > int(receipt.get("max_part_bytes", _MAX_PART_BYTES)):
+            raise FreezeError(f"native target-source {kind} part exceeds size bound")
+        _charge_physical_budget(
+            physical_budget,
+            parts=1,
+            rows=expected_count,
+            part_bytes=len(encoded),
+            read_operations=1,
+        )
         receipt["parts"] = int(receipt.get("parts", 0)) + 1
         receipt["rows"] = int(receipt.get("rows", 0)) + expected_count
         receipt["bytes"] = int(receipt.get("bytes", 0)) + len(encoded)
+        receipt["physical_parts"] = int(receipt.get("physical_parts", 0)) + 1
+        receipt["physical_rows"] = int(receipt.get("physical_rows", 0)) + expected_count
+        receipt["physical_part_bytes"] = int(receipt.get("physical_part_bytes", 0)) + len(encoded)
+        receipt["read_operations"] = int(receipt.get("read_operations", 0)) + 1
         receipt["largest_part_bytes"] = max(int(receipt.get("largest_part_bytes", 0)), len(encoded))
         receipt.setdefault("part_hashes", []).append(actual_hash)
-        if len(encoded) > int(receipt.get("max_part_bytes", _MAX_PART_BYTES)):
-            raise FreezeError(f"native target-source {kind} part exceeds size bound")
         for row in cast(list[Any], physical_rows):
             if not isinstance(row, Mapping):
                 raise FreezeError(f"native target-source {kind} row is malformed")
@@ -3449,6 +3551,7 @@ def _load_native_target_source(
     expected: Mapping[str, Any],
     *,
     fixture: bool,
+    physical_budget: Mapping[str, Any] | None = None,
 ) -> tuple[
     dict[str, Any],
     Iterator[Mapping[str, Any]],
@@ -3463,6 +3566,7 @@ def _load_native_target_source(
     if not path.is_file():
         raise FreezeError("native target-source wrapper is missing or unsafe")
     encoded = path.read_bytes()
+    _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded), read_operations=1)
     if not fixture and hashlib.sha256(encoded).hexdigest() != expected["wrapper_sha256"]:
         raise FreezeError("native target-source wrapper byte hash mismatch")
     try:
@@ -3531,6 +3635,17 @@ def _load_native_target_source(
     opportunity_refs = _native_source_references(
         path, manifest, "opportunity_parts", inspect_files=True
     )
+    family_limits = cast(Mapping[str, Mapping[str, Any]], expected["authorised_families"])
+    target_max_parts = int(family_limits["targets"]["part_count"])
+    opportunity_max_parts = int(family_limits["opportunities"]["part_count"])
+    if len(target_refs) > target_max_parts or len(opportunity_refs) > opportunity_max_parts:
+        raise FreezeError("native target-source family exceeds frozen part bound")
+    _register_declared_inventory(
+        physical_budget,
+        "target-source",
+        [item[0] for item in (*target_refs, *opportunity_refs)],
+    )
+    _validate_native_authorised_root(path)
     _validate_native_authorised_tree(path, target_refs, kind="targets")
     _validate_native_authorised_tree(path, opportunity_refs, kind="opportunities")
     # Validate every forbidden declaration's shape and canonical path, but deliberately do not
@@ -3554,14 +3669,18 @@ def _load_native_target_source(
         "opportunity_part_hashes": [],
         "pre_holdout_parts_unopened": len(cast(list[Any], manifest["pre_holdout_target_parts"])),
         "pre_holdout_read_operations": 0,
-        "max_part_bytes": _MAX_PART_BYTES,
+        "max_part_bytes": int(cast(Mapping[str, Any], expected["hard_limits"])["max_part_bytes"]),
+        "wrapper_bytes_kind": "target_source_wrapper_bytes",
+        "physical_part_bytes_kind": "target_source_physical_part_bytes",
     }
     target_receipt: dict[str, Any] = {
-        "max_part_bytes": _MAX_PART_BYTES,
+        "max_part_bytes": int(cast(Mapping[str, Any], expected["hard_limits"])["max_part_bytes"]),
+        "max_parts": target_max_parts,
         "part_hashes": inventory["target_part_hashes"],
     }
     opportunity_receipt: dict[str, Any] = {
-        "max_part_bytes": _MAX_PART_BYTES,
+        "max_part_bytes": int(cast(Mapping[str, Any], expected["hard_limits"])["max_part_bytes"]),
+        "max_parts": opportunity_max_parts,
         "part_hashes": inventory["opportunity_part_hashes"],
     }
     target_rows = _iter_native_source_parts(
@@ -3570,6 +3689,7 @@ def _load_native_target_source(
         kind="targets",
         source_id=str(manifest["source_id"]),
         receipt=target_receipt,
+        physical_budget=physical_budget,
     )
     opportunity_rows = _iter_native_source_parts(
         path,
@@ -3577,6 +3697,7 @@ def _load_native_target_source(
         kind="opportunities",
         source_id=str(manifest["source_id"]),
         receipt=opportunity_receipt,
+        physical_budget=physical_budget,
     )
     inventory["target_receipt"] = target_receipt
     inventory["opportunity_receipt"] = opportunity_receipt
@@ -3590,6 +3711,7 @@ def _load_native_outcome_values(
     fixture: bool,
     receipt: dict[str, Any] | None = None,
     selected_ids: set[str] | None = None,
+    physical_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
     """Stream tagged outcomes, retaining values only for the bounded selected IDs."""
     del fixture
@@ -3600,8 +3722,10 @@ def _load_native_outcome_values(
     if not path.is_file():
         raise FreezeError("native outcome wrapper is missing or unsafe")
     encoded_wrapper = path.read_bytes()
+    _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded_wrapper), read_operations=1)
     if receipt is not None:
         receipt["wrapper_bytes"] = len(encoded_wrapper)
+        receipt["read_operations"] = int(receipt.get("read_operations", 0)) + 1
     expected_wrapper_hash = limits.get("expected_wrapper_sha256")
     if (
         expected_wrapper_hash is not None
@@ -3632,15 +3756,31 @@ def _load_native_outcome_values(
     header = {key: value for key, value in metadata.items() if key not in physical_fields}
     if metadata.get("header_sha256") != hashlib.sha256(_canonical_bytes(header)).hexdigest():
         raise FreezeError("native outcome wrapper header digest differs")
-    references = metadata.get("parts")
-    if not isinstance(references, list):
+    references_value = metadata.get("parts")
+    if not isinstance(references_value, list):
         raise FreezeError("native outcome parts are malformed")
+    references = cast(list[Mapping[str, Any]], references_value)
+    if len(references) > int(limits["max_consumed_parts"]):
+        raise FreezeError("native outcome exceeds frozen part bound")
+    _register_declared_inventory(
+        physical_budget,
+        str(limits.get("_inventory_child", limits["manifest_relative_path"])),
+        [
+            cast(str, reference["path"])
+            for reference in references
+            if isinstance(reference.get("path"), str)
+        ],
+    )
     expected: set[str] = set()
     sources: set[str] = set()
     outcome_ids: set[str] = set()
     selected_values: dict[str, float] = {}
     physical_count = 0
     for index, reference in enumerate(cast(list[Any], references)):
+        if receipt is not None and int(receipt.get("parts", 0)) >= int(
+            limits["max_consumed_parts"]
+        ):
+            raise FreezeError("native outcome exceeds cumulative part bound")
         if not isinstance(reference, Mapping):
             raise FreezeError("native outcome part reference is malformed")
         reference_mapping = cast(Mapping[str, Any], reference)
@@ -3715,6 +3855,20 @@ def _load_native_outcome_values(
         physical_count += len(physical_rows)
         if physical_count > int(limits["max_source_rows"]):
             raise FreezeError("native outcome exceeds frozen row bound")
+        _charge_physical_budget(
+            physical_budget,
+            parts=1,
+            rows=len(physical_rows),
+            part_bytes=len(encoded),
+            read_operations=1,
+        )
+        if receipt is not None:
+            receipt["physical_parts"] = int(receipt.get("physical_parts", 0)) + 1
+            receipt["physical_rows"] = int(receipt.get("physical_rows", 0)) + len(physical_rows)
+            receipt["physical_part_bytes"] = int(receipt.get("physical_part_bytes", 0)) + len(
+                encoded
+            )
+            receipt["read_operations"] = int(receipt.get("read_operations", 0)) + 1
         for physical in physical_rows:
             if not isinstance(physical, Mapping):
                 raise FreezeError("native outcome tag row is malformed")
@@ -3883,8 +4037,27 @@ def _load_native_retained_rows(
     max_bytes = int(streaming["max_source_bytes"])
     source_receipts: dict[str, dict[str, Any]] = {}
     source_path = Path(locators["target_source"])
+    target_source_expected = dict(cast(Mapping[str, Any], loader["target_source"]))
+    target_source_hard = cast(Mapping[str, Any], target_source_expected["hard_limits"])
+    target_declared_cap = sum(
+        int(family["part_count"])
+        for family in cast(
+            Mapping[str, Mapping[str, Any]], target_source_expected["authorised_families"]
+        ).values()
+    )
+    physical_budget: dict[str, Any] = {
+        "physical_parts": 0,
+        "physical_rows": 0,
+        "physical_part_bytes": 0,
+        "wrapper_bytes": 0,
+        "read_operations": 0,
+        "max_declared_parts": target_declared_cap + int(streaming["max_consumed_parts"]),
+        # Target source is scanned twice; three forecast children twice; outcome once.
+        "max_physical_parts": target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7,
+        "max_physical_rows": int(target_source_hard["max_rows"]) * 2 + max_rows * 7,
+        "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
+    }
     state_peak = 0
-
     target_index: dict[str, tuple[str, str, str | None]] = {}
     opportunity_ids: set[str] = set()
     target_groups: dict[str, dict[str, list[str]]] = {}
@@ -3922,6 +4095,8 @@ def _load_native_retained_rows(
             "physical_required_keys": declaration["physical_required_keys"],
             "manifest_relative_path": declaration["manifest_relative_path"],
             "manifest_root": str(source_path.parent),
+            "_physical_budget": physical_budget,
+            "_inventory_child": name,
             "partition_row_field": declaration["partition_row_field"],
             "partition_fields": declaration["partition_fields"],
             "partition_mapping_fields": declaration["partition_mapping_fields"],
@@ -3970,8 +4145,9 @@ def _load_native_retained_rows(
     ) -> tuple[dict[str, Mapping[str, Any]], dict[str, Mapping[str, Any]], dict[str, Any]]:
         _manifest, target_rows, opportunity_rows, inventory = _load_native_target_source(
             source_path,
-            cast(Mapping[str, Any], loader["target_source"]),
+            target_source_expected,
             fixture=fixture,
+            physical_budget=physical_budget,
         )
         selected_targets: dict[str, Mapping[str, Any]] = {}
         selected_opportunities: dict[str, Mapping[str, Any]] = {}
@@ -4081,14 +4257,19 @@ def _load_native_retained_rows(
     ) -> tuple[set[str], dict[str, Mapping[str, Any]], dict[str, Any]]:
         limits = source_limits(name)
         metadata, parts, wrapper_size, _digest = _open_partitioned_json_document(
-            Path(locators[name]), limits
+            Path(locators[name]), {**limits, "_physical_budget": physical_budget}
         )
+        _charge_physical_budget(physical_budget, wrapper_bytes=wrapper_size, read_operations=1)
         _validate_child_metadata(name, metadata, loader, fixture=fixture)
         receipt: dict[str, Any] = {
             "wrapper_bytes": wrapper_size,
+            "wrapper_bytes_kind": "compact_wrapper_bytes",
             "parts": 0,
             "rows": 0,
             "bytes": 0,
+            "physical_parts": 0,
+            "physical_rows": 0,
+            "physical_part_bytes": 0,
             "part_hashes": [],
             "read_operations": 1,
         }
@@ -4101,6 +4282,9 @@ def _load_native_retained_rows(
             receipt["bytes"] += part_size
             receipt["part_hashes"].append(descriptor["sha256"])
             receipt["read_operations"] += 1
+            receipt["physical_parts"] += 1
+            receipt["physical_rows"] += len(part_rows)
+            receipt["physical_part_bytes"] += part_size
             for row in part_rows:
                 if not required_native <= set(row):
                     raise FreezeError(f"native {name} logical row fields are incomplete")
@@ -4198,13 +4382,19 @@ def _load_native_retained_rows(
         "expected_wrapper_sha256": None if fixture else wrappers["outcome_evidence"]["sha256"],
         "physical_required_keys": wrappers["outcome_evidence"]["physical_required_keys"],
         "manifest_relative_path": wrappers["outcome_evidence"]["manifest_relative_path"],
+        "_physical_budget": physical_budget,
     }
     outcome_receipt: dict[str, Any] = {
+        "wrapper_bytes": 0,
+        "wrapper_bytes_kind": "compact_wrapper_bytes",
         "parts": 0,
         "rows": 0,
         "bytes": 0,
+        "physical_parts": 0,
+        "physical_rows": 0,
+        "physical_part_bytes": 0,
         "part_hashes": [],
-        "read_operations": 1,
+        "read_operations": 0,
     }
     outcome_values = _load_native_outcome_values(
         Path(locators["outcome_evidence"]),
@@ -4212,6 +4402,7 @@ def _load_native_retained_rows(
         fixture=fixture,
         receipt=outcome_receipt,
         selected_ids=selected_set,
+        physical_budget=physical_budget,
     )
     outcome_receipt["unique_ids"] = len(outcome_values)
     source_receipts["outcome_evidence"] = outcome_receipt
@@ -4230,56 +4421,94 @@ def _load_native_retained_rows(
         for target_id in selected_target_ids
     )
 
-    def pass_operations(inventory: Mapping[str, Any]) -> int:
-        return (
-            1
-            + int(cast(Mapping[str, Any], inventory["target_receipt"]).get("parts", 0))
-            + int(cast(Mapping[str, Any], inventory["opportunity_receipt"]).get("parts", 0))
-        )
-
-    target_pass_count = pass_operations(first_inventory) + pass_operations(second_inventory)
     for name, receipt in source_receipts.items():
         if name in {"selection", "consumed", "outcome_evidence"}:
             continue
         second = cast(Mapping[str, Any], receipt.get("second_pass", {}))
-        receipt["read_operations"] = int(receipt["read_operations"]) + int(
-            second.get("read_operations", 0)
+        for field in (
+            "parts",
+            "rows",
+            "bytes",
+            "physical_parts",
+            "physical_rows",
+            "physical_part_bytes",
+            "read_operations",
+        ):
+            receipt[field] = int(receipt.get(field, 0)) + int(second.get(field, 0))
+        receipt["wrapper_bytes_cumulative"] = int(receipt.get("wrapper_bytes", 0)) + int(
+            second.get("wrapper_bytes", 0)
         )
         receipt["passes"] = 2
     source_receipts["outcome_evidence"]["passes"] = 1
-    first_inventory["passes"] = 2
-    first_inventory["read_operations"] = target_pass_count
-    all_receipts = {"target_source": first_inventory, **source_receipts}
-    source_scan_rows = int(first_inventory["combined_rows"]) + sum(
-        int(receipt.get("unique_ids", receipt.get("rows", 0)))
-        for name, receipt in source_receipts.items()
-        if name not in {"selection", "consumed"}
+
+    def merge_part_receipts(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[str, Any]:
+        merged = dict(first)
+        for field in (
+            "parts",
+            "rows",
+            "bytes",
+            "physical_parts",
+            "physical_rows",
+            "physical_part_bytes",
+            "read_operations",
+        ):
+            merged[field] = int(first.get(field, 0)) + int(second.get(field, 0))
+        merged["part_hashes"] = [
+            *cast(Sequence[str], first.get("part_hashes", [])),
+            *cast(Sequence[str], second.get("part_hashes", [])),
+        ]
+        merged["largest_part_bytes"] = max(
+            int(first.get("largest_part_bytes", 0)), int(second.get("largest_part_bytes", 0))
+        )
+        return merged
+
+    second_target_receipt = cast(Mapping[str, Any], second_inventory["target_receipt"])
+    second_opportunity_receipt = cast(Mapping[str, Any], second_inventory["opportunity_receipt"])
+    target_source_receipt = {
+        "passes": 2,
+        "wrapper_bytes": int(first_inventory["wrapper_bytes"]) * 2,
+        "wrapper_bytes_kind": "target_source_wrapper_bytes_cumulative",
+        "target_receipt": merge_part_receipts(
+            cast(Mapping[str, Any], first_inventory["target_receipt"]), second_target_receipt
+        ),
+        "opportunity_receipt": merge_part_receipts(
+            cast(Mapping[str, Any], first_inventory["opportunity_receipt"]),
+            second_opportunity_receipt,
+        ),
+        "pre_holdout_parts_unopened": first_inventory["pre_holdout_parts_unopened"],
+    }
+    target_source_receipt["physical_parts"] = sum(
+        int(cast(Mapping[str, Any], target_source_receipt[key]).get("physical_parts", 0))
+        for key in ("target_receipt", "opportunity_receipt")
     )
-    source_scan_bytes = int(first_inventory["combined_bytes"]) + int(
-        first_inventory.get("wrapper_bytes", 0)
+    target_source_receipt["physical_rows"] = sum(
+        int(cast(Mapping[str, Any], target_source_receipt[key]).get("physical_rows", 0))
+        for key in ("target_receipt", "opportunity_receipt")
     )
-    source_scan_bytes += sum(
-        int(receipt.get("bytes", 0)) + int(receipt.get("wrapper_bytes", 0))
-        for name, receipt in source_receipts.items()
-        if name not in {"selection", "consumed"}
+    target_source_receipt["physical_part_bytes"] = sum(
+        int(cast(Mapping[str, Any], target_source_receipt[key]).get("physical_part_bytes", 0))
+        for key in ("target_receipt", "opportunity_receipt")
     )
-    source_scan_parts = int(first_inventory["target_parts"]) + int(
-        first_inventory["opportunity_parts"]
+    target_source_receipt["read_operations"] = 2 + sum(
+        int(cast(Mapping[str, Any], target_source_receipt[key]).get("read_operations", 0))
+        for key in ("target_receipt", "opportunity_receipt")
     )
-    source_scan_parts += sum(
-        int(receipt.get("parts", 0))
-        for name, receipt in source_receipts.items()
-        if name not in {"selection", "consumed"}
-    )
-    source_scan_read_operations = target_pass_count + sum(
-        int(receipt.get("read_operations", 0)) for receipt in source_receipts.values()
-    )
+    all_receipts = {"target_source": target_source_receipt, **source_receipts}
+    source_scan_rows = int(physical_budget["physical_rows"])
+    source_scan_part_bytes = int(physical_budget["physical_part_bytes"])
+    source_scan_wrapper_bytes = int(physical_budget["wrapper_bytes"])
+    source_scan_bytes = source_scan_part_bytes + source_scan_wrapper_bytes
+    source_scan_parts = int(physical_budget["physical_parts"])
+    source_scan_read_operations = int(physical_budget["read_operations"])
     source_scan_largest_part = max(
         int(first_inventory.get("max_part_bytes_observed", 0)),
+        int(second_inventory.get("max_part_bytes_observed", 0)),
         *(int(receipt.get("largest_part_bytes", 0)) for receipt in source_receipts.values()),
     )
-    if source_scan_rows > max_rows or source_scan_bytes > max_bytes:
-        raise FreezeError("native cumulative source exceeds frozen bounds")
+    if source_scan_rows > int(physical_budget["max_physical_rows"]):
+        raise FreezeError("native cumulative source rows exceed frozen bounds")
+    if source_scan_part_bytes > int(physical_budget["max_physical_part_bytes"]):
+        raise FreezeError("native cumulative source bytes exceed frozen bounds")
     target_source_limits = cast(Mapping[str, Any], loader["target_source"])["hard_limits"]
     if source_scan_largest_part > int(target_source_limits["max_part_bytes"]):
         raise FreezeError("native cumulative largest part exceeds frozen bound")
@@ -4320,6 +4549,10 @@ def _load_native_retained_rows(
         ]
         for name in ("local_forecast", "pooled_forecast", "zero_forecast")
     }
+    first_inventory["cumulative_receipt"] = target_source_receipt
+    target_wrapper_bytes = target_source_receipt["wrapper_bytes"]
+    if not isinstance(target_wrapper_bytes, int):
+        raise FreezeError("native target-source wrapper receipt is malformed")
     metadata = {
         "authority": {
             "authentication_performed": not fixture,
@@ -4342,10 +4575,17 @@ def _load_native_retained_rows(
         "selected_bytes": selected_bytes,
         "consumed_bytes": source_scan_bytes,
         "selected_bytes_kind": "logical_serialised_fixture_row_bytes",
-        "consumed_bytes_kind": "physical_part_bytes",
+        "consumed_bytes_kind": "physical_scan_bytes_including_wrappers",
         "source_scan_wrapper_bytes": {
-            name: int(receipt.get("wrapper_bytes", 0)) for name, receipt in source_receipts.items()
+            **({"target_source": target_wrapper_bytes} if not fixture else {}),
+            **{
+                name: int(receipt.get("wrapper_bytes_cumulative", receipt.get("wrapper_bytes", 0)))
+                for name, receipt in source_receipts.items()
+            },
         },
+        "source_scan_part_bytes": source_scan_part_bytes,
+        "source_scan_part_bytes_kind": "physical_parts_cumulative",
+        "source_scan_wrapper_bytes_kind": "wrapper_bytes_cumulative",
         "role_bindings": role_bindings,
         "_role_predictions": role_predictions,
         "source_scan_rows": source_scan_rows,
@@ -4357,6 +4597,10 @@ def _load_native_retained_rows(
             "max_rows": max_rows,
             "max_bytes": max_bytes,
             "max_part_bytes": int(target_source_limits["max_part_bytes"]),
+            "max_physical_parts": int(physical_budget["max_physical_parts"]),
+            "max_declared_parts": int(physical_budget["max_declared_parts"]),
+            "max_physical_rows": int(physical_budget["max_physical_rows"]),
+            "max_physical_part_bytes": int(physical_budget["max_physical_part_bytes"]),
         },
         "source_scan_unique_rows": {
             "target_source_targets": len(target_index),

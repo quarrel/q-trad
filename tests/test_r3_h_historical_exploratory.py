@@ -1410,3 +1410,112 @@ def test_renderer_rejects_frozen_role_wrapper_mutation() -> None:
     report["retained_parents"]["role_bindings"]["POOLED_LOCAL_RIDGE"]["wrapper_sha256"] = "0" * 64
     with pytest.raises(FreezeError, match="renderer"):
         render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_native_parts_root_rejects_orphans_and_ancestor_symlinks(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    implementation._validate_native_authorised_root(wrapper)
+    (parts_root / "orphan.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FreezeError, match="undeclared entry"):
+        implementation._validate_native_authorised_root(wrapper)
+
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError, match="parts root"):
+        implementation._validate_native_authorised_root(symlink_parent / "target-source.json")
+
+
+def test_native_physical_parts_shape_and_pre_holdout_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    targets = parts_root / "targets"
+    targets.mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    rows = [{"target_id": "target-1", "decision_time": "t"}]
+    envelope = {
+        "contract": implementation._TARGET_SOURCE_PART_CONTRACT,
+        "schema_version": 1,
+        "source_id": "source-1",
+        "kind": "targets",
+        "part_index": 0,
+        "rows": rows,
+    }
+    encoded = json.dumps(envelope, separators=(",", ":")).encode()
+    part = targets / "part-000000.json"
+    part.write_bytes(encoded)
+    receipt: dict[str, Any] = {"max_parts": 1, "max_part_bytes": 10_000}
+    result = list(
+        implementation._iter_native_source_parts(
+            wrapper,
+            [
+                (
+                    "target-source.json.parts/targets/part-000000.json",
+                    hashlib.sha256(encoded).hexdigest(),
+                    1,
+                )
+            ],
+            kind="targets",
+            source_id="source-1",
+            receipt=receipt,
+        )
+    )
+    assert result == rows
+    assert receipt["physical_parts"] == 1
+    part.write_bytes(encoded.replace(b"source-1", b"source-2"))
+    with pytest.raises(FreezeError, match="lineage"):
+        list(
+            implementation._iter_native_source_parts(
+                wrapper,
+                [
+                    (
+                        "target-source.json.parts/targets/part-000000.json",
+                        hashlib.sha256(part.read_bytes()).hexdigest(),
+                        1,
+                    )
+                ],
+                kind="targets",
+                source_id="source-1",
+                receipt={"max_parts": 1, "max_part_bytes": 10_000},
+            )
+        )
+
+    calls: list[str] = []
+
+    def forbidden_stat(_path: Path) -> bool:
+        calls.append("stat")
+        raise AssertionError("pre-holdout stat")
+
+    def forbidden_read(_path: Path) -> bytes:
+        calls.append("read")
+        raise AssertionError("pre-holdout read")
+
+    monkeypatch.setattr(Path, "is_file", forbidden_stat)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read)
+    manifest = {
+        "pre_holdout_target_parts": [
+            {
+                "path": "target-source.json.parts/pre-holdout-target/part-000000.json",
+                "sha256": "0" * 64,
+                "row_count": 1,
+            }
+        ]
+    }
+    assert implementation._native_source_references(
+        wrapper, manifest, "pre_holdout_target_parts", inspect_files=False
+    ) == [
+        (
+            "target-source.json.parts/pre-holdout-target/part-000000.json",
+            "0" * 64,
+            1,
+        )
+    ]
+    assert calls == []
