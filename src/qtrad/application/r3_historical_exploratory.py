@@ -4293,7 +4293,6 @@ def _load_native_retained_rows(
         if scan_rows % scan_check_interval == 0:
             check_state(state_entries)
 
-
     def source_limits(name: str) -> dict[str, Any]:
         declaration = cast(Mapping[str, Any], wrappers[name])
         return {
