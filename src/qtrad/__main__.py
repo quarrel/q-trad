@@ -83,6 +83,7 @@ from qtrad.application.r2_readiness import (
     evaluate_r2_readiness,
 )
 from qtrad.application.r3_evaluation import fixture_cli
+from qtrad.application.r3_source_evaluation import fixture_cli as source_fixture_cli
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
     build_observation_dataset,
@@ -1266,6 +1267,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="configured sleeve horizon in minutes; repeat for multiple horizons",
     )
+
+    r3g = subparsers.add_parser(
+        "r3-g", help="run the bounded R3.G source-aligned fixture evaluator"
+    )
+    r3g.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -2469,6 +2475,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     elif args.command == "r3-e":
         fixture_cli(str(args.output), args.horizons or (15,))
+    elif args.command == "r3-g":
+        source_fixture_cli(str(args.output))
     else:
         raise RuntimeError("unhandled command")
 
