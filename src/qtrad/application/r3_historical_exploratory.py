@@ -2811,7 +2811,7 @@ def _reject_native_authenticated_components(
     anchor_is_directory: bool = False,
 ) -> None:
     """Reject symlinks and unsafe lexical components from an authenticated anchor."""
-    if relative.is_absolute() or ".." in relative.parts:
+    if ".." in anchor.parts or relative.is_absolute() or ".." in relative.parts:
         raise ValueError("unsafe authenticated path")
     anchor_absolute = anchor.absolute()
     ancestors = tuple(reversed((*anchor_absolute.parents, anchor_absolute)))
@@ -3022,19 +3022,26 @@ def _open_partitioned_json_document(
 ) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
     """Open one authoritative R2 compact manifest without materialising its parts."""
     root = Path(cast(str, limits["manifest_root"]))
+    if ".." in root.parts or ".." in path.parts:
+        raise FreezeError("retained manifest path is unsafe")
+    root_absolute = root.absolute()
     manifest_relative = cast(str, limits["manifest_relative_path"])
-    if path != root / PurePosixPath(manifest_relative):
+    manifest_relative_path = PurePosixPath(manifest_relative)
+    if manifest_relative_path.is_absolute() or ".." in manifest_relative_path.parts:
+        raise FreezeError("retained manifest path is unsafe")
+    expected_manifest_path = (root_absolute / manifest_relative_path).absolute()
+    if path.absolute() != expected_manifest_path:
         raise FreezeError("retained manifest path differs from frozen preparation root")
     try:
         _manifest_path, raw_bytes = _native_authenticated_read(
-            root,
-            PurePosixPath(manifest_relative),
+            root_absolute,
+            manifest_relative_path,
             expected_sha256=limits.get("expected_wrapper_sha256"),
             anchor_is_directory=True,
         )
     except FreezeError as exc:
         raise FreezeError("retained compact manifest is missing or unsafe") from exc
-    if _manifest_path != path.absolute():
+    if _manifest_path != expected_manifest_path:
         raise FreezeError("retained manifest path differs from frozen preparation root")
     if len(raw_bytes) > int(limits["max_source_bytes"]):
         raise FreezeError("retained child exceeds frozen source-byte bound")
@@ -3085,7 +3092,7 @@ def _open_partitioned_json_document(
     references = cast(list[Mapping[str, Any]], references_value)
     try:
         declared_paths = _declared_partition_paths(
-            root, manifest_relative, metadata, identity_field=identity_field
+            root_absolute, manifest_relative, metadata, identity_field=identity_field
         )
     except (OSError, ValueError) as exc:
         raise FreezeError("retained compact manifest part declarations are invalid") from exc
@@ -3113,7 +3120,7 @@ def _open_partitioned_json_document(
                 raise FreezeError("retained compact part reference is non-canonical")
             try:
                 _part_path, part_bytes = _native_authenticated_read(
-                    root,
+                    root_absolute,
                     PurePosixPath(relative),
                     expected_sha256=reference["sha256"],
                     anchor_is_directory=True,
@@ -3121,7 +3128,8 @@ def _open_partitioned_json_document(
                 )
             except FreezeError as exc:
                 raise FreezeError("retained compact part is missing or unsafe") from exc
-            if _part_path != (root / PurePosixPath(relative)).absolute():
+            expected_part_path = (root_absolute / PurePosixPath(relative)).absolute()
+            if _part_path != expected_part_path:
                 raise FreezeError("retained compact part path differs from manifest root")
             part_size = len(part_bytes)
             if part_size > _MAX_PART_BYTES:
@@ -3212,6 +3220,7 @@ def _open_json_document(
     path: Path, limits: Mapping[str, Any]
 ) -> tuple[dict[str, Any], Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]], int, str]:
     """Validate a wrapper immediately, then decode one declared part per iteration."""
+    path_absolute = path.absolute()
     if "physical_required_keys" in limits:
         return _open_partitioned_json_document(path, limits)
     try:
@@ -3222,7 +3231,7 @@ def _open_json_document(
         )
     except FreezeError as exc:
         raise FreezeError(f"retained child path does not exist: {path}") from exc
-    if _wrapper_path != path.absolute():
+    if _wrapper_path != path_absolute:
         raise FreezeError(f"retained child path differs from authenticated path: {path}")
     size = len(raw_bytes)
     if size > int(limits["max_source_bytes"]):
@@ -3305,10 +3314,10 @@ def _open_json_document(
             part_path = Path(locator_value)
             if part_path.is_absolute() or ".." in part_path.parts or not locator_value:
                 raise FreezeError("retained part locator must be safely relative")
-            resolved_part = path.parent / part_path
+            resolved_part = path_absolute.parent / part_path
             try:
                 _part_path, part_bytes = _native_authenticated_read(
-                    path,
+                    path_absolute,
                     PurePosixPath(part_path),
                     expected_sha256=descriptor["sha256"],
                     max_bytes=int(limits["max_source_bytes"]),
@@ -3317,7 +3326,8 @@ def _open_json_document(
                 if "byte hash" in str(exc):
                     raise FreezeError("retained part byte hash mismatch") from exc
                 raise FreezeError("retained part locator does not exist") from exc
-            if _part_path != resolved_part.absolute():
+            expected_part_path = resolved_part.absolute()
+            if _part_path != expected_part_path:
                 raise FreezeError("retained part path differs from authenticated path")
             actual_hash = hashlib.sha256(part_bytes).hexdigest()
             if actual_hash != descriptor["sha256"]:
@@ -3610,6 +3620,7 @@ def _iter_native_source_parts(
     physical_budget: Mapping[str, Any] | None = None,
 ) -> Iterator[Mapping[str, Any]]:
     """Stream one authorised target-source part at a time with truthful receipts."""
+    manifest_absolute = manifest_path.absolute()
     max_parts = int(receipt.get("max_parts", len(references)))
     if len(references) > max_parts:
         raise FreezeError(f"native target-source {kind} exceeds frozen part bound")
@@ -3624,7 +3635,8 @@ def _iter_native_source_parts(
             )
         except FreezeError as exc:
             raise FreezeError(f"native target-source {kind} part cannot be read") from exc
-        if _part_path != manifest_path.parent / PurePosixPath(relative):
+        expected_part_path = manifest_absolute.parent / PurePosixPath(relative)
+        if _part_path != expected_part_path:
             raise FreezeError(f"native target-source {kind} part path differs from manifest")
         actual_hash = hashlib.sha256(encoded).hexdigest()
         if actual_hash != expected_hash:
@@ -3693,6 +3705,7 @@ def _load_native_target_source(
     dict[str, Any],
 ]:
     """Load only target/opportunity bounded parts; pre-holdout refs are never touched."""
+    path_absolute = path.absolute()
     try:
         _wrapper_path, encoded = _native_authenticated_read(
             path,
@@ -3701,7 +3714,7 @@ def _load_native_target_source(
         )
     except FreezeError as exc:
         raise FreezeError("native target-source wrapper is missing or unsafe") from exc
-    if _wrapper_path != path.absolute():
+    if _wrapper_path != path_absolute:
         raise FreezeError("native target-source wrapper path differs from locator")
     _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded), read_operations=1)
     try:
@@ -3766,9 +3779,11 @@ def _load_native_target_source(
         raise FreezeError("native target-source closure differs from freeze")
     if _native_source_closure(manifest) != manifest["closure_id"]:
         raise FreezeError("native target-source closure authentication failed")
-    target_refs = _native_source_references(path, manifest, "target_parts", inspect_files=True)
+    target_refs = _native_source_references(
+        path_absolute, manifest, "target_parts", inspect_files=True
+    )
     opportunity_refs = _native_source_references(
-        path, manifest, "opportunity_parts", inspect_files=True
+        path_absolute, manifest, "opportunity_parts", inspect_files=True
     )
     family_limits = cast(Mapping[str, Mapping[str, Any]], expected["authorised_families"])
     target_max_parts = int(family_limits["targets"]["part_count"])
@@ -3780,12 +3795,14 @@ def _load_native_target_source(
         "target-source",
         [item[0] for item in (*target_refs, *opportunity_refs)],
     )
-    _validate_native_authorised_root(path)
-    _validate_native_authorised_tree(path, target_refs, kind="targets")
-    _validate_native_authorised_tree(path, opportunity_refs, kind="opportunities")
+    _validate_native_authorised_root(path_absolute)
+    _validate_native_authorised_tree(path_absolute, target_refs, kind="targets")
+    _validate_native_authorised_tree(path_absolute, opportunity_refs, kind="opportunities")
     # Validate every forbidden declaration's shape and canonical path, but deliberately do not
     # call stat/open/read/is_file on a pre-holdout path.
-    _native_source_references(path, manifest, "pre_holdout_target_parts", inspect_files=False)
+    _native_source_references(
+        path_absolute, manifest, "pre_holdout_target_parts", inspect_files=False
+    )
     if (
         sum(item[2] for item in target_refs) != manifest["target_count"]
         or sum(item[2] for item in opportunity_refs) != manifest["opportunity_count"]
@@ -3819,7 +3836,7 @@ def _load_native_target_source(
         "part_hashes": inventory["opportunity_part_hashes"],
     }
     target_rows = _iter_native_source_parts(
-        path,
+        path_absolute,
         target_refs,
         kind="targets",
         source_id=str(manifest["source_id"]),
@@ -3827,7 +3844,7 @@ def _load_native_target_source(
         physical_budget=physical_budget,
     )
     opportunity_rows = _iter_native_source_parts(
-        path,
+        path_absolute,
         opportunity_refs,
         kind="opportunities",
         source_id=str(manifest["source_id"]),
@@ -3850,6 +3867,7 @@ def _load_native_outcome_values(
 ) -> dict[str, float]:
     """Stream tagged outcomes, retaining values only for the bounded selected IDs."""
     del fixture
+    path_absolute = path.absolute()
     try:
         _wrapper_path, encoded_wrapper = _native_authenticated_read(
             path,
@@ -3858,7 +3876,7 @@ def _load_native_outcome_values(
         )
     except FreezeError as exc:
         raise FreezeError("native outcome wrapper is missing or unsafe") from exc
-    if _wrapper_path != path.absolute():
+    if _wrapper_path != path_absolute:
         raise FreezeError("native outcome wrapper path differs from locator")
     _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded_wrapper), read_operations=1)
     if receipt is not None:
@@ -3910,7 +3928,7 @@ def _load_native_outcome_values(
         ],
     )
     _validate_native_outcome_parts_tree(
-        path,
+        path_absolute,
         list(references),
         manifest_relative_path=str(limits["manifest_relative_path"]),
     )
@@ -3949,13 +3967,14 @@ def _load_native_outcome_values(
             raise FreezeError("native outcome part reference hash is malformed")
         try:
             _part_path, encoded = _native_authenticated_read(
-                path,
+                path_absolute,
                 PurePosixPath(relative),
                 expected_sha256=digest,
             )
         except FreezeError as exc:
             raise FreezeError("native outcome part is unsafe") from exc
-        if _part_path != (path.parent / PurePosixPath(relative)).absolute():
+        expected_part_path = path_absolute.parent / PurePosixPath(relative)
+        if _part_path != expected_part_path:
             raise FreezeError("native outcome part path differs from manifest")
         if receipt is not None:
             receipt["parts"] = int(receipt.get("parts", 0)) + 1

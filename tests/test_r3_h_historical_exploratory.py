@@ -815,6 +815,142 @@ def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path)
         _read_json_document(path, limits)
 
 
+def test_native_loader_relative_and_absolute_roots_share_authenticated_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    part_rows = [{"decision_time": "t", "target_id": "x"}]
+    part_bytes = json.dumps(part_rows, separators=(",", ":")).encode()
+    wrapper = {
+        "contract": "test-wrapper",
+        "parts": [
+            {
+                "locator": "part.json",
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "contract": "test-part",
+                "identity": "part-1",
+                "byte_size": len(part_bytes),
+                "row_count": len(part_rows),
+            }
+        ],
+    }
+    (tmp_path / "part.json").write_bytes(part_bytes)
+    wrapper_path = tmp_path / "wrapper.json"
+    wrapper_path.write_text(json.dumps(wrapper), encoding="utf-8")
+    limits = {
+        "max_source_bytes": 100_000,
+        "max_source_rows": 10,
+        "max_row_bytes": 10_000,
+        "max_nested_depth": 8,
+        "max_part_rows": 3,
+    }
+
+    absolute_result = implementation._read_json_document(wrapper_path, limits)
+    monkeypatch.chdir(tmp_path.parent)
+    relative_path = Path(tmp_path.name) / "wrapper.json"
+    relative_result = implementation._read_json_document(relative_path, limits)
+    assert relative_result == absolute_result
+
+    alias = tmp_path.parent / "relative-root-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError):
+        implementation._read_json_document(alias / "wrapper.json", limits)
+
+    traversed_path = Path(tmp_path.name) / ".." / tmp_path.name / "wrapper.json"
+    with pytest.raises(FreezeError):
+        implementation._read_json_document(traversed_path, limits)
+
+
+def test_native_compact_loader_relative_and_absolute_roots_share_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    logical_row = {"decision_time": "t", "target_id": "x"}
+    envelope = {
+        "contract": "qtrad-r2-partitioned-json-row-part-v1",
+        "schema_version": 1,
+        "parent_contract": "test-wrapper",
+        "parent_semantic_id": "dataset-1",
+        "part_index": 0,
+        "rows": [{"value": logical_row}],
+    }
+    part_bytes = implementation._canonical_bytes(envelope)
+    part_relative = "wrapper.json.parts/part-000000.json"
+    (tmp_path / part_relative).parent.mkdir()
+    (tmp_path / part_relative).write_bytes(part_bytes)
+    manifest = {
+        "contract": "test-wrapper",
+        "dataset_id": "dataset-1",
+        "storage": implementation._PARTITIONED_ROWS_STORAGE,
+        "identity_field": "dataset_id",
+        "row_count": 1,
+        "parts": [
+            {
+                "path": part_relative,
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "row_count": 1,
+                "part_index": 0,
+            }
+        ],
+        "partition_row_field": "value",
+        "partition_fields": [],
+        "partition_mapping_fields": [],
+    }
+    physical_fields = {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    header = {key: value for key, value in manifest.items() if key not in physical_fields}
+    manifest["header_sha256"] = hashlib.sha256(implementation._canonical_bytes(header)).hexdigest()
+    wrapper_path = tmp_path / "wrapper.json"
+    wrapper_bytes = implementation._canonical_bytes(manifest)
+    wrapper_path.write_bytes(wrapper_bytes)
+    limits = {
+        "manifest_root": str(tmp_path),
+        "manifest_relative_path": "wrapper.json",
+        "max_source_bytes": 100_000,
+        "physical_required_keys": list(manifest),
+        "expected_identity_field": "dataset_id",
+        "expected_wrapper_contract": "test-wrapper",
+        "expected_wrapper_identity": "dataset-1",
+        "partition_row_field": "value",
+        "partition_fields": [],
+        "partition_mapping_fields": [],
+        "required_record_keys": ["decision_time", "target_id"],
+        "max_consumed_parts": 2,
+        "max_elapsed_seconds": 10,
+        "max_part_rows": 3,
+        "max_row_bytes": 10_000,
+        "max_source_rows": 10,
+        "_physical_budget": None,
+    }
+
+    absolute_metadata, absolute_iterator, _, _ = implementation._open_partitioned_json_document(
+        wrapper_path, limits
+    )
+    absolute_parts = list(absolute_iterator)
+    monkeypatch.chdir(tmp_path.parent)
+    relative_limits = {**limits, "manifest_root": tmp_path.name}
+    relative_path = Path(tmp_path.name) / "wrapper.json"
+    relative_metadata, relative_iterator, _, _ = implementation._open_partitioned_json_document(
+        relative_path, relative_limits
+    )
+    assert relative_metadata == absolute_metadata
+    assert list(relative_iterator) == absolute_parts
+
+    alias = tmp_path.parent / "compact-root-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError):
+        implementation._open_partitioned_json_document(
+            alias / "wrapper.json", {**limits, "manifest_root": "compact-root-alias"}
+        )
+
+    traversed_root = Path(tmp_path.name) / ".." / tmp_path.name
+    with pytest.raises(FreezeError):
+        implementation._open_partitioned_json_document(
+            traversed_root / "wrapper.json", {**limits, "manifest_root": str(traversed_root)}
+        )
+
+
 def test_fixture_loader_scans_all_parts_before_earliest_selection() -> None:
     from qtrad.application.r3_historical_exploratory import load_fixture_rows
 
