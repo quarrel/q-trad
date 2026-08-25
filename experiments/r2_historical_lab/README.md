@@ -43,8 +43,11 @@ LAB-L consumes only the exact canonical LAB-0 manifest named in
         --output /workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2-smoke
 
 The full fixed experiment omits `--smoke` and writes under
-`/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2`. The first retained-scale attempt is preserved as a
-failed timeout under `/workspace/tmp/qtrad-r2-lab/LAB-L`; its completed configurations count as
-attempted exploratory variants. The former consumed holdout remains inaccessible unless a sequence
+`/workspace/tmp/qtrad-r2-lab/LAB-L-attempt-2`. The first retained-scale attempt timed out after four
+completed configurations; its summary and pre-deletion hashes remain in
+`/workspace/tmp/qtrad-r2-lab/LAB-L-EXECUTION.md`. After the successful replacement runs, the
+incomplete attempt and disposable smoke outputs were intentionally cleaned so they cannot be mistaken
+for final results. Its completed configurations still count as attempted exploratory variants. The
+former consumed holdout remains inaccessible unless a sequence
 configuration first passes every declared development screening condition and is create-only frozen
 by the shared LAB harness.
