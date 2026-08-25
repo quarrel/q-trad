@@ -245,7 +245,7 @@ class DecisionClosure:
         require_utc(self.decision_time, "decision time")
         require_utc(self.expiry_time, "expiry time")
         if self.terminal_disposition:
-            if self.expiry_time < self.decision_time or self.holding_interval != timedelta(0):
+            if self.expiry_time != self.decision_time or self.holding_interval != timedelta(0):
                 raise ValueError("terminal decision interval must have zero holding")
         elif self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
             raise ValueError("decision interval is invalid")

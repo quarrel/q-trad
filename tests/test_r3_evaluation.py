@@ -666,6 +666,8 @@ def test_terminal_intents_and_closure_use_zero_duration_authority(monkeypatch, t
     assert decision.expiry_time == decision.decision_time
     assert decision.holding_interval == timedelta(0)
     assert event_report.expected_cost_components["ASSET_A"]["FINANCING"] == Decimal("0")
+    with pytest.raises(ValueError, match="terminal decision interval"):
+        replace(decision, expiry_time=decision.decision_time + timedelta(seconds=1))
 
 
 def test_compatibility_projection_rejects_non_15m_without_artifacts(tmp_path):
