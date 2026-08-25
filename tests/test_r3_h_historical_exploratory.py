@@ -458,7 +458,7 @@ def test_fixture_loader_rejects_unknown_fields_and_retained_locator_mismatch(
 def test_algorithm_parameters_are_reported_and_consumed_from_frozen_config() -> None:
     config = FreezeConfig.from_path(CONFIG)
     report = analyse_fixture(synthetic_fixture(), config).report
-    assert report["loader_contract"]["decode_policy"].startswith("decode only selected")
+    assert report["loader_contract"]["decode_policy"].startswith("stream all authenticated")
     algorithms = config.document["algorithms"]
     assert algorithms["ridge"]["regularisation"] == 0.0
     assert algorithms["huber"]["threshold"] == 0.02
@@ -795,19 +795,28 @@ def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path)
         _read_json_document(path, limits)
 
 
-def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
+def test_fixture_loader_scans_all_parts_before_earliest_selection() -> None:
     from qtrad.application.r3_historical_exploratory import load_fixture_rows
 
     config = FreezeConfig.from_path(CONFIG)
-    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    fixture = synthetic_fixture()
+    latest_decision = max(row.decision_time for row in fixture)
+    no_order_fixture = tuple(
+        replace(row, period=f"{row.period}-fixture-late-earlier")
+        if row.decision_time == latest_decision
+        else row
+        for row in fixture
+    )
+    rows, metadata = load_fixture_rows(no_order_fixture, config)
     assert len(rows) == 18
+    assert {row.decision_time for row in rows} >= {"1969-01-01T00:00:00Z"}
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
-    assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
-    assert all(state == "NOT_SCANNED_AFTER_BOUND" for state in metadata["unopened_parts"].values())
-    assert metadata["stop_reason"] == "EARLIEST_COMPLETE_GROUP_BOUND"
-    assert metadata["consumed_parts_count"] == 8
-    assert all(len(hashes) == 2 for hashes in metadata["source_scan_part_hashes"].values())
+    assert metadata["selection"]["stop_state"] == "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    assert all(state == "EXHAUSTED" for state in metadata["unopened_parts"].values())
+    assert metadata["stop_reason"] == "FULL_SCAN_REQUIRED_NO_ORDER_PROOF"
+    assert metadata["consumed_parts_count"] == 13
+    assert {len(hashes) for hashes in metadata["source_scan_part_hashes"].values()} == {3, 4}
     report = analyse_fixture(rows, config, retained_metadata=metadata).report
     graph_receipts = {
         control["id"]: control["execution_receipt"] for control in report["graph"]["controls"]
@@ -827,6 +836,47 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert metadata["selected_bytes"] < metadata["consumed_bytes"]
     assert metadata["selected_bytes_kind"] == "logical_serialised_fixture_row_bytes"
     assert len(metadata["source_scan_wrapper_bytes"]) == 6
+
+
+def test_retained_source_inventory_requires_exact_declared_and_scanned_bounds() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    streaming = FreezeConfig.from_path(CONFIG).document["retained_loader"]["streaming_policy"]
+    declared = {
+        "local_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "pooled_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "zero_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "outcome_evidence": {"row_count": 608_127, "parts": [None] * 75},
+    }
+    implementation._validate_declared_source_inventory(streaming, declared)
+    declared["outcome_evidence"]["parts"].append(None)
+    with pytest.raises(FreezeError, match="declared source inventory"):
+        implementation._validate_declared_source_inventory(streaming, declared)
+
+    part_bytes = [4_198_824, 2_476_431, *([2_476_354] * 148)]
+    receipts = {
+        "local_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[:25]
+        ],
+        "pooled_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[25:50]
+        ],
+        "zero_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[50:75]
+        ],
+        "outcome_evidence": [
+            {"physical_rows": 608_127 // 75, "bytes": size} for size in part_bytes[75:]
+        ],
+    }
+    with pytest.raises(FreezeError, match="scanned source inventory"):
+        implementation._validate_scanned_source_inventory(streaming, receipts)
+
+    rows = [202_709] * 3 + [608_127]
+    for source, expected_rows in zip(receipts, rows, strict=True):
+        for receipt in receipts[source]:
+            receipt["physical_rows"] = 0
+        receipts[source][0]["physical_rows"] = expected_rows
+    implementation._validate_scanned_source_inventory(streaming, receipts)
 
 
 def test_swapped_retained_role_records_fail_closed() -> None:

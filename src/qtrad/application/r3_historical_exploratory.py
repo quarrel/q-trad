@@ -26,7 +26,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "0fb453ccf3bffbfee015a3188116ac21c90ff4c0593e01e6fb8dc141317fc14a"
+    "e72c590fa1f4e1d453ef3c10c4c85da3607aa3b4d1f441dea1f58c71bd6cdba0"
 )
 _PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
 _PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
@@ -2281,6 +2281,20 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         raise FreezeError("target_position_change compatibility field is forbidden")
     if not isinstance(loader.get("manifest_root"), str) or not loader["manifest_root"]:
         raise FreezeError("retained compact manifest root is not frozen")
+    expected_streaming_policy = {
+        "parts_first": True,
+        "stop_after_selected_groups": False,
+        "hash_consumed_parts": True,
+        "max_source_rows": 3_376_258,
+        "max_source_bytes": 2_147_483_648,
+        "max_consumed_parts": 150,
+        "expected_source_rows": 1_216_254,
+        "expected_source_part_bytes": 373_175_647,
+        "expected_source_parts": 150,
+        "expected_largest_part_bytes": 4_198_824,
+    }
+    if loader["streaming_policy"] != expected_streaming_policy:
+        raise FreezeError("retained no-order source inventory is not frozen")
     if loader["locators"] != {
         "selection": retained_object["selection"],
         "consumed": retained_object["consumed"],
@@ -3204,6 +3218,39 @@ def _validate_child_metadata(
         raise FreezeError(f"{name} marker must not declare data parts")
 
 
+def _validate_declared_source_inventory(
+    streaming: Mapping[str, Any], manifests: Mapping[str, Mapping[str, Any]]
+) -> None:
+    declared_rows = sum(int(manifest["row_count"]) for manifest in manifests.values())
+    declared_parts = sum(
+        len(cast(Sequence[Any], manifest["parts"])) for manifest in manifests.values()
+    )
+    if (
+        declared_rows != int(streaming["expected_source_rows"])
+        or declared_parts != int(streaming["expected_source_parts"])
+        or declared_parts > int(streaming["max_consumed_parts"])
+    ):
+        raise FreezeError("retained declared source inventory differs from freeze")
+
+
+def _validate_scanned_source_inventory(
+    streaming: Mapping[str, Any], receipts: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> None:
+    scanned_parts = sum(len(parts) for parts in receipts.values())
+    scanned_rows = sum(int(part["physical_rows"]) for parts in receipts.values() for part in parts)
+    scanned_bytes = sum(int(part["bytes"]) for parts in receipts.values() for part in parts)
+    largest_part = max(
+        (int(part["bytes"]) for parts in receipts.values() for part in parts), default=0
+    )
+    if (
+        scanned_rows != int(streaming["expected_source_rows"])
+        or scanned_parts != int(streaming["expected_source_parts"])
+        or scanned_bytes != int(streaming["expected_source_part_bytes"])
+        or largest_part != int(streaming["expected_largest_part_bytes"])
+    ):
+        raise FreezeError("retained scanned source inventory differs from freeze")
+
+
 def load_retained_rows(
     config: FreezeConfig, *, locators: Mapping[str, str] | None = None, _fixture: bool = False
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
@@ -3289,6 +3336,11 @@ def load_retained_rows(
         )
         opened[name] = _open_json_document(Path(actual_locators[name]), child_limits)
         _validate_child_metadata(name, opened[name][0], loader, fixture=_fixture)
+    if not _fixture:
+        _validate_declared_source_inventory(
+            streaming,
+            {name: opened[name][0] for name in _CHILD_WRAPPER_NAMES[2:]},
+        )
     _selection_metadata, selection_parts, _selection_size, _selection_hash = opened["selection"]
     _consumed_metadata, consumed_parts, _consumed_size, _consumed_hash = opened["consumed"]
     consumed_part_receipts: dict[str, list[dict[str, Any]]] = {name: [] for name in child_names}
@@ -3399,17 +3451,12 @@ def load_retained_rows(
     stop_state = "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
     stop_reason = "FULL_SCAN_REQUIRED_NO_ORDER_PROOF"
     unopened_parts = {name: "EXHAUSTED" for name in data_names}
-    declared_part_counts = {
-        name: len(cast(Sequence[Any], opened[name][0].get("parts", []))) for name in data_names
-    }
     while True:
         part_set: dict[str, tuple[dict[str, Any], list[Mapping[str, Any]], int]] = {}
-        exhausted_this_set = 0
         for name in data_names:
             try:
                 part_set[name] = next(part_iterators[name])
             except StopIteration:
-                exhausted_this_set += 1
                 unopened_parts[name] = "EXHAUSTED"
         if not part_set:
             break
@@ -3417,25 +3464,12 @@ def load_retained_rows(
             if name in part_set:
                 descriptor, part_rows, part_size = part_set[name]
                 consume_part(name, descriptor, part_rows, part_size)
-        complete, incomplete = complete_groups()
-        if (
-            len(part_set) == len(data_names)
-            and len(complete) >= required_groups
-            and not incomplete
-            and bool(streaming.get("stop_after_selected_groups", False))
-        ):
-            stop_state = "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
-            stop_reason = "EARLIEST_COMPLETE_GROUP_BOUND"
-            for name in data_names:
-                consumed_count = len(consumed_part_receipts[name])
-                unopened_parts[name] = (
-                    "NOT_SCANNED_AFTER_BOUND"
-                    if consumed_count < declared_part_counts[name]
-                    else "EXHAUSTED_AT_BOUND"
-                )
-            break
-        if exhausted_this_set == len(data_names):
-            break
+
+    if not _fixture:
+        _validate_scanned_source_inventory(
+            streaming,
+            {name: consumed_part_receipts[name] for name in data_names},
+        )
 
     complete, incomplete = complete_groups()
     if incomplete and bool(policy["reject_incomplete"]):
@@ -3610,12 +3644,16 @@ def load_fixture_rows(
             for decision_time in decision_times
         ]
         part_records = [part_records[0] + part_records[1], part_records[2]]
-        late_records = [dict(record) for record in part_records[-1]]
-        for record in late_records:
-            record[decision_field] = "2099-01-01T00:00:00Z"
-            period_field = mappings["period"]
-            record[period_field] = f"{record[period_field]}-late"
-        part_records.append(late_records)
+        period_field = mappings["period"]
+        if any(str(record[period_field]).endswith("-fixture-late-earlier") for record in records):
+            late_records = [dict(record) for record in part_records[-1]]
+            for record in late_records:
+                record[decision_field] = "1969-01-01T00:00:00Z"
+                record[mappings["available_at"]] = "1968-12-31T23:55:00Z"
+                record[mappings["target_available_at"]] = "1969-01-01T00:05:00Z"
+                record[mappings["dependency_start"]] = "1969-01-01T00:00:00Z"
+                record[mappings["dependency_end"]] = "1969-01-01T00:05:00Z"
+            part_records.append(late_records)
         for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence"):
             declaration = cast(Mapping[str, Any], declarations[name])
             wrapper = metadata_for(name)
@@ -3625,10 +3663,20 @@ def load_fixture_rows(
             wrapper["partition_row_field"] = row_field
             wrapper["partition_fields"] = declaration["partition_fields"]
             wrapper["partition_mapping_fields"] = declaration["partition_mapping_fields"]
+            child_part_records = part_records
+            if name == "outcome_evidence":
+                middle_records = part_records[1]
+                child_part_records = [
+                    part_records[0],
+                    middle_records[: len(middle_records) // 2],
+                    middle_records[len(middle_records) // 2 :],
+                ]
+                if len(part_records) == 3:
+                    child_part_records.append(part_records[-1])
             if name == "outcome_evidence":
                 physical_rows: list[Mapping[str, object]] = [
                     tagged
-                    for records in part_records
+                    for records in child_part_records
                     for record in records
                     for tagged in (
                         {"field": "expected_target_ids", "value": record[mappings["target_id"]]},
@@ -3638,7 +3686,7 @@ def load_fixture_rows(
                 ]
             else:
                 physical_rows = [
-                    {"value": record} for records in part_records for record in records
+                    {"value": record} for records in child_part_records for record in records
                 ]
             manifest_relative = cast(str, declaration["manifest_relative_path"])
             identity_field = cast(str, declaration["identity_field"])
@@ -3652,7 +3700,7 @@ def load_fixture_rows(
             }
             multiplier = 3 if name == "outcome_evidence" else 1
             offsets = [0]
-            for records in part_records:
+            for records in child_part_records:
                 offsets.append(offsets[-1] + len(records) * multiplier)
             references: list[dict[str, object]] = []
             for part_index, (start, end) in enumerate(pairwise(offsets)):

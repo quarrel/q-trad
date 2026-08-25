@@ -127,7 +127,7 @@
             "zero_forecast": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/forecasts/93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json",
             "outcome_evidence": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/outcome-evidence.json"},
         "manifest_root": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation",
-        "decode_policy": "decode only selected forecast/outcome parts after terminal authority; never replay ancestry",
+        "decode_policy": "stream all authenticated forecast/outcome parts one at a time after terminal authority; never replay ancestry",
         "selection_policy": {
             "join_fields": [
                 "decision_time",
@@ -150,11 +150,15 @@
             "outcome_blind": true},
         "streaming_policy": {
             "parts_first": true,
-            "stop_after_selected_groups": true,
+            "stop_after_selected_groups": false,
             "hash_consumed_parts": true,
             "max_source_rows": 3376258,
             "max_source_bytes": 2147483648,
-            "max_consumed_parts": 75},
+            "max_consumed_parts": 150,
+            "expected_source_rows": 1216254,
+            "expected_source_part_bytes": 373175647,
+            "expected_source_parts": 150,
+            "expected_largest_part_bytes": 4198824},
         "decoder_limits": {
             "max_row_bytes": 16384,
             "max_nested_depth": 8,
@@ -226,7 +230,7 @@
         }
     },
     "scale_projection": {
-        "retained_row_count": 3376258,
+        "retained_row_count": 1216254,
         "target_count": 6,
         "group_count": 3,
         "fixture_row_count": 18,
@@ -244,7 +248,7 @@
                 "horizon_minutes",
                 "period"],
             "outcome_blind": true},
-        "source_scan": {"rows": 3376258, "bytes": 2147483648, "parts": 75},
+        "source_scan": {"rows": 1216254, "bytes": 373175647, "parts": 150},
         "decoder_limits": {
             "max_row_bytes": 16384,
             "max_nested_depth": 8,
@@ -252,7 +256,7 @@
             "max_selected_rows": 64},
         "streaming_policy": {
             "parts_first": true,
-            "stop_after_selected_groups": true,
+            "stop_after_selected_groups": false,
             "hash_consumed_parts": true,
             "peak_memory_margin_mb": 256},
         "stop_conditions": [
@@ -334,4 +338,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "0fb453ccf3bffbfee015a3188116ac21c90ff4c0593e01e6fb8dc141317fc14a"}
+    "semantic_identity": "e72c590fa1f4e1d453ef3c10c4c85da3607aa3b4d1f441dea1f58c71bd6cdba0"}
