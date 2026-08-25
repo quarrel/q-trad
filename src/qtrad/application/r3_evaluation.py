@@ -46,7 +46,6 @@ from qtrad.domain.r3_evaluation import (
     SleeveAttribution,
     VerificationReceipt,
     build_outcome_closures,
-    canonical_bytes,
     evaluate_independently,
     identity,
     lifecycle_component_identities,
@@ -504,6 +503,9 @@ def _build_lifecycle_events(
     """Replay configured virtual sleeves at each physical boundary."""
     if not lifecycle:
         return ()
+    if tuple(lifecycle) != tuple(decision.horizon_states):
+        raise ValueError("lifecycle states do not bind the decision closure")
+    lifecycle = tuple(decision.horizon_states)
     asset = decision.asset_order[0]
     state_by_key = {state.key: state for state in lifecycle}
     lifecycle_keys = tuple(state_by_key)
@@ -512,8 +514,15 @@ def _build_lifecycle_events(
     }
     positions = {key: Decimal("0") for key in lifecycle_keys}
     physical = decision.current_position[0]
+    # The authoritative physical position is already held by the first canonical
+    # sleeve; subsequent expiry events then reconcile that position to zero.
+    positions[lifecycle_keys[0]] = physical
     events: list[LifecycleEvent] = []
-    boundaries = tuple(sorted({_FIXTURE_TIME, *(state.expiry_time for state in lifecycle)}))
+    decision_times = {state.decision_time for state in lifecycle}
+    if len(decision_times) != 1:
+        raise ValueError("lifecycle states must share one authoritative decision time")
+    t0 = next(iter(decision_times))
+    boundaries = tuple(sorted({t0, *(state.expiry_time for state in lifecycle)}))
     for index, event_time in enumerate(boundaries):
         next_time = boundaries[index + 1] if index + 1 < len(boundaries) else event_time
         intents: list[HorizonIntent] = []
@@ -527,7 +536,7 @@ def _build_lifecycle_events(
                 reviewed.append(state)
             else:
                 expired.append(state)
-            if event_time == _FIXTURE_TIME:
+            if event_time == t0:
                 requested = initial_requests[state.key]
             elif state.expiry_time > event_time:
                 requested = positions[state.key]
@@ -692,13 +701,36 @@ def _build_lifecycle_events(
             cost_holding_interval=interval,
         )
         event_report = replace(event_report, lifecycle_events=None)
+        decision_receipt = VerificationReceipt(
+            artefact_contract=event_decision.contract,
+            semantic_identity=event_decision.semantic_identity,
+            closure_identity=event_decision.closure_identity,
+            parent_verification_identity=target_receipt.receipt_identity,
+            verifier_contract="r3-e-lifecycle-verifier-v1",
+            checks=("canonical-bytes", "ordered-event", "create-only"),
+        )
+        outcome_receipts = tuple(
+            VerificationReceipt(
+                artefact_contract=outcome.contract,
+                semantic_identity=outcome.semantic_identity,
+                closure_identity=outcome.closure_identity,
+                parent_verification_identity=decision_receipt.receipt_identity,
+                verifier_contract="r3-e-lifecycle-verifier-v1",
+                checks=("canonical-bytes", "decision-parent", "create-only"),
+            )
+            for outcome in event_outcomes
+        )
         event_receipt = VerificationReceipt(
             artefact_contract="qtrad-r3-lifecycle-event-report-v1",
             semantic_identity=event_report.semantic_identity,
             closure_identity=event_report.closure_identity,
-            parent_verification_identity=event_decision.parent_verification_identity,
-            verifier_contract="qtrad-r3-lifecycle-event-verifier-v1",
+            parent_verification_identity=decision_receipt.receipt_identity,
+            verifier_contract="r3-e-lifecycle-verifier-v1",
             checks=("canonical-bytes", "event-reconciliation", "create-only"),
+            parent_receipt_identities=(
+                decision_receipt.receipt_identity,
+                *(receipt.receipt_identity for receipt in outcome_receipts),
+            ),
         )
         component_ids = lifecycle_component_identities(
             {
@@ -746,9 +778,6 @@ def _build_lifecycle_events(
                 _receipt_component=event_receipt,
                 _sleeve_transaction_cost_component=transaction_allocation,
                 _sleeve_financing_cost_component=financing_allocation,
-                _parent_horizon_state_components=lifecycle,
-                _horizon_state_components=tuple(active + reviewed + expired),
-                _boundary_times=boundaries,
             )
         )
         positions.update({intent.key: intent.requested_quantity for intent in intents})
@@ -874,71 +903,14 @@ def _legacy_projection_bytes(
     outcomes: tuple[OutcomeClosure, ...],
     report: EvaluationReport,
 ) -> dict[str, bytes]:
-    """Encode the frozen one-horizon wire projection from unified closures."""
-    target_payload = json.loads(target.canonical_bytes)
-    target_payload["continuous_target_identity"] = identity(
-        {
-            "contract": "qtrad-continuous-target-v1",
-            "asset_order": tuple(target.asset_order),
-            "target": tuple(target.target_position),
-        }
-    )
-    target_payload["decision_input_identity"] = (
-        "08081bd749b6508bd7ef07fa8c3b880a477a6786a92eeecb7b30971c59274d13"
-    )
-    target_payload["netting"] = "cd36c34c27fc900d215673e542c2bc313c42cb4be40660719126a8ca4daf8056"
-    target_payload["policy_identity"] = identity(
-        {"contract": ROUNDING_CONTRACT, "policy": "fixture"}
-    )
-    target_payload.pop("horizon_state_identities", None)
-    target_identity = identity(target_payload)
-    decision_payload = json.loads(decision.canonical_bytes)
-    decision_payload["decision_input_identity"] = (
-        "08081bd749b6508bd7ef07fa8c3b880a477a6786a92eeecb7b30971c59274d13"
-    )
-    decision_payload["rounded_target_identity"] = target_identity
-    decision_payload["parent_verification_identity"] = (
-        "971772c2c8dbb8eaedb7646be77619461f0028138f209ec08f7227bc7e1ddb22"
-    )
-    decision_payload["target_verification_identity"] = decision_payload[
-        "parent_verification_identity"
-    ]
-    decision_payload["risk_state_identity"] = (
-        "996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe"
-    )
-    decision_payload.pop("horizon_states", None)
-    decision_identity = identity(decision_payload)
-    files = {
-        "decision.json": canonical_bytes(decision_payload),
-        "target.json": canonical_bytes(target_payload),
+    """Serialize the authoritative 15m projection without recalculating it."""
+    files: dict[str, bytes] = {
+        "decision.json": decision.canonical_bytes,
+        "target.json": target.canonical_bytes,
+        "report.json": report.canonical_bytes,
     }
-    outcome_ids: list[str] = []
     for outcome in outcomes:
-        payload = json.loads(outcome.canonical_bytes)
-        payload["decision_semantic_identity"] = decision_identity
-        payload["decision_closure_identity"] = decision_identity
-        outcome_ids.append(identity(payload))
-        files[f"outcome-{outcome.asset_id}.json"] = canonical_bytes(payload)
-    report = _legacy_decimal_report(report)
-    report_payload = json.loads(report.canonical_bytes)
-    report_payload["decision_identity"] = (
-        "a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d"
-    )
-    report_payload["decision_closure_identity"] = (
-        "a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d"
-    )
-    report_payload["risk_state_identity"] = (
-        "996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe"
-    )
-    report_payload["outcome_identities"] = (
-        "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
-    )
-    report_payload["assets"][0]["outcome_identity"] = (
-        "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc"
-    )
-    report_payload.pop("horizon_state_identities", None)
-    report_payload.pop("lifecycle_events", None)
-    files["report.json"] = canonical_bytes(report_payload)
+        files[f"outcome-{outcome.asset_id}.json"] = outcome.canonical_bytes
     return files
 
 
@@ -1123,7 +1095,7 @@ def run_fixture(
         target_receipt = _target_receipt(target)
     _persist_lifecycle_events(output_dir, lifecycle_events)
     legacy_files = (
-        _legacy_projection_bytes(event_decision, event_target, event_outcomes, event_report)
+        _legacy_projection_bytes(decision, target, outcomes, report)
         if len(tuple(horizons)) == 1
         else {}
     )

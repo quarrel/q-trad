@@ -12,9 +12,11 @@ from qtrad.application.r3_evaluation import build_fixture_inputs, run_fixture
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
     EvaluationDisposition,
+    LifecycleEvent,
     OutcomeClosure,
     VerificationReceipt,
     build_outcome_closures,
+    canonical_bytes,
     evaluate_independently,
     identity,
     reconcile_positions,
@@ -554,9 +556,65 @@ def test_legacy_projection_cannot_replace_unified_report_closure(monkeypatch, tm
         files = original(*args, **kwargs)
         payload = json.loads(files["report.json"])
         payload["report_identity"] = "0" * 64
-        files["report.json"] = evaluation_app.canonical_bytes(payload)
+        files["report.json"] = canonical_bytes(payload)
         return files
 
     monkeypatch.setattr(evaluation_app, "_legacy_projection_bytes", forged_projection)
     with pytest.raises(ValueError, match="projection report"):
         run_fixture(tmp_path)
+
+
+def _fixture_events() -> tuple[LifecycleEvent, ...]:
+    decision, quotes = build_fixture_inputs()
+    return evaluation_app._build_lifecycle_events(
+        decision,
+        decision.horizon_states,
+        evaluation_app._model("ASSET_A"),
+        quotes,
+    )
+
+
+def test_lifecycle_rejects_shifted_event_boundary():
+    event = _fixture_events()[0]
+    with pytest.raises(ValueError, match="authoritative decision boundary"):
+        replace(event, event_time=event.event_time + timedelta(seconds=1))
+
+
+def test_lifecycle_rejects_caller_state_parent_swap():
+    decision, quotes = build_fixture_inputs()
+    with pytest.raises(ValueError, match="lifecycle states do not bind"):
+        evaluation_app._build_lifecycle_events(
+            decision,
+            tuple(reversed(decision.horizon_states)),
+            evaluation_app._model("ASSET_A"),
+            quotes,
+        )
+
+
+def test_lifecycle_receipt_binds_ordered_decision_and_outcomes():
+    events = _fixture_events()
+    receipt = object.__getattribute__(events[0], "_receipt_component")
+    other_receipt = object.__getattribute__(events[1], "_receipt_component")
+    forged = replace(
+        receipt,
+        parent_receipt_identities=(
+            receipt.parent_receipt_identities[0],
+            other_receipt.parent_receipt_identities[1],
+        ),
+        receipt_identity="",
+    )
+    with pytest.raises(ValueError, match="ordered outcome receipts"):
+        replace(events[0], _receipt_component=forged, receipt_identity=forged.receipt_identity)
+
+
+def test_lifecycle_seeds_nonzero_authoritative_physical_position():
+    decision, quotes = build_fixture_inputs()
+    object.__setattr__(decision, "current_position", (Decimal("0.25"),))
+    events = evaluation_app._build_lifecycle_events(
+        decision,
+        decision.horizon_states,
+        evaluation_app._model("ASSET_A"),
+        quotes,
+    )
+    assert events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
+    assert events[-1].physical_position == (("ASSET_A", Decimal("0.00")),)

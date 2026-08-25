@@ -943,13 +943,9 @@ class LifecycleEvent:
     _sleeve_financing_cost_component: tuple[tuple[str, Decimal], ...] | None = field(
         default=None, repr=False, compare=False
     )
-    _parent_horizon_state_components: tuple[HorizonState, ...] | None = field(
-        default=None, repr=False, compare=False
-    )
-    _horizon_state_components: tuple[HorizonState, ...] | None = field(
-        default=None, repr=False, compare=False
-    )
-    _boundary_times: tuple[datetime, ...] | None = field(default=None, repr=False, compare=False)
+    # Boundaries and lifecycle membership are derived from the event decision's
+    # authoritative HorizonState values; callers cannot supply a parallel state or
+    # boundary projection.
 
     def __post_init__(self) -> None:
         require_utc(self.event_time, "lifecycle event time")
@@ -1114,9 +1110,27 @@ class LifecycleEvent:
         if (
             receipt.semantic_identity != report.semantic_identity
             or receipt.closure_identity != report.closure_identity
-            or receipt.parent_verification_identity != decision.parent_verification_identity
         ):
-            raise ValueError("lifecycle event receipt does not bind event report and parent")
+            raise ValueError("lifecycle event receipt does not bind event report")
+        if (
+            receipt.parent_verification_identity == decision.parent_verification_identity
+            or not receipt.parent_receipt_identities
+            or receipt.parent_receipt_identities[0] != receipt.parent_verification_identity
+        ):
+            raise ValueError("lifecycle event receipt does not bind decision receipt")
+        expected_outcome_receipts = tuple(
+            VerificationReceipt(
+                artefact_contract=outcome.contract,
+                semantic_identity=outcome.semantic_identity,
+                closure_identity=outcome.closure_identity,
+                parent_verification_identity=receipt.parent_verification_identity,
+                verifier_contract="r3-e-lifecycle-verifier-v1",
+                checks=("canonical-bytes", "decision-parent", "create-only"),
+            ).receipt_identity
+            for outcome in outcomes
+        )
+        if receipt.parent_receipt_identities[1:] != expected_outcome_receipts:
+            raise ValueError("lifecycle event receipt does not bind ordered outcome receipts")
         if any(
             outcome.asset_id not in decision.asset_order
             or outcome.decision_semantic_identity != decision.semantic_identity
@@ -1320,57 +1334,27 @@ class LifecycleEvent:
         ):
             raise ValueError("lifecycle sleeve cost allocations do not cover authoritative sleeves")
 
-        if (
-            self._parent_horizon_state_components is None
-            or self._horizon_state_components is None
-            or self._boundary_times is None
-        ):
-            raise ValueError(
-                "lifecycle event requires authoritative horizon and boundary components"
-            )
-        horizon_states = tuple(self._parent_horizon_state_components)
-        event_states = tuple(self._horizon_state_components)
-        boundaries = tuple(self._boundary_times)
-        if not boundaries or tuple(sorted(set(boundaries))) != boundaries:
-            raise ValueError("lifecycle boundary times must be canonical and unique")
-        if self.event_time not in boundaries:
-            raise ValueError("lifecycle event time is not an authoritative boundary")
-        index = boundaries.index(self.event_time)
-        expected_next = boundaries[index + 1] if index + 1 < len(boundaries) else self.event_time
-        if self.next_event_time != expected_next:
-            raise ValueError("lifecycle next event time is not the authoritative boundary")
+        horizon_states = tuple(decision.horizon_states)
+        if not horizon_states:
+            raise ValueError("lifecycle event decision requires authoritative horizon states")
         if (
             tuple(sorted(horizon_states, key=lambda state: state.key.canonical_tuple))
             != horizon_states
         ):
             raise ValueError("lifecycle horizon states must use canonical sleeve order")
-        if len(set(state.key for state in horizon_states)) != len(horizon_states):
+        if len({state.key for state in horizon_states}) != len(horizon_states):
             raise ValueError("lifecycle horizon states must be unique")
-        for state in horizon_states:
-            if state.decision_time > self.event_time:
-                raise ValueError("lifecycle horizon state decision follows event time")
-        expected_states = (
-            tuple(
-                sorted(
-                    (state for state in horizon_states if state.expiry_time > self.event_time),
-                    key=lambda state: state.key.canonical_tuple,
-                )
-            )
-            + tuple(
-                sorted(
-                    (state for state in horizon_states if state.expiry_time == self.event_time),
-                    key=lambda state: state.key.canonical_tuple,
-                )
-            )
-            + tuple(
-                sorted(
-                    (state for state in horizon_states if state.expiry_time < self.event_time),
-                    key=lambda state: state.key.canonical_tuple,
-                )
-            )
-        )
-        if event_states != expected_states:
-            raise ValueError("lifecycle event horizon states do not bind authoritative membership")
+        decision_times = {state.decision_time for state in horizon_states}
+        if len(decision_times) != 1:
+            raise ValueError("lifecycle horizon states must share one authoritative t0")
+        t0 = next(iter(decision_times))
+        boundaries = tuple(sorted({t0, *(state.expiry_time for state in horizon_states)}))
+        if self.event_time != decision.decision_time or self.event_time not in boundaries:
+            raise ValueError("lifecycle event time is not the authoritative decision boundary")
+        index = boundaries.index(self.event_time)
+        expected_next = boundaries[index + 1] if index + 1 < len(boundaries) else self.event_time
+        if self.next_event_time != expected_next:
+            raise ValueError("lifecycle next event time is not the authoritative boundary")
         expected_active = tuple(
             sorted(
                 state.semantic_identity
@@ -1868,6 +1852,7 @@ class VerificationReceipt:
     parent_verification_identity: str
     verifier_contract: str
     checks: tuple[str, ...]
+    parent_receipt_identities: tuple[str, ...] = ()
     receipt_identity: str = ""
 
     def __post_init__(self) -> None:
@@ -1875,8 +1860,10 @@ class VerificationReceipt:
             (self.semantic_identity, "semantic identity"),
             (self.closure_identity, "closure identity"),
             (self.parent_verification_identity, "parent verification identity"),
+            *((value, "parent receipt identity") for value in self.parent_receipt_identities),
         ):
             _digest(value, name)
+        object.__setattr__(self, "parent_receipt_identities", tuple(self.parent_receipt_identities))
         if not self.artefact_contract or not self.verifier_contract or not self.checks:
             raise ValueError("receipt contract and check set are required")
         expected_identity = identity(self.canonical_payload)
@@ -1895,6 +1882,7 @@ class VerificationReceipt:
             "semantic_identity": self.semantic_identity,
             "closure_identity": self.closure_identity,
             "parent_verification_identity": self.parent_verification_identity,
+            "parent_receipt_identities": self.parent_receipt_identities,
             "verifier_contract": self.verifier_contract,
             "checks": self.checks,
         }
