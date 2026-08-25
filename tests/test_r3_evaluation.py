@@ -514,3 +514,15 @@ def test_lifecycle_crossing_and_no_trade_financing_are_explicit(tmp_path):
     assert later.physical_delta == (("ASSET_A", Decimal("-0.125")),)
     assert later.financing_cost[0][1] > Decimal("0")
     assert any(value != Decimal("0") for _, value in later.sleeve_financing_costs)
+
+
+@pytest.mark.parametrize(
+    "component_field",
+    ("_decision_component", "_outcome_components", "_report_component", "_receipt_component"),
+)
+def test_lifecycle_event_rejects_reused_component_from_another_event(tmp_path, component_field):
+    report = run_fixture(tmp_path, (5, 15, 30))
+    events = report.lifecycle_events
+    assert events is not None
+    with pytest.raises(ValueError, match=r"(identity chain|does not bind)"):
+        replace(events[0], **{component_field: getattr(events[1], component_field)})

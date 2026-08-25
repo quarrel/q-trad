@@ -40,7 +40,6 @@ from qtrad.domain.r3_evaluation import (
     DecisionClosure,
     EvaluationReport,
     LifecycleEvent,
-    OutcomeClosure,
     QuoteEvidence,
     SleeveAttribution,
     VerificationReceipt,
@@ -507,8 +506,7 @@ def _build_lifecycle_events(
     decision: DecisionClosure,
     lifecycle: tuple[HorizonState, ...],
     model: ContinuousCostModel,
-    outcomes: tuple[OutcomeClosure, ...],
-    report: EvaluationReport,
+    quotes: tuple[QuoteEvidence, ...],
 ) -> tuple[LifecycleEvent, ...]:
     """Replay configured virtual sleeves at each physical boundary."""
     if not lifecycle:
@@ -688,20 +686,23 @@ def _build_lifecycle_events(
         active_ids = tuple(sorted(state.semantic_identity for state in active))
         reviewed_ids = tuple(sorted(state.semantic_identity for state in reviewed))
         expired_ids = tuple(sorted(state.semantic_identity for state in expired))
-        event_report = replace(
-            report,
-            lifecycle_events=(),
-            horizon_state_identities=(),
-            decision_identity=event_decision.semantic_identity,
-            decision_closure_identity=event_decision.closure_identity,
-            risk_state=event_risk,
-            risk_state_identity=event_risk.semantic_identity,
+        event_outcomes = build_outcome_closures(
+            event_decision,
+            quotes,
+            latency=timedelta(seconds=1),
         )
+        event_report = evaluate_independently(
+            event_decision,
+            quotes,
+            latency=timedelta(seconds=1),
+            cost_holding_interval=interval,
+        )
+        event_report = replace(event_report, lifecycle_events=())
         event_receipt = VerificationReceipt(
             artefact_contract="qtrad-r3-lifecycle-event-report-v1",
             semantic_identity=event_report.semantic_identity,
             closure_identity=event_report.closure_identity,
-            parent_verification_identity=event_decision.target_verification_identity,
+            parent_verification_identity=event_decision.parent_verification_identity,
             verifier_contract="qtrad-r3-lifecycle-event-verifier-v1",
             checks=("canonical-bytes", "event-reconciliation", "create-only"),
         )
@@ -712,7 +713,7 @@ def _build_lifecycle_events(
                 "rounded_target": rounded_target,
                 "risk_state": event_risk,
                 "decision": event_decision,
-                "outcomes": outcomes,
+                "outcomes": event_outcomes,
                 "report": event_report,
                 "receipt": event_receipt,
             }
@@ -746,7 +747,7 @@ def _build_lifecycle_events(
                 _rounded_target_component=rounded_target,
                 _risk_state_component=event_risk,
                 _decision_component=event_decision,
-                _outcome_components=outcomes,
+                _outcome_components=event_outcomes,
                 _report_component=event_report,
                 _receipt_component=event_receipt,
                 _sleeve_transaction_cost_component=transaction_allocation,
@@ -784,8 +785,7 @@ def run_fixture(
         decision,
         decision.horizon_states,
         _model("ASSET_A"),
-        tuple(outcomes),
-        report,
+        quotes,
     )
     if lifecycle_events:
         report = replace(report, lifecycle_events=lifecycle_events)
