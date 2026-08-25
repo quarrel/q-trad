@@ -1641,15 +1641,23 @@ def test_native_opportunity_identity_matches_target(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("orphan_file", "orphan_directory", "orphan_symlink", "ancestor_symlink", "declared_symlink"),
+    (
+        "orphan_file",
+        "orphan_directory",
+        "orphan_symlink",
+        "symlinked_root",
+        "symlinked_parent",
+        "symlinked_grandparent",
+        "declared_symlink",
+    ),
 )
 def test_native_outcome_parts_tree_rejects_undeclared_and_symlink_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     import qtrad.application.r3_historical_exploratory as implementation
 
-    real_parent = tmp_path / "real"
-    real_parent.mkdir()
+    real_parent = tmp_path / "real" / "anchor"
+    real_parent.mkdir(parents=True)
     manifest_path = real_parent / "outcome-evidence.json"
     root = real_parent / "outcome-evidence.json.parts"
     root.mkdir()
@@ -1676,16 +1684,47 @@ def test_native_outcome_parts_tree_rejects_undeclared_and_symlink_paths(
         target = tmp_path / "symlink-target"
         target.write_text("target", encoding="utf-8")
         (root / "orphan").symlink_to(target)
-    elif mutation == "declared_symlink":
+    elif mutation == "symlinked_root":
+        real_root = root.with_name("outcome-evidence.json.parts.real")
+        root.rename(real_root)
+        root.symlink_to(real_root, target_is_directory=True)
+    elif mutation == "symlinked_parent":
+        alias = tmp_path / "parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        manifest_path = alias / manifest_path.name
+    elif mutation == "symlinked_grandparent":
+        alias = tmp_path / "grandparent-alias"
+        alias.symlink_to(tmp_path / "real", target_is_directory=True)
+        manifest_path = alias / "anchor" / manifest_path.name
+    else:
         real_part = root / "part-000000.real"
         part.rename(real_part)
         part.symlink_to(real_part.name)
-    else:
-        alias = tmp_path / "alias"
-        alias.symlink_to(real_parent, target_is_directory=True)
-        manifest_path = alias / manifest_path.name
 
     with pytest.raises(FreezeError):
         implementation._validate_native_outcome_parts_tree(
             manifest_path, references, manifest_relative_path="outcome-evidence.json"
         )
+
+
+def test_native_outcome_parts_tree_accepts_normal_physical_tree(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    parent = tmp_path / "normal"
+    parent.mkdir()
+    manifest_path = parent / "outcome-evidence.json"
+    root = parent / "outcome-evidence.json.parts"
+    root.mkdir()
+    part = root / "part-000000.json"
+    part.write_bytes(b"part")
+    references: list[Mapping[str, Any]] = [
+        {
+            "path": "outcome-evidence.json.parts/part-000000.json",
+            "sha256": hashlib.sha256(b"part").hexdigest(),
+            "row_count": 1,
+            "part_index": 0,
+        }
+    ]
+    implementation._validate_native_outcome_parts_tree(
+        manifest_path, references, manifest_relative_path="outcome-evidence.json"
+    )

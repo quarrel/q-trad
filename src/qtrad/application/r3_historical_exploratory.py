@@ -3464,6 +3464,23 @@ def _validate_native_authorised_tree(
         raise FreezeError(f"native target-source {kind} family does not match declarations")
 
 
+def _reject_native_outcome_symlink_components(
+    anchor: Path,
+    relative: PurePosixPath,
+) -> None:
+    """Reject symlinks from the authenticated anchor through a declared child."""
+    anchor_absolute = anchor.absolute()
+    ancestors = tuple(reversed((*anchor_absolute.parents, anchor_absolute)))
+    for component in ancestors:
+        if component.is_symlink():
+            raise ValueError("symlink in authenticated outcome anchor")
+    current = anchor_absolute.parent
+    for component_name in relative.parts:
+        current = current / component_name
+        if current.is_symlink():
+            raise ValueError("symlink in authenticated outcome path")
+
+
 def _validate_native_outcome_parts_tree(
     manifest_path: Path,
     references: Sequence[Any],
@@ -3490,11 +3507,11 @@ def _validate_native_outcome_parts_tree(
             raise FreezeError("native outcome part reference is duplicated")
         declared.add(relative_path.name)
         try:
-            _reject_symlink_components(manifest_path.parent, relative_path)
+            _reject_native_outcome_symlink_components(manifest_path, relative_path)
         except (OSError, ValueError) as exc:
             raise FreezeError("native outcome parts tree is unsafe") from exc
     try:
-        _reject_symlink_components(manifest_path.parent, root_relative)
+        _reject_native_outcome_symlink_components(manifest_path, root_relative)
         root = manifest_path.parent / root_relative
         entries = tuple(root.iterdir())
     except (OSError, ValueError) as exc:
@@ -3757,7 +3774,7 @@ def _load_native_outcome_values(
     """Stream tagged outcomes, retaining values only for the bounded selected IDs."""
     del fixture
     try:
-        _reject_symlink_components(path.parent, PurePosixPath(path.name))
+        _reject_native_outcome_symlink_components(path, PurePosixPath(path.name))
     except (OSError, ValueError) as exc:
         raise FreezeError("native outcome wrapper is missing or unsafe") from exc
     if not path.is_file():
