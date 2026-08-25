@@ -2535,3 +2535,24 @@ def test_native_scan_bound_is_checked_at_8192_rows_before_child_completion(
 
     assert len(scanned_kinds) == 8192
     assert set(scanned_kinds) == {"targets"}
+
+
+def test_native_retained_loader_lifetime_state_is_role_mask_bounded() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    state = metadata["selection_state"]
+    assert state["bounded_id_state_peak"] == len(rows)
+    assert state["full_payload_materialisation"] is False
+
+
+def test_native_retained_loader_uses_pop_reconciliation_and_explicit_disposal() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    source = inspect.getsource(implementation._load_native_retained_rows)
+    assert "target_index.pop(opportunity_id_bytes, None)" in source
+    assert "remaining_eligible_ids" not in source
+    assert "forecast_coverage" not in source
+    assert "del first_target_groups, forecast_role_masks" in source
+    assert "0b111" in source
