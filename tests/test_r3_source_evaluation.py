@@ -87,6 +87,15 @@ def test_source_class_mutation_is_rejected() -> None:
         replace(inputs.outcomes[0], entry=quote)
 
 
+def test_source_evidence_identity_substitution_is_rejected() -> None:
+    inputs = build_fixture_inputs()
+    entry = inputs.outcomes[0].entry
+    assert entry is not None
+    substituted = replace(entry, source_evidence_identity="c" * 64)
+    with pytest.raises(ValueError, match="quote does not bind"):
+        replace(inputs.outcomes[0], entry=substituted)
+
+
 def test_receive_time_and_executable_evidence_are_causal() -> None:
     inputs = build_fixture_inputs()
     entry = inputs.outcomes[0].entry
@@ -122,6 +131,7 @@ def test_historical_midpoint_cannot_emit_executable() -> None:
             source_product_id="IBKR-HIST",
             product_economics_identity="a" * 64,
             session_version="historical-v1",
+            source_evidence_identity="b" * 64,
             received_time=datetime(2026, 1, 1, tzinfo=UTC),
             bid=Decimal("100"),
             ask=Decimal("101"),

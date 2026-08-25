@@ -131,6 +131,7 @@ class SourceQuote:
     source_product_id: str
     product_economics_identity: str
     session_version: str
+    source_evidence_identity: str
     received_time: datetime
     midpoint: Decimal | None = None
     bid: Decimal | None = None
@@ -145,6 +146,7 @@ class SourceQuote:
         if type(self.source_class) is not MarketDataSourceClass:
             raise ValueError("quote source class must be a declared enum")
         _digest(self.product_economics_identity, "quote product economics identity")
+        _digest(self.source_evidence_identity, "quote source evidence identity")
         require_utc(self.received_time, "quote received time")
         provided_sides = self.bid is not None or self.ask is not None
         if provided_sides:
@@ -192,6 +194,7 @@ class SourceQuote:
             "source_product_id": self.source_product_id,
             "product_economics_identity": self.product_economics_identity,
             "session_version": self.session_version,
+            "source_evidence_identity": self.source_evidence_identity,
             "received_time": self.received_time,
             "midpoint": self.midpoint,
             "bid": self.bid,
@@ -265,6 +268,7 @@ class SourceAlignedOutcome:
                 or quote.source_product_id != self.authority.source_product_id
                 or quote.product_economics_identity != self.authority.product_economics_identity
                 or quote.session_version != self.authority.session_version
+                or quote.source_evidence_identity != self.authority.source_evidence_identity
             ):
                 raise ValueError("quote does not bind source/product/economics/session authority")
             if self.disposition is SourceOutcomeDisposition.ACCEPTED and (
