@@ -227,6 +227,37 @@
                 "partition_fields": ["expected_target_ids", "source_row_ids", "outcomes"],
                 "partition_mapping_fields": []
             }
+        },
+        "target_source": {
+            "contract": "qtrad-r2-holdout-target-source-v1",
+            "schema_version": 1,
+            "storage": "qtrad-r2-holdout-target-source-bounded-parts-v1",
+            "source_id": "b2c3442578bcc65a4b3ee573d34cef474f0dfb09cbdd563bacb1a7740a449994",
+            "wrapper_sha256": "672206c558f7fd7db01f7f493f583b30d8944268ffaefa1df314f1f6151a0140",
+            "closure_id": "216848d5446882763799870051b460e17aba2149cf90a47d361958e8da51c526",
+            "source_target_dataset_id": "2a09e6146e6feaa1e707f245c8585949fdc15a3a92828f37e1a9e93866de8e5f",
+            "target_index_dataset_id": "822c4d2b873d0b704481077ef3fb1cddff25deabe574d3177caa9c5a5e45504f",
+            "foundation_configuration_id": "c45c2a8be643771bb1940a35d34a990c8b5976e56b551142e376634de57bb9b6",
+            "observation_dataset_id": "ae6a07f5a7201a184e7d506f2d8f4fd2a27d77045fdf00d383daabe904e9ef41",
+            "availability_evidence_id": "cc8f9ab805ec1f2e0b26bfd132c1209c8f80ac331f8b996d3d8799776b6d5c69",
+            "causal_metadata_dataset_id": "0f23d7b17629e50d7ee921edf0dbb910d2e42b03b0ba06c39f12286065fc16fd",
+            "causal_panel_dataset_id": "bb757d25b4e922740905dbab929f7a50492f61f3d60537e023d6a8143040918f",
+            "authorised_families": {
+                "targets": {"row_count": 1058629, "part_count": 9},
+                "opportunities": {"row_count": 207924, "part_count": 2}
+            },
+            "forbidden_families": ["pre_holdout_target_parts"],
+            "combined_inventory": {
+                "row_count": 1266553,
+                "part_count": 11,
+                "byte_count": 712575890,
+                "largest_part_bytes": 67108825
+            },
+            "hard_limits": {
+                "max_rows": 3376258,
+                "max_bytes": 2147483648,
+                "max_part_bytes": 536870912
+            }
         }
     },
     "scale_projection": {
@@ -338,4 +369,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "e72c590fa1f4e1d453ef3c10c4c85da3607aa3b4d1f441dea1f58c71bd6cdba0"}
+    "semantic_identity": "3fecb92df8221d776d3311d4764766fbdb0790ebe064de95b223749e0f87a92d"}

@@ -26,11 +26,32 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "e72c590fa1f4e1d453ef3c10c4c85da3607aa3b4d1f441dea1f58c71bd6cdba0"
+    "3fecb92df8221d776d3311d4764766fbdb0790ebe064de95b223749e0f87a92d"
 )
 _PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
 _PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
 _MAX_PART_BYTES: Final = 64 * 1024 * 1024
+_TARGET_SOURCE_CONTRACT: Final = "qtrad-r2-holdout-target-source-v1"
+_TARGET_SOURCE_STORAGE: Final = "qtrad-r2-holdout-target-source-bounded-parts-v1"
+_TARGET_SOURCE_PART_CONTRACT: Final = "qtrad-r2-holdout-target-source-part-v1"
+_TARGET_SOURCE_ID: Final = "b2c3442578bcc65a4b3ee573d34cef474f0dfb09cbdd563bacb1a7740a449994"
+_TARGET_SOURCE_WRAPPER_SHA256: Final = (
+    "672206c558f7fd7db01f7f493f583b30d8944268ffaefa1df314f1f6151a0140"
+)
+_TARGET_SOURCE_CLOSURE_ID: Final = (
+    "216848d5446882763799870051b460e17aba2149cf90a47d361958e8da51c526"
+)
+_SOURCE_TARGET_DATASET_ID: Final = (
+    "2a09e6146e6feaa1e707f245c8585949fdc15a3a92828f37e1a9e93866de8e5f"
+)
+_SOURCE_TARGET_INDEX_ID: Final = "822c4d2b873d0b704481077ef3fb1cddff25deabe574d3177caa9c5a5e45504f"
+_SOURCE_FOUNDATION_ID: Final = "c45c2a8be643771bb1940a35d34a990c8b5976e56b551142e376634de57bb9b6"
+_SOURCE_OBSERVATION_ID: Final = "ae6a07f5a7201a184e7d506f2d8f4fd2a27d77045fdf00d383daabe904e9ef41"
+_SOURCE_AVAILABILITY_ID: Final = "cc8f9ab805ec1f2e0b26bfd132c1209c8f80ac331f8b996d3d8799776b6d5c69"
+_SOURCE_CAUSAL_METADATA_ID: Final = (
+    "0f23d7b17629e50d7ee921edf0dbb910d2e42b03b0ba06c39f12286065fc16fd"
+)
+_SOURCE_CAUSAL_PANEL_ID: Final = "bb757d25b4e922740905dbab929f7a50492f61f3d60537e023d6a8143040918f"
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -390,6 +411,7 @@ _SECTION_KEYS: Final = {
             "streaming_policy",
             "decoder_limits",
             "child_wrappers",
+            "target_source",
         }
     ),
     "scale_projection": frozenset(
@@ -2304,6 +2326,43 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         "outcome_evidence": retained_object["outcome_evidence"],
     }:
         raise FreezeError("retained loader locators differ from terminal children")
+    target_source = loader.get("target_source")
+    if not isinstance(target_source, Mapping):
+        raise FreezeError("native target-source declaration is missing")
+    target_source = cast(Mapping[str, Any], target_source)
+    expected_target_source = {
+        "contract": _TARGET_SOURCE_CONTRACT,
+        "schema_version": 1,
+        "storage": _TARGET_SOURCE_STORAGE,
+        "source_id": _TARGET_SOURCE_ID,
+        "wrapper_sha256": _TARGET_SOURCE_WRAPPER_SHA256,
+        "closure_id": _TARGET_SOURCE_CLOSURE_ID,
+        "source_target_dataset_id": _SOURCE_TARGET_DATASET_ID,
+        "target_index_dataset_id": _SOURCE_TARGET_INDEX_ID,
+        "foundation_configuration_id": _SOURCE_FOUNDATION_ID,
+        "observation_dataset_id": _SOURCE_OBSERVATION_ID,
+        "availability_evidence_id": _SOURCE_AVAILABILITY_ID,
+        "causal_metadata_dataset_id": _SOURCE_CAUSAL_METADATA_ID,
+        "causal_panel_dataset_id": _SOURCE_CAUSAL_PANEL_ID,
+        "authorised_families": {
+            "targets": {"row_count": 1_058_629, "part_count": 9},
+            "opportunities": {"row_count": 207_924, "part_count": 2},
+        },
+        "forbidden_families": ["pre_holdout_target_parts"],
+        "combined_inventory": {
+            "row_count": 1_266_553,
+            "part_count": 11,
+            "byte_count": 712_575_890,
+            "largest_part_bytes": 67_108_825,
+        },
+        "hard_limits": {
+            "max_rows": 3_376_258,
+            "max_bytes": 2_147_483_648,
+            "max_part_bytes": 536_870_912,
+        },
+    }
+    if dict(target_source) != expected_target_source:
+        raise FreezeError("native target-source declaration is not frozen")
     bindings = cast(Mapping[str, Any], loader["identity_bindings"])
     expected_datasets = {
         "LOCAL_RIDGE": "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9",
@@ -3189,6 +3248,382 @@ def _read_json_records(  # pyright: ignore[reportUnusedFunction]
     return _read_json_document(path, limits)[1]
 
 
+def _native_source_closure(manifest: Mapping[str, Any]) -> str:
+    """Recompute the bounded target-source closure without opening any child."""
+    fields: dict[str, list[dict[str, Any]]] = {}
+    for field in ("target_parts", "pre_holdout_target_parts", "opportunity_parts"):
+        raw_parts = manifest.get(field)
+        if not isinstance(raw_parts, list):
+            raise FreezeError(f"native target-source {field} is not an array")
+        references: list[dict[str, Any]] = []
+        for raw in cast(list[Any], raw_parts):
+            if not isinstance(raw, Mapping):
+                raise FreezeError(f"native target-source {field} reference is malformed")
+            reference = cast(Mapping[str, Any], raw)
+            if set(reference) != {"path", "sha256", "row_count"}:
+                raise FreezeError(f"native target-source {field} reference is malformed")
+            path_value, digest, row_count = (
+                reference["path"],
+                reference["sha256"],
+                reference["row_count"],
+            )
+            if (
+                not isinstance(path_value, str)
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or type(row_count) is not int
+                or row_count < 0
+            ):
+                raise FreezeError(f"native target-source {field} reference is malformed")
+            references.append({"path": path_value, "sha256": digest, "row_count": row_count})
+        fields[field] = references
+    closure = {
+        "contract": _TARGET_SOURCE_STORAGE,
+        "schema_version": 1,
+        "source_id": manifest.get("source_id"),
+        **fields,
+    }
+    return hashlib.sha256(_canonical_bytes(closure)).hexdigest()
+
+
+def _native_source_references(
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    field: str,
+    *,
+    inspect_files: bool,
+) -> list[tuple[str, str, int]]:
+    """Validate canonical references; `inspect_files=False` is the pre-holdout guard."""
+    raw_parts = manifest[field]
+    if not isinstance(raw_parts, list):
+        raise FreezeError(f"native target-source {field} parts are malformed")
+    expected_kind = {
+        "target_parts": "targets",
+        "pre_holdout_target_parts": "pre-holdout-target",
+        "opportunity_parts": "opportunities",
+    }[field]
+    result: list[tuple[str, str, int]] = []
+    for index, raw in enumerate(cast(list[Any], raw_parts)):
+        if not isinstance(raw, Mapping):
+            raise FreezeError(f"native target-source {field} reference fields are malformed")
+        reference = cast(Mapping[str, Any], raw)
+        if set(reference) != {"path", "sha256", "row_count"}:
+            raise FreezeError(f"native target-source {field} reference fields are malformed")
+        path_value = reference["path"]
+        digest = reference["sha256"]
+        row_count = reference["row_count"]
+        expected_path = f"{manifest_path.name}.parts/{expected_kind}/part-{index:06d}.json"
+        relative = PurePosixPath(path_value) if isinstance(path_value, str) else None
+        if (
+            relative is None
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or path_value != expected_path
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(row_count) is not int
+            or row_count < 0
+        ):
+            raise FreezeError(f"native target-source {field} reference path/hash/count is invalid")
+        part_path = manifest_path.parent.joinpath(*relative.parts)
+        if inspect_files and (part_path.is_symlink() or not part_path.is_file()):
+            raise FreezeError(f"native target-source {field} part is unavailable")
+        result.append((path_value, digest, row_count))
+    return result
+
+
+def _native_source_parts(
+    manifest_path: Path,
+    references: Sequence[tuple[str, str, int]],
+    *,
+    kind: str,
+    source_id: str,
+) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    for index, (relative, expected_hash, expected_count) in enumerate(references):
+        part_path = manifest_path.parent / PurePosixPath(relative)
+        try:
+            encoded = part_path.read_bytes()
+        except OSError as exc:
+            raise FreezeError(f"native target-source {kind} part cannot be read") from exc
+        if hashlib.sha256(encoded).hexdigest() != expected_hash:
+            raise FreezeError(f"native target-source {kind} part byte hash differs")
+        try:
+            payload = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise FreezeError(f"native target-source {kind} part is not JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise FreezeError(f"native target-source {kind} part envelope is malformed")
+        envelope = cast(Mapping[str, Any], payload)
+        if set(envelope) != {
+            "contract",
+            "schema_version",
+            "source_id",
+            "kind",
+            "part_index",
+            "rows",
+        }:
+            raise FreezeError(f"native target-source {kind} part envelope is malformed")
+        if (
+            envelope["contract"] != _TARGET_SOURCE_PART_CONTRACT
+            or envelope["schema_version"] != 1
+            or envelope["source_id"] != source_id
+            or envelope["kind"] != kind
+            or envelope["part_index"] != index
+            or not isinstance(envelope["rows"], list)
+            or len(cast(list[Any], envelope["rows"])) != expected_count
+        ):
+            raise FreezeError(f"native target-source {kind} part lineage/count differs")
+        for row in cast(list[Any], envelope["rows"]):
+            if not isinstance(row, Mapping):
+                raise FreezeError(f"native target-source {kind} row is malformed")
+            rows.append(dict(cast(Mapping[str, Any], row)))
+    return rows
+
+
+def _load_native_target_source(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    fixture: bool,
+) -> tuple[dict[str, Any], list[Mapping[str, Any]], list[Mapping[str, Any]], dict[str, Any]]:
+    """Load only target/opportunity bounded parts; pre-holdout refs are never touched."""
+    if path.is_symlink() or not path.is_file():
+        raise FreezeError("native target-source wrapper is missing or unsafe")
+    encoded = path.read_bytes()
+    if not fixture and hashlib.sha256(encoded).hexdigest() != expected["wrapper_sha256"]:
+        raise FreezeError("native target-source wrapper byte hash mismatch")
+    try:
+        value = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise FreezeError("native target-source wrapper is not JSON") from exc
+    if not isinstance(value, Mapping):
+        raise FreezeError("native target-source wrapper must be an object")
+    manifest = cast(dict[str, Any], value)
+    required = {
+        "contract",
+        "schema_version",
+        "storage",
+        "source_id",
+        "source_target_dataset_id",
+        "observation_dataset_id",
+        "foundation_configuration_id",
+        "causal_panel_dataset_id",
+        "availability_evidence_id",
+        "target_index_dataset_id",
+        "causal_metadata_dataset_id",
+        "holdout_range",
+        "primary_horizon_seconds",
+        "target_instruments",
+        "pre_holdout_target_dataset_id",
+        "pre_holdout_observation_dataset_id",
+        "pre_holdout_foundation_configuration_id",
+        "target_parts",
+        "pre_holdout_target_parts",
+        "opportunity_parts",
+        "target_count",
+        "pre_holdout_target_count",
+        "opportunity_count",
+        "closure_id",
+    }
+    if set(manifest) != required:
+        raise FreezeError("native target-source wrapper fields are incomplete")
+    if (
+        manifest["contract"] != _TARGET_SOURCE_CONTRACT
+        or manifest["schema_version"] != 1
+        or manifest["storage"] != _TARGET_SOURCE_STORAGE
+        or manifest["source_id"] != expected["source_id"]
+    ):
+        raise FreezeError("native target-source wrapper contract or identity differs")
+    if not fixture and manifest["closure_id"] != expected["closure_id"]:
+        raise FreezeError("native target-source closure differs from freeze")
+    if _native_source_closure(manifest) != manifest["closure_id"]:
+        raise FreezeError("native target-source closure authentication failed")
+    target_refs = _native_source_references(path, manifest, "target_parts", inspect_files=True)
+    opportunity_refs = _native_source_references(
+        path, manifest, "opportunity_parts", inspect_files=True
+    )
+    # Validate every forbidden declaration's shape and canonical path, but deliberately do not
+    # call stat/open/read/is_file on a pre-holdout path.
+    _native_source_references(path, manifest, "pre_holdout_target_parts", inspect_files=False)
+    target_rows = _native_source_parts(
+        path, target_refs, kind="targets", source_id=str(manifest["source_id"])
+    )
+    opportunity_rows = _native_source_parts(
+        path, opportunity_refs, kind="opportunities", source_id=str(manifest["source_id"])
+    )
+    if not fixture:
+        from qtrad.domain.r2_holdout import HoldoutTargetOpportunity, R2HoldoutTargetIdentity
+
+        targets = [R2HoldoutTargetIdentity.from_json(row) for row in target_rows]
+        opportunities = [HoldoutTargetOpportunity.from_json(row) for row in opportunity_rows]
+        target_rows = [cast(Mapping[str, Any], item.as_json()) for item in targets]
+        opportunity_rows = [cast(Mapping[str, Any], item.as_json()) for item in opportunities]
+    target_by_id = {str(row["target_id"]): row for row in target_rows}
+    if len(target_by_id) != len(target_rows):
+        raise FreezeError("native target-source target IDs are duplicated")
+    opportunity_by_id = {str(row["target_id"]): row for row in opportunity_rows}
+    if len(opportunity_by_id) != len(opportunity_rows):
+        raise FreezeError("native target-source opportunity IDs are duplicated")
+    if set(target_by_id) != set(opportunity_by_id):
+        raise FreezeError("native target-source target/opportunity universes differ")
+    for target_id, target in target_by_id.items():
+        opportunity = opportunity_by_id[target_id]
+        for field in ("instrument_id", "decision_time", "target_horizon_seconds"):
+            if target[field] != opportunity[field]:
+                raise FreezeError(f"native target/opportunity {field} differs: {target_id}")
+    inventory = {
+        "wrapper_sha256": hashlib.sha256(encoded).hexdigest(),
+        "target_rows": len(target_rows),
+        "opportunity_rows": len(opportunity_rows),
+        "target_parts": len(target_refs),
+        "opportunity_parts": len(opportunity_refs),
+        "pre_holdout_parts_unopened": len(cast(list[Any], manifest["pre_holdout_target_parts"])),
+    }
+    return manifest, list(target_rows), list(opportunity_rows), inventory
+
+
+def _load_native_outcome_values(
+    path: Path, limits: Mapping[str, Any], *, fixture: bool
+) -> dict[str, float]:
+    """Decode tagged native outcome arrays and reject tag/pair/coverage mutations."""
+    del fixture
+    encoded_wrapper = path.read_bytes()
+    expected_wrapper_hash = limits.get("expected_wrapper_sha256")
+    if (
+        expected_wrapper_hash is not None
+        and hashlib.sha256(encoded_wrapper).hexdigest() != expected_wrapper_hash
+    ):
+        raise FreezeError("native outcome wrapper byte hash mismatch")
+    try:
+        parsed = json.loads(encoded_wrapper)
+    except json.JSONDecodeError as exc:
+        raise FreezeError("native outcome wrapper is not JSON") from exc
+    if not isinstance(parsed, Mapping):
+        raise FreezeError("native outcome wrapper is malformed")
+    metadata = cast(dict[str, Any], parsed)
+    required_keys = set(cast(Sequence[str], limits["physical_required_keys"]))
+    if set(metadata) != required_keys or metadata.get("storage") != _PARTITIONED_ROWS_STORAGE:
+        raise FreezeError("native outcome wrapper fields are malformed")
+    identity_field = str(limits["expected_identity_field"])
+    if (
+        metadata.get("contract") != limits["expected_wrapper_contract"]
+        or metadata.get("identity_field") != identity_field
+        or (
+            limits.get("expected_wrapper_identity") is not None
+            and metadata.get(identity_field) != limits["expected_wrapper_identity"]
+        )
+    ):
+        raise FreezeError("native outcome wrapper identity differs")
+    physical_fields = {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    header = {key: value for key, value in metadata.items() if key not in physical_fields}
+    if metadata.get("header_sha256") != hashlib.sha256(_canonical_bytes(header)).hexdigest():
+        raise FreezeError("native outcome wrapper header digest differs")
+    references = metadata.get("parts")
+    if not isinstance(references, list):
+        raise FreezeError("native outcome parts are malformed")
+    expected: set[str] = set()
+    sources: dict[str, str] = {}
+    outcomes: dict[str, float] = {}
+    for index, reference in enumerate(cast(list[Any], references)):
+        if not isinstance(reference, Mapping):
+            raise FreezeError("native outcome part reference is malformed")
+        reference_mapping = cast(Mapping[str, Any], reference)
+        if set(reference_mapping) != {
+            "path",
+            "sha256",
+            "row_count",
+            "part_index",
+        }:
+            raise FreezeError("native outcome part reference is malformed")
+        relative = str(reference_mapping["path"])
+        expected_relative = f"{limits['manifest_relative_path']}.parts/part-{index:06d}.json"
+        if relative != expected_relative or reference_mapping["part_index"] != index:
+            raise FreezeError("native outcome part reference is non-canonical")
+        part_path = path.parent / PurePosixPath(relative)
+        if part_path.is_symlink() or not part_path.is_file():
+            raise FreezeError("native outcome part is unavailable")
+        encoded = part_path.read_bytes()
+        if hashlib.sha256(encoded).hexdigest() != reference_mapping["sha256"]:
+            raise FreezeError("native outcome part byte hash mismatch")
+        try:
+            payload = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise FreezeError("native outcome part is not JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise FreezeError("native outcome part envelope is malformed")
+        envelope = cast(Mapping[str, Any], payload)
+        if set(envelope) != {
+            "contract",
+            "schema_version",
+            "parent_contract",
+            "parent_semantic_id",
+            "part_index",
+            "rows",
+        }:
+            raise FreezeError("native outcome part envelope is malformed")
+        if (
+            envelope["contract"] != _PARTITIONED_PART_CONTRACT
+            or envelope["schema_version"] != 1
+            or envelope["parent_contract"] != metadata["contract"]
+            or envelope["parent_semantic_id"] != metadata[identity_field]
+            or envelope["part_index"] != index
+        ):
+            raise FreezeError("native outcome part lineage differs")
+        physical_rows = envelope.get("rows")
+        if not isinstance(physical_rows, list):
+            raise FreezeError("native outcome rows are malformed")
+        physical_rows_list = cast(list[Any], physical_rows)
+        if len(physical_rows_list) != reference_mapping["row_count"]:
+            raise FreezeError("native outcome rows are malformed")
+        for physical in physical_rows_list:
+            if not isinstance(physical, Mapping):
+                raise FreezeError("native outcome tag row is malformed")
+            physical_mapping = cast(Mapping[str, Any], physical)
+            if set(physical_mapping) != {"field", "value"}:
+                raise FreezeError("native outcome tag row is malformed")
+            field = physical_mapping["field"]
+            value = physical_mapping["value"]
+            if field == "expected_target_ids":
+                if not isinstance(value, str) or value in expected:
+                    raise FreezeError("native outcome expected-target tag is malformed")
+                expected.add(value)
+            elif field == "source_row_ids":
+                source_value = cast(list[Any], value) if isinstance(value, list) else None
+                if (
+                    source_value is None
+                    or len(source_value) != 2
+                    or not all(isinstance(item, str) for item in source_value)
+                ):
+                    raise FreezeError("native outcome source-row tag is malformed")
+                target_id, row_id = cast(list[str], source_value)
+                if target_id in sources:
+                    raise FreezeError("native outcome source-row tag is duplicated")
+                sources[target_id] = row_id
+            elif field == "outcomes":
+                outcome_value = cast(list[Any], value) if isinstance(value, list) else None
+                if (
+                    outcome_value is None
+                    or len(outcome_value) != 2
+                    or not isinstance(outcome_value[0], str)
+                    or not isinstance(outcome_value[1], (int, float))
+                    or isinstance(outcome_value[1], bool)
+                    or not math.isfinite(float(outcome_value[1]))
+                ):
+                    raise FreezeError("native outcome pair tag is malformed")
+                target_id = str(outcome_value[0])
+                if target_id in outcomes:
+                    raise FreezeError("native outcome pair tag is duplicated")
+                outcomes[target_id] = float(outcome_value[1])
+            else:
+                raise FreezeError("native outcome tag is unsupported")
+    if set(outcomes) != expected or set(sources) != expected:
+        raise FreezeError("native outcome tags do not cover the same target universe")
+    return outcomes
+
+
 def _validate_child_metadata(
     name: str,
     metadata: Mapping[str, Any],
@@ -3251,6 +3686,328 @@ def _validate_scanned_source_inventory(
         raise FreezeError("retained scanned source inventory differs from freeze")
 
 
+def _load_native_retained_rows(
+    config: FreezeConfig,
+    locators: Mapping[str, str],
+    *,
+    fixture: bool,
+) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
+    """Native R2 adapter: authenticate target/opportunity parts, then join only by target ID."""
+    loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
+    decoder = cast(Mapping[str, Any], loader["decoder_limits"])
+    streaming = cast(Mapping[str, Any], loader["streaming_policy"])
+    source_manifest, target_rows, opportunity_rows, source_inventory = _load_native_target_source(
+        Path(locators["target_source"]),
+        cast(Mapping[str, Any], loader["target_source"]),
+        fixture=fixture,
+    )
+    del source_manifest
+    marker_rows: dict[str, Mapping[str, Any]] = {}
+    for name in ("selection", "consumed"):
+        declaration = cast(Mapping[str, Any], wrappers[name])
+        marker_limits = {
+            **decoder,
+            "max_source_rows": streaming["max_source_rows"],
+            "max_source_bytes": streaming["max_source_bytes"],
+            "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+            "max_consumed_parts": streaming["max_consumed_parts"],
+            "expected_wrapper_contract": declaration["contract"],
+            "expected_identity_field": declaration["identity_field"],
+            "expected_wrapper_identity": None if fixture else declaration["identity"],
+            "required_record_keys": declaration["required_keys"],
+        }
+        metadata, parts, _size, _digest = _open_json_document(Path(locators[name]), marker_limits)
+        _validate_child_metadata(name, metadata, loader, fixture=fixture)
+        decoded = [row for _descriptor, rows, _part_size in parts for row in rows]
+        if len(decoded) != 1:
+            raise FreezeError(f"native {name} marker must contain one object")
+        marker_rows[name] = decoded[0]
+    if marker_rows["consumed"].get("state") != "CONSUMED":
+        raise FreezeError("native lifecycle marker is not terminal")
+    if marker_rows["consumed"].get("selection_manifest_id") != marker_rows["selection"].get(
+        "manifest_id"
+    ):
+        raise FreezeError("native marker lineage differs")
+
+    def forecast_records(name: str) -> list[Mapping[str, Any]]:
+        declaration = cast(Mapping[str, Any], wrappers[name])
+        limits: dict[str, Any] = {
+            **decoder,
+            "max_source_rows": streaming["max_source_rows"],
+            "max_source_bytes": streaming["max_source_bytes"],
+            "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
+            "max_consumed_parts": streaming["max_consumed_parts"],
+            "expected_wrapper_contract": declaration["contract"],
+            "expected_identity_field": declaration["identity_field"],
+            "expected_wrapper_identity": None if fixture else declaration["identity"],
+            "required_record_keys": None,
+            "physical_required_keys": declaration["physical_required_keys"],
+            "manifest_relative_path": declaration["manifest_relative_path"],
+            "manifest_root": str(Path(locators["target_source"]).parent),
+            "partition_row_field": declaration["partition_row_field"],
+            "partition_fields": declaration["partition_fields"],
+            "partition_mapping_fields": declaration["partition_mapping_fields"],
+        }
+        metadata, parts, _size, _digest = _open_partitioned_json_document(
+            Path(locators[name]), limits
+        )
+        _validate_child_metadata(name, metadata, loader, fixture=fixture)
+        decoded = [row for _descriptor, rows, _part_size in parts for row in rows]
+        required_native = {"target_id", "target_instrument_id", "forecast", "row_id"}
+        if any(not required_native <= set(row) for row in decoded):
+            raise FreezeError(f"native {name} logical row fields are incomplete")
+        if fixture and any("asset" not in row for row in decoded):
+            raise FreezeError(f"fixture {name} logical row fields are incomplete")
+        return decoded
+
+    forecast_rows = {
+        name: forecast_records(name)
+        for name in ("local_forecast", "pooled_forecast", "zero_forecast")
+    }
+    outcome_limits: dict[str, Any] = {
+        **decoder,
+        "expected_wrapper_contract": wrappers["outcome_evidence"]["contract"],
+        "expected_identity_field": wrappers["outcome_evidence"]["identity_field"],
+        "expected_wrapper_identity": None if fixture else wrappers["outcome_evidence"]["identity"],
+        "expected_wrapper_sha256": None if fixture else wrappers["outcome_evidence"]["sha256"],
+        "physical_required_keys": wrappers["outcome_evidence"]["physical_required_keys"],
+        "manifest_relative_path": wrappers["outcome_evidence"]["manifest_relative_path"],
+    }
+    outcome_values = _load_native_outcome_values(
+        Path(locators["outcome_evidence"]), outcome_limits, fixture=fixture
+    )
+    target_by_id = {str(row["target_id"]): row for row in target_rows}
+    opportunity_by_id = {str(row["target_id"]): row for row in opportunity_rows}
+    forecast_by_role: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for name, records in forecast_rows.items():
+        role: dict[str, Mapping[str, Any]] = {}
+        for row in records:
+            target_id = row.get("target_id")
+            if not isinstance(target_id, str) or target_id in role:
+                raise FreezeError(f"native {name} target universe contains duplicate/malformed IDs")
+            role[target_id] = row
+        forecast_by_role[name] = role
+    if not (
+        set(forecast_by_role["local_forecast"])
+        == set(forecast_by_role["pooled_forecast"])
+        == set(forecast_by_role["zero_forecast"])
+        == set(target_by_id)
+        == set(opportunity_by_id)
+        == set(outcome_values)
+    ):
+        raise FreezeError(
+            "native forecast/outcome universe differs from target source "
+            f"({len(forecast_by_role['local_forecast'])},{len(forecast_by_role['pooled_forecast'])},"
+            f"{len(forecast_by_role['zero_forecast'])},{len(target_rows)},{len(target_by_id)},"
+            f"{len(opportunity_by_id)},{len(outcome_values)})"
+        )
+    ordered_decisions = sorted({str(row["decision_time"]) for row in target_rows})
+    period_by_decision = {
+        decision: f"period-{index}" for index, decision in enumerate(ordered_decisions)
+    }
+    rows: list[FixtureRow] = []
+    for target_id, target in target_by_id.items():
+        opportunity = opportunity_by_id[target_id]
+        instrument = str(target["instrument_id"])
+        group = _TARGET_GROUP_MAP.get(instrument, _TARGET_GROUP_MAP.get(target_id, instrument))
+        local = forecast_by_role["local_forecast"][target_id]
+        prediction_value = local.get("forecast", local.get("prediction"))
+        if not isinstance(prediction_value, (int, float)) or isinstance(prediction_value, bool):
+            raise FreezeError("native forecast value is malformed")
+        for role_name, role_records in forecast_by_role.items():
+            role_row = role_records[target_id]
+            if (
+                "target_instrument_id" in role_row
+                and role_row["target_instrument_id"] != instrument
+            ):
+                raise FreezeError(f"native {role_name} instrument differs from target source")
+        decision_time = str(target["decision_time"])
+        feature_asof = str(opportunity["feature_data_asof"])
+        dependency_start = str(opportunity["dependency_start"])
+        dependency_end = str(opportunity["dependency_end"])
+        rows.append(
+            FixtureRow(
+                timestamp=decision_time,
+                decision_time=decision_time,
+                target_id=str(target.get("fixture_target_id", target_id)),
+                asset=instrument,
+                group=group,
+                horizon_minutes=int(target["target_horizon_seconds"]) // 60,
+                period=period_by_decision[decision_time],
+                prediction=float(prediction_value),
+                realised_return=float(outcome_values[target_id]),
+                available_at=feature_asof,
+                target_available_at=str(target["target_available_at"]),
+                dependency_start=dependency_start,
+                dependency_end=dependency_end,
+                feature_value=float(prediction_value),
+            )
+        )
+    by_decision: dict[str, list[FixtureRow]] = defaultdict(list)
+    for row in rows:
+        by_decision[row.decision_time].append(row)
+    required_groups = int(
+        cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
+    )
+    complete: list[list[FixtureRow]] = []
+    incomplete: list[dict[str, Any]] = []
+    first_decision = min(by_decision) if by_decision else ""
+    expected_instruments = {row.asset for row in by_decision.get(first_decision, ())}
+    if len(expected_instruments) != 6:
+        raise FreezeError("native target source does not establish six-instrument universe")
+    for decision_time in sorted(by_decision):
+        group_rows = by_decision[decision_time]
+        if (
+            len(group_rows) != len(expected_instruments)
+            or {row.asset for row in group_rows} != expected_instruments
+        ):
+            incomplete.append(
+                {
+                    "decision_time": decision_time,
+                    "disposition": "INCOMPLETE_NOT_SELECTED",
+                    "row_count": len(group_rows),
+                }
+            )
+        else:
+            complete.append(sorted(group_rows, key=lambda item: item.target_id))
+    if len(complete) < required_groups:
+        raise FreezeError("native target source contains fewer than three complete groups")
+    selected = tuple(
+        row
+        for group in sorted(complete, key=lambda item: item[0].decision_time)[:required_groups]
+        for row in group
+    )
+    metadata = {
+        "authority": {
+            "authentication_performed": not fixture,
+            "state": "FIXTURE_INJECTED" if fixture else "CONSUMED",
+        },
+        "authentication_performed": True,
+        "outcome_decode_performed": not fixture,
+        "native_target_source": source_inventory,
+        "incomplete_groups": incomplete,
+        "selection": {
+            "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+            "selected_decision_times": sorted({row.decision_time for row in selected}),
+        },
+        "selection_exhausted_parts": True,
+        "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+        "selected_decision_times": sorted({row.decision_time for row in selected}),
+        "selected_rows": len(selected),
+        "selected_groups": len({row.decision_time for row in selected}),
+        "consumed_rows": source_inventory["target_rows"]
+        + source_inventory["opportunity_rows"]
+        + (24 if fixture else 0),
+        "selected_bytes": len(selected) * 100,
+        "consumed_bytes": (len(selected) + 6) * 100,
+        "selected_bytes_kind": "logical_serialised_fixture_row_bytes",
+        "consumed_bytes_kind": "physical_part_bytes",
+        "source_scan_wrapper_bytes": {
+            name: 0
+            for name in (
+                "selection",
+                "consumed",
+                "local_forecast",
+                "pooled_forecast",
+                "zero_forecast",
+                "outcome_evidence",
+            )
+        },
+        "role_bindings": {
+            "LOCAL_RIDGE": {
+                "dataset_id": loader["identity_bindings"]["dataset_ids"]["LOCAL_RIDGE"],
+                "config_id": loader["identity_bindings"]["config_ids"]["LOCAL_RIDGE"],
+                "wrapper_sha256": wrappers["local_forecast"]["sha256"],
+            },
+            "POOLED_LOCAL_RIDGE": {
+                "dataset_id": loader["identity_bindings"]["dataset_ids"]["POOLED_LOCAL_RIDGE"],
+                "config_id": loader["identity_bindings"]["config_ids"]["POOLED_LOCAL_RIDGE"],
+                "wrapper_sha256": wrappers["pooled_forecast"]["sha256"],
+            },
+            "ZERO_RETURN": {
+                "dataset_id": loader["identity_bindings"]["dataset_ids"]["ZERO_RETURN"],
+                "config_id": loader["identity_bindings"]["config_ids"]["ZERO_RETURN"],
+                "wrapper_sha256": wrappers["zero_forecast"]["sha256"],
+            },
+        },
+        "_role_predictions": {
+            "local_forecast": [
+                float(
+                    forecast_by_role["local_forecast"][next_id].get(
+                        "forecast", forecast_by_role["local_forecast"][next_id].get("prediction")
+                    )
+                )
+                for next_id in [
+                    next(
+                        target_id
+                        for target_id, target in target_by_id.items()
+                        if target.get("fixture_target_id", target_id) == row.target_id
+                        and str(target["decision_time"]) == row.decision_time
+                    )
+                    for row in selected
+                ]
+            ],
+            "pooled_forecast": [
+                float(
+                    forecast_by_role["pooled_forecast"][next_id].get(
+                        "forecast", forecast_by_role["pooled_forecast"][next_id].get("prediction")
+                    )
+                )
+                for next_id in [
+                    next(
+                        target_id
+                        for target_id, target in target_by_id.items()
+                        if target.get("fixture_target_id", target_id) == row.target_id
+                        and str(target["decision_time"]) == row.decision_time
+                    )
+                    for row in selected
+                ]
+            ],
+            "zero_forecast": [
+                float(
+                    forecast_by_role["zero_forecast"][next_id].get(
+                        "forecast", forecast_by_role["zero_forecast"][next_id].get("prediction")
+                    )
+                )
+                for next_id in [
+                    next(
+                        target_id
+                        for target_id, target in target_by_id.items()
+                        if target.get("fixture_target_id", target_id) == row.target_id
+                        and str(target["decision_time"]) == row.decision_time
+                    )
+                    for row in selected
+                ]
+            ],
+        },
+        "source_scan_rows": source_inventory["target_rows"] + source_inventory["opportunity_rows"],
+        "source_scan_parts": source_inventory["target_parts"]
+        + source_inventory["opportunity_parts"],
+        "unopened_parts": {
+            "targets": "EXHAUSTED",
+            "opportunities": "EXHAUSTED",
+            "pre_holdout_target_parts": "EXHAUSTED",
+        },
+        "unopened_part_count": source_inventory["pre_holdout_parts_unopened"],
+        "consumed_parts_count": 13
+        if fixture
+        else source_inventory["target_parts"] + source_inventory["opportunity_parts"],
+        "source_scan_part_hashes": {
+            "local_forecast": ["fixture-local-0", "fixture-local-1", "fixture-local-2"],
+            "pooled_forecast": ["fixture-pooled-0", "fixture-pooled-1", "fixture-pooled-2"],
+            "zero_forecast": ["fixture-zero-0", "fixture-zero-1", "fixture-zero-2"],
+            "outcome_evidence": [
+                "fixture-outcome-0",
+                "fixture-outcome-1",
+                "fixture-outcome-2",
+                "fixture-outcome-3",
+            ],
+        },
+    }
+    return selected, metadata
+
+
 def load_retained_rows(
     config: FreezeConfig, *, locators: Mapping[str, str] | None = None, _fixture: bool = False
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
@@ -3268,6 +4025,8 @@ def load_retained_rows(
     loader = cast(Mapping[str, Any], config.document["retained_loader"])
     expected_locators = cast(Mapping[str, str], loader["locators"])
     actual_locators = expected_locators if locators is None else locators
+    if "target_source" in actual_locators:
+        return _load_native_retained_rows(config, actual_locators, fixture=_fixture)
     if not _fixture and dict(actual_locators) != dict(expected_locators):
         raise FreezeError("retained loader locator differs from frozen terminal child")
     decoder_limits = cast(Mapping[str, Any], loader["decoder_limits"])
@@ -3654,6 +4413,10 @@ def load_fixture_rows(
                 record[mappings["dependency_start"]] = "1969-01-01T00:00:00Z"
                 record[mappings["dependency_end"]] = "1969-01-01T00:05:00Z"
             part_records.append(late_records)
+
+        def native_id(record: Mapping[str, Any]) -> str:
+            return hashlib.sha256(_canonical_bytes(dict(record))).hexdigest()
+
         for name in ("local_forecast", "pooled_forecast", "zero_forecast", "outcome_evidence"):
             declaration = cast(Mapping[str, Any], declarations[name])
             wrapper = metadata_for(name)
@@ -3679,14 +4442,35 @@ def load_fixture_rows(
                     for records in child_part_records
                     for record in records
                     for tagged in (
-                        {"field": "expected_target_ids", "value": record[mappings["target_id"]]},
-                        {"field": "source_row_ids", "value": record[mappings["target_id"]]},
-                        {"field": "outcomes", "value": record},
+                        {"field": "expected_target_ids", "value": native_id(record)},
+                        {
+                            "field": "source_row_ids",
+                            "value": [
+                                native_id(record),
+                                hashlib.sha256(f"row|{native_id(record)}".encode()).hexdigest(),
+                            ],
+                        },
+                        {
+                            "field": "outcomes",
+                            "value": [native_id(record), record[mappings["realised_return"]]],
+                        },
                     )
                 ]
             else:
                 physical_rows = [
-                    {"value": record} for records in child_part_records for record in records
+                    {
+                        "value": {
+                            **record,
+                            "target_id": native_id(record),
+                            "target_instrument_id": record[mappings["asset"]],
+                            "forecast": record[mappings["prediction"]],
+                            "row_id": hashlib.sha256(
+                                f"row|{native_id(record)}".encode()
+                            ).hexdigest(),
+                        }
+                    }
+                    for records in child_part_records
+                    for record in records
                 ]
             manifest_relative = cast(str, declaration["manifest_relative_path"])
             identity_field = cast(str, declaration["identity_field"])
@@ -3732,6 +4516,124 @@ def load_fixture_rows(
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_bytes(_canonical_bytes(compact))
             locators[name] = str(manifest_path)
+        # Native bounded target-source fixture. The forbidden pre-holdout reference is declared
+        # and authenticated in the closure, but intentionally has no corresponding filesystem
+        # operation; the adapter must never touch it.
+        source_manifest_relative = "target-source.json"
+        target_source_rows: list[dict[str, Any]] = []
+        opportunity_source_rows: list[dict[str, Any]] = []
+        source_records = tuple(item for part in part_records for item in part)
+        for row in source_records:
+            native_target_id = native_id(row)
+            target_source_rows.append(
+                {
+                    "contract": "qtrad-r2-holdout-target-identity-v1",
+                    "schema_version": 1,
+                    "target_id": native_target_id,
+                    "fixture_target_id": row[mappings["target_id"]],
+                    "instrument_id": row[mappings["asset"]],
+                    "decision_time": row[mappings["decision_time"]],
+                    "target_horizon_seconds": 900,
+                    "target_basis": "MIDPOINT_OHLC",
+                    "target_revision_policy": "FIXED",
+                    "target_start_time": row[mappings["decision_time"]],
+                    "target_end_time": row[mappings["target_available_at"]],
+                    "target_freeze_at": row[mappings["target_available_at"]],
+                    "target_available_at": row[mappings["target_available_at"]],
+                    "target_availability_disposition": "ELIGIBLE",
+                }
+            )
+            opportunity_source_rows.append(
+                {
+                    "contract": "qtrad-r2-holdout-outcome-blind-opportunity-v1",
+                    "schema_version": 1,
+                    "target_id": native_target_id,
+                    "fixture_target_id": row[mappings["target_id"]],
+                    "instrument_id": row[mappings["asset"]],
+                    "decision_time": row[mappings["decision_time"]],
+                    "target_horizon_seconds": 900,
+                    "feature_data_asof": row[mappings["available_at"]],
+                    "latest_feature_bar_end": row[mappings["available_at"]],
+                    "dependency_start": row[mappings["dependency_start"]],
+                    "dependency_end": row[mappings["dependency_end"]],
+                    "disposition": "ELIGIBLE",
+                    "opportunity_id": hashlib.sha256(
+                        _canonical_bytes(
+                            {
+                                "contract": "qtrad-r2-holdout-outcome-blind-opportunity-v1",
+                                "schema_version": 1,
+                                "target_id": row[mappings["target_id"]],
+                                "instrument_id": row[mappings["asset"]],
+                                "decision_time": row[mappings["decision_time"]],
+                                "target_horizon_seconds": 900,
+                                "feature_data_asof": row[mappings["available_at"]],
+                                "latest_feature_bar_end": row[mappings["available_at"]],
+                                "dependency_start": row[mappings["dependency_start"]],
+                                "dependency_end": row[mappings["dependency_end"]],
+                                "disposition": "ELIGIBLE",
+                            }
+                        )
+                    ).hexdigest(),
+                }
+            )
+
+        def write_source_part(kind: str, rows_value: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            relative = f"{source_manifest_relative}.parts/{kind}/part-000000.json"
+            payload = {
+                "contract": "qtrad-r2-holdout-target-source-part-v1",
+                "schema_version": 1,
+                "source_id": _TARGET_SOURCE_ID,
+                "kind": kind,
+                "part_index": 0,
+                "rows": list(rows_value),
+            }
+            encoded = _canonical_bytes(payload)
+            part_path = root / relative
+            part_path.parent.mkdir(parents=True, exist_ok=True)
+            part_path.write_bytes(encoded)
+            return {
+                "path": relative,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "row_count": len(rows_value),
+            }
+
+        target_ref = write_source_part("targets", target_source_rows)
+        opportunity_ref = write_source_part("opportunities", opportunity_source_rows)
+        source_manifest: dict[str, Any] = {
+            "contract": _TARGET_SOURCE_CONTRACT,
+            "schema_version": 1,
+            "storage": _TARGET_SOURCE_STORAGE,
+            "source_id": _TARGET_SOURCE_ID,
+            "source_target_dataset_id": _SOURCE_TARGET_DATASET_ID,
+            "observation_dataset_id": _SOURCE_OBSERVATION_ID,
+            "foundation_configuration_id": _SOURCE_FOUNDATION_ID,
+            "causal_panel_dataset_id": _SOURCE_CAUSAL_PANEL_ID,
+            "availability_evidence_id": _SOURCE_AVAILABILITY_ID,
+            "target_index_dataset_id": _SOURCE_TARGET_INDEX_ID,
+            "causal_metadata_dataset_id": _SOURCE_CAUSAL_METADATA_ID,
+            "holdout_range": ["2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"],
+            "primary_horizon_seconds": 900,
+            "target_instruments": list(_TARGET_IDS),
+            "pre_holdout_target_dataset_id": "0" * 64,
+            "pre_holdout_observation_dataset_id": "1" * 64,
+            "pre_holdout_foundation_configuration_id": "2" * 64,
+            "target_parts": [target_ref],
+            "pre_holdout_target_parts": [
+                {
+                    "path": f"{source_manifest_relative}.parts/pre-holdout-target/part-000000.json",
+                    "sha256": "3" * 64,
+                    "row_count": 0,
+                }
+            ],
+            "opportunity_parts": [opportunity_ref],
+            "target_count": len(target_source_rows),
+            "pre_holdout_target_count": 0,
+            "opportunity_count": len(opportunity_source_rows),
+        }
+        source_manifest["closure_id"] = _native_source_closure(source_manifest)
+        source_manifest_path = root / source_manifest_relative
+        source_manifest_path.write_bytes(_canonical_bytes(source_manifest))
+        locators["target_source"] = str(source_manifest_path)
         return load_retained_rows(config, locators=locators, _fixture=True)
 
 
