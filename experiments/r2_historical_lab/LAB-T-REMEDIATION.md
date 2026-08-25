@@ -7,9 +7,13 @@ All paths and results in this record are `EXPLORATORY_POST_HOC_ONLY` and retain 
 
 Commit `9a086a579b835b54eab6f01c23cc36ff2fb74c57` completed its first retained
 run at `/workspace/tmp/qtrad-r2-lab/LAB-T`, but its CORE_6 support was
-239,655 rather than the authenticated LAB-0 support of 239,535. The output is
-preserved as a failed attempt and must not be used for selection or terminal access.
-No finalist qualified and the former consumed holdout was not accessed.
+239,655 rather than the authenticated LAB-0 support of 239,535. The original
+output directory was removed after its configuration count, trust-check
+failure, terminal-access state, and every child hash were compacted into
+`/workspace/tmp/qtrad-r2-lab/LAB-T-rerun-1/failed-attempts.jsonl` (SHA-256
+`13ecb869b279dabc4b080fd37d1aa6f26555a0e6fec893a302f51ff32df366c1`).
+The rejected attempt must not be used for selection or terminal access. No
+finalist qualified and the former consumed holdout was not accessed.
 
 The cause was timestamp/block-label inference for development membership. It
 admitted the final 20 not-yet-terminal-mature opportunities for each of six
@@ -30,8 +34,10 @@ provider, promotion, deployment, collector, or external-state consumer.
 
 The same membership defect affects ZERO_RETURN support, every model metric,
 breadth/concentration statistics, finalist selection, and all sibling result
-files. Therefore all first-attempt outputs are invalid together. The
-create-only finalist gate nevertheless prevented terminal access.
+files. Therefore all first-attempt outputs are invalid together. The compact
+failed-attempt record retains the failure and configuration count without
+retaining the invalid result files. The create-only finalist gate nevertheless
+prevented terminal access.
 
 The first attempt used 52 KiB of output. Preflight had 84 GiB available memory,
 13 GiB available swap, and 631 GiB available workspace disk. The exact run
