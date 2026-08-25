@@ -216,6 +216,7 @@ class DecisionClosure:
     contract: str = DECISION_CONTRACT
     risk_state: RiskState | None = None
     horizon_states: tuple[HorizonState, ...] = ()
+    terminal_disposition: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -243,7 +244,10 @@ class DecisionClosure:
             raise ValueError("decision physical delta does not reconcile")
         require_utc(self.decision_time, "decision time")
         require_utc(self.expiry_time, "expiry time")
-        if self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
+        if self.terminal_disposition:
+            if self.expiry_time < self.decision_time or self.holding_interval != timedelta(0):
+                raise ValueError("terminal decision interval must have zero holding")
+        elif self.expiry_time <= self.decision_time or self.holding_interval <= timedelta(0):
             raise ValueError("decision interval is invalid")
         if self.reporting_currency != "AUD":
             raise ValueError("decision reporting currency must be AUD")
@@ -377,6 +381,7 @@ class DecisionClosure:
             "decision_time": self.decision_time,
             "expiry_time": self.expiry_time,
             "holding_interval": self.holding_interval,
+            "terminal_disposition": self.terminal_disposition,
             "gross_forecast_return": tuple(
                 (asset, self.gross_forecast_return[asset]) for asset in self.asset_order
             ),
@@ -2397,6 +2402,14 @@ def _allocate_sleeve_reconciliations(
     return tuple(sorted(result, key=lambda item: item.canonical_key))
 
 
+def _outcome_target_time(decision: DecisionClosure, latency: timedelta) -> datetime:
+    if decision.expiry_time > decision.decision_time:
+        return decision.expiry_time
+    if latency <= timedelta(0):
+        raise ValueError("terminal outcome requires positive latency")
+    return decision.decision_time + latency
+
+
 def evaluate_independently(
     decision: DecisionClosure,
     quotes: Sequence[QuoteEvidence],
@@ -2410,6 +2423,7 @@ def evaluate_independently(
     """Recompute position, expected costs and executable-side P&L independently."""
     if latency < timedelta(0) or adverse_slippage_increments < 0:
         raise ValueError("latency and slippage must be non-negative")
+    outcome_target_time = _outcome_target_time(decision, latency)
     reconcile_positions(decision)
     expected, computed_components, component_details = _recompute_expected_costs(
         decision, holding_interval=cost_holding_interval
@@ -2434,7 +2448,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 None,
                 None,
@@ -2470,7 +2484,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 None,
                 None,
@@ -2498,7 +2512,7 @@ def evaluate_independently(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
-            maximum_time=decision.expiry_time,
+            maximum_time=outcome_target_time,
             direction=direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -2506,7 +2520,7 @@ def evaluate_independently(
         exit_quote, exit_reasons = _select_quote(
             quotes,
             asset_id=asset,
-            minimum_time=decision.expiry_time,
+            minimum_time=outcome_target_time,
             direction=-direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -2521,7 +2535,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,
@@ -2562,7 +2576,7 @@ def evaluate_independently(
             outcome = OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,
@@ -2611,7 +2625,7 @@ def evaluate_independently(
         outcome = OutcomeClosure(
             asset,
             decision.decision_time,
-            decision.expiry_time,
+            outcome_target_time,
             latency,
             entry,
             exit_quote,
@@ -2725,6 +2739,7 @@ def build_outcome_closures(
     """Build immutable per-asset outcome closures using the causal quote rule."""
     if latency < timedelta(0):
         raise ValueError("latency must be non-negative")
+    outcome_target_time = _outcome_target_time(decision, latency)
     outcomes: list[OutcomeClosure] = []
     for index, asset in enumerate(decision.asset_order):
         direction = (
@@ -2739,7 +2754,7 @@ def build_outcome_closures(
                 OutcomeClosure(
                     asset,
                     decision.decision_time,
-                    decision.expiry_time,
+                    outcome_target_time,
                     latency,
                     None,
                     None,
@@ -2757,7 +2772,7 @@ def build_outcome_closures(
             quotes,
             asset_id=asset,
             minimum_time=decision.decision_time + latency,
-            maximum_time=decision.expiry_time,
+            maximum_time=outcome_target_time,
             direction=direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -2765,7 +2780,7 @@ def build_outcome_closures(
         exit_quote, exit_reasons = _select_quote(
             quotes,
             asset_id=asset,
-            minimum_time=decision.expiry_time,
+            minimum_time=outcome_target_time,
             direction=-direction,
             source_class=decision.source_class,
             evidence_purpose=decision.evidence_purpose,
@@ -2780,7 +2795,7 @@ def build_outcome_closures(
             OutcomeClosure(
                 asset,
                 decision.decision_time,
-                decision.expiry_time,
+                outcome_target_time,
                 latency,
                 entry,
                 exit_quote,

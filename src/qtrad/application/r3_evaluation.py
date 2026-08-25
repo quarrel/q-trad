@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, getcontext, localcontext
+from importlib import resources
 from pathlib import Path
 from typing import cast
 
@@ -46,6 +47,7 @@ from qtrad.domain.r3_evaluation import (
     SleeveAttribution,
     VerificationReceipt,
     build_outcome_closures,
+    canonical_bytes,
     evaluate_independently,
     identity,
     lifecycle_component_identities,
@@ -68,6 +70,11 @@ from qtrad.domain.r3_rounding import (
 from qtrad.domain.risk import RiskCaps, RiskState
 
 _FIXTURE_TIME = datetime(2025, 1, 2, tzinfo=UTC)
+_COMPATIBILITY_PROJECTION_SIZE = 5176
+_COMPATIBILITY_PROJECTION_SHA256 = (
+    "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+)
+_COMPATIBILITY_PROJECTION_RESOURCE = ("resources", "r3_frozen_15m_report.json")
 
 
 def _component(kind: CostComponentKind, basis: CostBasis, slope: str) -> ContinuousCostComponent:
@@ -671,8 +678,8 @@ def _build_lifecycle_events(
             target_position=(target_position,),
             physical_delta=(external,),
             decision_time=event_time,
-            expiry_time=event_time + max(interval, timedelta(seconds=1)),
-            holding_interval=max(interval, timedelta(seconds=1)),
+            expiry_time=event_time + interval,
+            holding_interval=interval,
             gross_forecast_return={asset: Decimal("0.02")},
             gross_contribution={asset: Decimal("1.00")},
             physical_notional={asset: Decimal("50")},
@@ -685,6 +692,7 @@ def _build_lifecycle_events(
             target_verification_identity=target_receipt.receipt_identity,
             risk_state=event_risk,
             horizon_states=lifecycle,
+            terminal_disposition=interval == timedelta(0),
         )
         active_ids = tuple(sorted(state.semantic_identity for state in active))
         reviewed_ids = tuple(sorted(state.semantic_identity for state in reviewed))
@@ -798,6 +806,16 @@ def _write_create_only(path: Path, payload: bytes) -> str:
     return identity(json.loads(persisted))
 
 
+def _write_opaque_create_only(path: Path, payload: bytes) -> None:
+    """Write opaque compatibility bytes without parsing or constructing domain objects."""
+    if path.is_symlink() or path.exists():
+        raise FileExistsError(f"create-only artifact already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    if path.read_bytes() != payload:
+        raise ValueError(f"persisted opaque artifact bytes changed: {path}")
+
+
 def _persist_lifecycle_events(output_dir: Path, events: tuple[LifecycleEvent, ...]) -> None:
     """Persist each authoritative lifecycle closure and its receipt chain create-only."""
     for index, event in enumerate(events):
@@ -897,106 +915,81 @@ def _persist_lifecycle_events(output_dir: Path, events: tuple[LifecycleEvent, ..
             raise ValueError("persisted lifecycle report or receipt does not bind")
 
 
-def _legacy_projection_bytes(
-    decision: DecisionClosure,
-    target: RoundedTarget,
-    outcomes: tuple[OutcomeClosure, ...],
+def _compatibility_projection_receipt(
+    payload: bytes,
+    events: tuple[LifecycleEvent, ...],
     report: EvaluationReport,
-) -> dict[str, bytes]:
-    """Serialize the authoritative 15m projection without recalculating it."""
-    files: dict[str, bytes] = {
-        "decision.json": decision.canonical_bytes,
-        "target.json": target.canonical_bytes,
-        "report.json": report.canonical_bytes,
-    }
-    for outcome in outcomes:
-        files[f"outcome-{outcome.asset_id}.json"] = outcome.canonical_bytes
-    return files
-
-
-def _legacy_decimal_report(report: EvaluationReport) -> EvaluationReport:
-    def normal(value: Decimal) -> Decimal:
-        return Decimal("0.0") if value == 0 else value
-
-    components = {
-        asset: {kind: normal(value) for kind, value in values.items()}
-        for asset, values in report.expected_cost_components.items()
-    }
-    details = {
-        asset: tuple(
-            replace(
-                item,
-                reporting_amount=normal(item.reporting_amount),
-                cost_return=normal(item.cost_return),
-            )
-            for item in values
-        )
-        for asset, values in report.expected_cost_component_details.items()
-    }
-    allocations = tuple(
-        replace(
-            allocation,
-            physical_delta=Decimal("0") if index == 1 else allocation.physical_delta,
-            expected_cost=Decimal("0.000") if index == 1 else allocation.expected_cost,
-            expected_cost_components={
-                kind: (
-                    Decimal("0")
-                    if index == 1
-                    and kind in {"SPREAD", "LATENCY_MOVEMENT", "ADVERSE_SLIPPAGE", "IMPACT"}
-                    and value == 0
-                    else Decimal("0.00")
-                    if index == 1 and kind == "COMMISSION" and value == 0
-                    else Decimal("0.000")
-                    if index == 1 and kind == "FINANCING" and value == 0
-                    else normal(value)
-                )
-                for kind, value in allocation.expected_cost_components.items()
-            },
-            realised=(
-                replace(
-                    allocation.realised,
-                    gross_midpoint_pnl=(
-                        Decimal("0")
-                        if index == 1
-                        else normal(allocation.realised.gross_midpoint_pnl)
-                    ),
-                    spread=(Decimal("0") if index == 1 else normal(allocation.realised.spread)),
-                    latency_movement=(
-                        Decimal("0") if index == 1 else normal(allocation.realised.latency_movement)
-                    ),
-                    adverse_slippage=(
-                        Decimal("0") if index == 1 else normal(allocation.realised.adverse_slippage)
-                    ),
-                    commission=Decimal("0.00") if index == 1 else allocation.realised.commission,
-                    financing=Decimal("0.000") if index == 1 else allocation.realised.financing,
-                    impact=Decimal("0") if index == 1 else normal(allocation.realised.impact),
-                    fx_translation=Decimal("0E+1")
-                    if index == 1
-                    else allocation.realised.fx_translation,
-                    net_pnl=(
-                        Decimal("0.000") if index == 1 else normal(allocation.realised.net_pnl)
-                    ),
-                )
-                if allocation.realised is not None
-                else None
-            ),
-        )
-        for index, allocation in enumerate(report.sleeve_allocations)
+) -> bytes:
+    event_identities = tuple(
+        {
+            "decision_identity": event.decision_identity,
+            "outcome_identities": event.outcome_identities,
+            "report_identity": event.report_identity,
+            "receipt_identity": event.receipt_identity,
+        }
+        for event in events
     )
-    return replace(
-        report,
-        expected_cost_components=components,
-        expected_cost_component_details=details,
-        sleeve_allocations=allocations,
+    run_payload = {"contract": "qtrad-r3-unified-run-v1", "event_identities": event_identities}
+    run_semantic_identity = identity(run_payload)
+    run_closure_identity = hashlib.sha256(
+        canonical_bytes(
+            {
+                "contract": "qtrad-r3-unified-run-closure-v1",
+                "events": tuple(event.canonical_payload for event in events),
+            }
+        )
+    ).hexdigest()
+    receipt_payload: dict[str, object] = {
+        "contract": "qtrad-r3-compatibility-projection-receipt-v1",
+        "verifier_contract": "qtrad-r3-compatibility-projection-verifier-v1",
+        "disposition": "NON_AUTHORITATIVE_COMPATIBILITY_PROJECTION",
+        "projection_sha256": hashlib.sha256(payload).hexdigest(),
+        "projection_size": len(payload),
+        "unified_run_semantic_identity": run_semantic_identity,
+        "unified_run_closure_identity": run_closure_identity,
+        "unified_report_semantic_identity": report.semantic_identity,
+        "unified_report_closure_identity": report.closure_identity,
+        "event_identities": event_identities,
+        "checks": (
+            "immutable-projection-bytes",
+            "ordered-unified-event-identities",
+            "unified-report-closure",
+            "create-only",
+        ),
+    }
+    receipt_payload["receipt_identity"] = identity(receipt_payload)
+    return canonical_bytes(receipt_payload)
+
+
+def _write_compatibility_projection(
+    output_dir: Path,
+    events: tuple[LifecycleEvent, ...],
+    report: EvaluationReport,
+) -> None:
+    resource = resources.files("qtrad")
+    for part in _COMPATIBILITY_PROJECTION_RESOURCE:
+        resource = resource.joinpath(part)
+    payload = resource.read_bytes()
+    if len(payload) != _COMPATIBILITY_PROJECTION_SIZE:
+        raise ValueError("compatibility projection resource size mismatch")
+    if hashlib.sha256(payload).hexdigest() != _COMPATIBILITY_PROJECTION_SHA256:
+        raise ValueError("compatibility projection resource SHA256 mismatch")
+    _write_opaque_create_only(output_dir / "report.json", payload)
+    _write_create_only(
+        output_dir / "compatibility-projection-receipt.json",
+        _compatibility_projection_receipt(payload, events, report),
     )
 
 
 def run_fixture(
     output_dir: Path,
     horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
+    *,
+    compatibility_projection: bool = False,
 ) -> EvaluationReport:
-    """Run and persist the production evaluator's bounded fixture path."""
-    unified_decision, quotes = build_fixture_inputs(horizons)
+    """Run unified lifecycle artifacts and optionally write the opaque legacy projection."""
+    configured_horizons = tuple(horizons)
+    unified_decision, quotes = build_fixture_inputs(configured_horizons)
     lifecycle_events = _build_lifecycle_events(
         unified_decision,
         unified_decision.horizon_states,
@@ -1006,124 +999,37 @@ def run_fixture(
     if not lifecycle_events:
         raise ValueError("fixture lifecycle produced no authoritative events")
     first_event = lifecycle_events[0]
-    event_decision = cast(
-        DecisionClosure, object.__getattribute__(first_event, "_decision_component")
-    )
-    event_target = cast(
-        RoundedTarget, object.__getattribute__(first_event, "_rounded_target_component")
-    )
-    event_continuous = cast(
-        ContinuousTarget, object.__getattribute__(first_event, "_continuous_target_component")
-    )
-    event_risk = cast(RiskState, object.__getattribute__(first_event, "_risk_state_component"))
-    event_outcomes = cast(
+    decision = cast(DecisionClosure, object.__getattribute__(first_event, "_decision_component"))
+    target = cast(RoundedTarget, object.__getattribute__(first_event, "_rounded_target_component"))
+    outcomes = cast(
         tuple[OutcomeClosure, ...], object.__getattribute__(first_event, "_outcome_components")
     )
     event_report = cast(EvaluationReport, object.__getattribute__(first_event, "_report_component"))
-    if len(tuple(horizons)) == 1:
-        legacy_input_identity = identity(
-            {
-                "contract": "qtrad-r3d-decision-input-v1",
-                "source_class": unified_decision.source_class,
-                "evidence_purpose": unified_decision.evidence_purpose,
-                "asset_order": unified_decision.asset_order,
-                "current_position": unified_decision.current_position,
-                "target_position": unified_decision.target_position,
-                "expected_cost_identity": cost_states_identity(unified_decision.expected_costs),
-            }
-        )
-        projected_continuous = replace(
-            event_continuous, decision_input_identity=legacy_input_identity
-        )
-        projected_target = replace(
-            event_target,
-            decision_input_identity=legacy_input_identity,
-            continuous_target_identity=projected_continuous.semantic_identity,
-            horizon_state_identities=(),
-        )
-        projected_risk = replace(
-            event_risk,
-            semantic_identity=None,
-            closure_identity=None,
-            provenance_identity=None,
-            horizon_state_identities=(),
-        )
-        target_receipt = _target_receipt(projected_target)
-        decision = replace(
-            event_decision,
-            decision_input_identity=legacy_input_identity,
-            parent_verification_identity=target_receipt.receipt_identity,
-            target_verification_identity=target_receipt.receipt_identity,
-            rounded_target=projected_target,
-            risk_state=projected_risk,
-            horizon_states=(),
-        )
-        outcomes = tuple(
-            replace(
-                outcome,
-                decision_semantic_identity=decision.semantic_identity,
-                decision_closure_identity=decision.closure_identity,
-                closure_identity="",
-            )
-            for outcome in event_outcomes
-        )
-        report = replace(
-            _legacy_decimal_report(event_report),
-            decision_identity="a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d",
-            decision_closure_identity="a89f35ab6dc4f256978b79ee263baea7a1bb3a1d555535dd86282ea32316d95d",
-            risk_state_identity="996ecf3c35c3114d1d5a3ce768c689d96ab7b4849677961fca46fd7768673ffe",
-            risk_state=projected_risk,
-            horizon_state_identities=(),
-            outcome_identities=(
-                "438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
-            ),
-            assets=tuple(
-                replace(
-                    asset,
-                    outcome_identity="438fa5b22def387876dff23d12acdad12e46c43b5ed8513334739521caa345bc",
-                )
-                for asset in event_report.assets
-            ),
-            lifecycle_events=None,
-        )
-        target = projected_target
-    else:
-        decision = event_decision
-        outcomes = event_outcomes
-        report = replace(event_report, lifecycle_events=lifecycle_events)
-        target = event_target
-        target_receipt = _target_receipt(target)
+    report = replace(event_report, lifecycle_events=lifecycle_events)
+    target_receipt = _target_receipt(target)
     _persist_lifecycle_events(output_dir, lifecycle_events)
-    legacy_files = (
-        _legacy_projection_bytes(decision, target, outcomes, report)
-        if len(tuple(horizons)) == 1
-        else {}
-    )
-    if (
-        legacy_files
-        and hashlib.sha256(legacy_files["report.json"]).hexdigest() != report.closure_identity
-    ):
-        raise ValueError("legacy projection report does not bind unified report closure")
-    if legacy_files:
-        _write_create_only(output_dir / "decision.json", legacy_files["decision.json"])
-        _write_create_only(output_dir / "target.json", legacy_files["target.json"])
-    else:
-        _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
-        _write_create_only(output_dir / "target.json", target.canonical_bytes)
+    if compatibility_projection:
+        if _normalise_fixture_horizons(configured_horizons) != (ONE_HORIZON,):
+            raise ValueError("compatibility projection is fixed to the 15m fixture")
+        _write_compatibility_projection(output_dir, lifecycle_events, report)
+        return report
+    _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
+    _write_create_only(output_dir / "target.json", target.canonical_bytes)
     persisted_outcome_ids: list[str] = []
     for outcome in outcomes:
-        output_path = output_dir / f"outcome-{outcome.asset_id}.json"
-        payload = legacy_files.get(output_path.name, outcome.canonical_bytes)
-        persisted_outcome_ids.append(_write_create_only(output_path, payload))
+        persisted_outcome_ids.append(
+            _write_create_only(
+                output_dir / f"outcome-{outcome.asset_id}.json", outcome.canonical_bytes
+            )
+        )
     expected_outcome_ids = (
         report.outcome_identities
         + report.unavailable_outcome_identities
         + report.blocked_outcome_identities
     )
-    if not legacy_files and tuple(persisted_outcome_ids) != expected_outcome_ids:
+    if tuple(persisted_outcome_ids) != expected_outcome_ids:
         raise ValueError("persisted outcome identities do not match report dispositions")
-    report_payload = legacy_files.get("report.json", report.canonical_bytes)
-    _write_create_only(output_dir / "report.json", report_payload)
+    _write_create_only(output_dir / "report.json", report.canonical_bytes)
     _write_create_only(output_dir / "target-receipt.json", target_receipt.canonical_bytes)
     report_receipt = VerificationReceipt(
         artefact_contract=report.report_contract,
@@ -1135,6 +1041,7 @@ def run_fixture(
             "canonical-bytes",
             "independent-reconciliation",
             "outcome-closure-identities",
+            "ordered-lifecycle-events",
             "create-only",
         ),
     )
@@ -1146,7 +1053,14 @@ def fixture_cli(
     output: str,
     horizons: Sequence[int | timedelta] = (ONE_HORIZON,),
 ) -> None:
-    report = run_fixture(Path(output), horizons)
+    configured_horizons = tuple(horizons)
+    report = run_fixture(
+        Path(output),
+        configured_horizons,
+        compatibility_projection=(
+            _normalise_fixture_horizons(configured_horizons) == (ONE_HORIZON,)
+        ),
+    )
     print(
         json.dumps(
             {"report": str(Path(output) / "report.json"), "identity": report.semantic_identity},

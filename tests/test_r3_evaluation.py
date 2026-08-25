@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import timedelta
@@ -8,7 +9,7 @@ from decimal import Decimal
 import pytest
 
 import qtrad.application.r3_evaluation as evaluation_app
-from qtrad.application.r3_evaluation import build_fixture_inputs, run_fixture
+from qtrad.application.r3_evaluation import build_fixture_inputs, fixture_cli, run_fixture
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r3_evaluation import (
     EvaluationDisposition,
@@ -16,7 +17,6 @@ from qtrad.domain.r3_evaluation import (
     OutcomeClosure,
     VerificationReceipt,
     build_outcome_closures,
-    canonical_bytes,
     evaluate_independently,
     identity,
     reconcile_positions,
@@ -352,15 +352,17 @@ def test_nonzero_r3d_repair_reconciles_and_reports_allocations():
     assert allocations["short"].repair_delta == Decimal("0")
 
 
-def test_legacy_fixture_identity_and_canonical_replay(tmp_path):
+def test_unified_fixture_identity_and_canonical_replay(tmp_path):
     first = run_fixture(tmp_path / "first")
     second = run_fixture(tmp_path / "second")
-    assert first.semantic_identity == (
+    assert first.semantic_identity != (
         "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
     )
-    assert len(first.canonical_bytes) == 5176
+    assert first.lifecycle_events is not None
+    assert len(first.canonical_bytes) > 5176
     assert first.canonical_bytes == second.canonical_bytes
     assert first.semantic_identity == second.semantic_identity
+    assert (tmp_path / "first" / "report.json").read_bytes() == first.canonical_bytes
 
 
 def test_multihorizon_lifecycle_nets_once_per_event_and_finances_held_sleeves(tmp_path):
@@ -549,19 +551,24 @@ def test_lifecycle_persistence_binds_ordered_receipt_chain(tmp_path):
         )
 
 
-def test_legacy_projection_cannot_replace_unified_report_closure(monkeypatch, tmp_path):
-    original = evaluation_app._legacy_projection_bytes
-
-    def forged_projection(*args, **kwargs):
-        files = original(*args, **kwargs)
-        payload = json.loads(files["report.json"])
-        payload["report_identity"] = "0" * 64
-        files["report.json"] = canonical_bytes(payload)
-        return files
-
-    monkeypatch.setattr(evaluation_app, "_legacy_projection_bytes", forged_projection)
-    with pytest.raises(ValueError, match="projection report"):
-        run_fixture(tmp_path)
+def test_legacy_projection_is_opaque_and_non_authoritative(monkeypatch, tmp_path):
+    output = tmp_path / "legacy"
+    fixture_cli(str(output))
+    payload = (output / "report.json").read_bytes()
+    assert len(payload) == 5176
+    assert hashlib.sha256(payload).hexdigest() == (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    assert not (output / "decision.json").exists()
+    assert not (output / "target.json").exists()
+    receipt = json.loads((output / "compatibility-projection-receipt.json").read_bytes())
+    assert receipt["disposition"] == "NON_AUTHORITATIVE_COMPATIBILITY_PROJECTION"
+    assert receipt["projection_sha256"] == (
+        "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
+    )
+    monkeypatch.setattr(evaluation_app, "_COMPATIBILITY_PROJECTION_SHA256", "0" * 64)
+    with pytest.raises(ValueError, match="SHA256"):
+        fixture_cli(str(tmp_path / "forged"))
 
 
 def _fixture_events() -> tuple[LifecycleEvent, ...]:
@@ -634,3 +641,16 @@ def test_persisted_lifecycle_report_seeds_nonzero_authoritative_position(monkeyp
     assert report.lifecycle_events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
     persisted = json.loads((tmp_path / "report.json").read_bytes())
     assert persisted["lifecycle_events"][0]["physical_delta"] == [["ASSET_A", "0.250"]]
+
+
+def test_terminal_event_uses_zero_holding_interval_for_cost_authority(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+    terminal = events[-1]
+    decision = object.__getattribute__(terminal, "_decision_component")
+    event_report = object.__getattribute__(terminal, "_report_component")
+    assert decision.terminal_disposition is True
+    assert decision.holding_interval == timedelta(0)
+    assert decision.expiry_time == decision.decision_time
+    assert event_report.expected_cost_components["ASSET_A"]["FINANCING"] == Decimal("0")

@@ -44,7 +44,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qtrad"]
-
+include = ["src/qtrad/resources/r3_frozen_15m_report.json"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
