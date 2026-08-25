@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
+import os
+import runpy
+import sys
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from decimal import ROUND_HALF_EVEN, Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +29,9 @@ from qtrad.application.r3_historical_exploratory import (
     render_markdown,
     synthetic_fixture,
 )
+from qtrad.runtime.r2_bundles import canonical_bytes as runtime_canonical_bytes
+from qtrad.runtime.r2_holdout import _compact_header_digest, _verify_compact_header
+from qtrad.runtime.r2_partitioned_rows import _MAX_PART_BYTES as runtime_max_part_bytes
 
 CONFIG = Path("docs/archive/r3/r3-historical-exploratory-freeze.json")
 
@@ -33,6 +42,39 @@ def _rehashed(document: dict[str, Any]) -> dict[str, Any]:
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return document
+
+
+def test_compact_partitioned_bytes_match_runtime_writer_with_unicode() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    header: dict[str, object] = {
+        "contract": "qtrad-r2-holdout-forecast-dataset-v1",
+        "target_instrument_id": "βeta",
+        "storage": "qtrad-r2-partitioned-json-rows-v1",
+        "identity_field": "dataset_id",
+        "row_count": 1,
+        "parts": [],
+    }
+    header["header_sha256"] = _compact_header_digest(header)
+
+    encoded = implementation._canonical_bytes(header)
+    assert encoded == runtime_canonical_bytes(header)
+    assert b"\\u03b2" in encoded
+    assert (
+        encoded
+        != (
+            json.dumps(header, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        ).encode()
+    )
+
+    _verify_compact_header(header, encoded=encoded)
+    with pytest.raises(ValueError, match="not canonical"):
+        _verify_compact_header(
+            header,
+            encoded=(
+                json.dumps(header, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+            ).encode(),
+        )
 
 
 def test_freeze_is_deterministic_and_rejects_unknown_expansion_and_mutation() -> None:
@@ -421,7 +463,7 @@ def test_fixture_loader_rejects_unknown_fields_and_retained_locator_mismatch(
 def test_algorithm_parameters_are_reported_and_consumed_from_frozen_config() -> None:
     config = FreezeConfig.from_path(CONFIG)
     report = analyse_fixture(synthetic_fixture(), config).report
-    assert report["loader_contract"]["decode_policy"].startswith("decode only selected")
+    assert report["loader_contract"]["decode_policy"].startswith("stream all authenticated")
     algorithms = config.document["algorithms"]
     assert algorithms["ridge"]["regularisation"] == 0.0
     assert algorithms["huber"]["threshold"] == 0.02
@@ -437,27 +479,304 @@ def test_retained_child_identity_binding_is_strict() -> None:
     config = FreezeConfig.from_path(CONFIG)
     loader = config.document["retained_loader"]
     declaration = loader["child_wrappers"]["local_forecast"]
-    metadata: dict[str, Any] = {key: None for key in declaration["required_keys"]}
+    metadata: dict[str, Any] = {key: None for key in declaration["physical_required_keys"]}
     metadata.update(
         {
             "contract": declaration["contract"],
             "dataset_id": declaration["identity"],
-            "parts": [
-                {
-                    "locator": "part.json",
-                    "contract": declaration["contract"],
-                    "identity": "part",
-                    "sha256": "a" * 64,
-                    "byte_size": 1,
-                    "row_count": 1,
-                }
-            ],
         }
     )
     _validate_child_metadata("local_forecast", metadata, loader)
     metadata["dataset_id"] = "wrong-dataset"
     with pytest.raises(FreezeError, match="identity mismatch"):
         _validate_child_metadata("local_forecast", metadata, loader)
+
+
+def test_forecast_wrapper_schema_matches_producer_and_fixture_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.domain.market_data import MarketDataSourceClass
+    from qtrad.domain.r2_holdout import HoldoutScope, R2HoldoutForecastDataset
+    from qtrad.domain.r2_readiness import EvidenceClass
+
+    opportunity_id = "c" * 64
+    target_id = "d" * 64
+    producer = R2HoldoutForecastDataset.create(
+        selection_manifest_id="a" * 64,
+        feature_dataset_id=None,
+        configuration_id="b" * 64,
+        final_fit_id=None,
+        rows=(),
+        expected_opportunity_ids=(opportunity_id,),
+        opportunity_target_ids=((opportunity_id, target_id),),
+        source_class=next(iter(MarketDataSourceClass)),
+        evidence_class=next(iter(EvidenceClass)),
+        holdout_scope=next(iter(HoldoutScope)),
+    )
+    producer_keys = tuple(producer.semantic_json())
+    expected_wrapper_keys = (*producer_keys, "dataset_id")
+    assert producer_keys[9] == "opportunity_target_ids"
+
+    config = FreezeConfig.from_path(CONFIG)
+    loader = config.document["retained_loader"]
+    forecast_children = ("local_forecast", "pooled_forecast", "zero_forecast")
+    for name in forecast_children:
+        declaration = loader["child_wrappers"][name]
+        assert tuple(declaration["required_keys"]) == expected_wrapper_keys
+
+        metadata: dict[str, Any] = {key: None for key in declaration["physical_required_keys"]}
+        metadata["contract"] = declaration["contract"]
+        metadata["dataset_id"] = declaration["identity"]
+        implementation._validate_child_metadata(name, metadata, loader)
+        legacy_unknown = set(metadata) - (set(declaration["required_keys"]) | {"parts"})
+        assert legacy_unknown == {
+            "header_sha256",
+            "identity_field",
+            "partition_fields",
+            "partition_mapping_fields",
+            "partition_row_field",
+            "row_count",
+            "storage",
+        }
+
+        missing = dict(metadata)
+        del missing["header_sha256"]
+        with pytest.raises(FreezeError, match="incomplete"):
+            implementation._validate_child_metadata(name, missing, loader)
+
+        unknown = dict(metadata)
+        unknown["unknown"] = True
+        with pytest.raises(FreezeError, match="incomplete"):
+            implementation._validate_child_metadata(name, unknown, loader)
+
+    seen_fixture_metadata: dict[str, Mapping[str, Any]] = {}
+    original_validator = implementation._validate_child_metadata
+
+    def capture_fixture_metadata(
+        name: str,
+        metadata: Mapping[str, Any],
+        fixture_loader: Mapping[str, Any],
+        *,
+        fixture: bool = False,
+    ) -> None:
+        if fixture and name in forecast_children:
+            seen_fixture_metadata[name] = dict(metadata)
+        original_validator(name, metadata, fixture_loader, fixture=fixture)
+
+    monkeypatch.setattr(implementation, "_validate_child_metadata", capture_fixture_metadata)
+    implementation.load_fixture_rows(synthetic_fixture(), config)
+
+    assert set(seen_fixture_metadata) == set(forecast_children)
+    for fixture_metadata in seen_fixture_metadata.values():
+        assert "opportunity_target_ids" in fixture_metadata
+        assert set(fixture_metadata) == set(
+            loader["child_wrappers"]["local_forecast"]["physical_required_keys"]
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "header_digest",
+        "storage",
+        "register",
+        "reference_keys",
+        "reference_path",
+        "reference_index",
+        "reference_hash",
+        "reference_count",
+        "part_envelope",
+        "part_lineage",
+        "outcome_tag",
+        "logical_record",
+        "manifest_root",
+        "role_swap",
+        "oversized_part",
+        "target_source_wrapper_symlink",
+        "target_source_family_symlink",
+        "target_source_part_symlink",
+    ),
+)
+def test_compact_fixture_contract_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    original_loader = implementation.load_retained_rows
+
+    def write_document(path: Path, document: dict[str, Any]) -> None:
+        path.write_bytes(implementation._canonical_bytes(document))
+
+    def mutate_part(
+        fixture_root: Path,
+        manifest: dict[str, Any],
+        mutator: Callable[[dict[str, Any]], None],
+    ) -> None:
+        reference = manifest["parts"][0]
+        part_path = fixture_root / reference["path"]
+        envelope = json.loads(part_path.read_text(encoding="utf-8"))
+        mutator(envelope)
+        encoded = implementation._canonical_bytes(envelope)
+        part_path.write_bytes(encoded)
+        reference["sha256"] = hashlib.sha256(encoded).hexdigest()
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        actual_locators = dict(locators)
+        if mutation.startswith("target_source_"):
+            native_manifest = Path(actual_locators["target_source"])
+            if mutation == "target_source_wrapper_symlink":
+                real_manifest = native_manifest.with_name(native_manifest.name + ".real")
+                native_manifest.rename(real_manifest)
+                native_manifest.symlink_to(real_manifest.name)
+            else:
+                family_name = "targets"
+                family = native_manifest.parent / f"{native_manifest.name}.parts" / family_name
+                if mutation == "target_source_part_symlink":
+                    part = family / "part-000000.json"
+                    real_part = part.with_name(part.name + ".real")
+                    part.rename(real_part)
+                    part.symlink_to(real_part.name)
+                else:
+                    real_family = family.with_name(family.name + ".real")
+                    family.rename(real_family)
+                    family.symlink_to(real_family.name, target_is_directory=True)
+            return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+        if mutation == "manifest_root":
+            actual_locators["local_forecast"] = str(
+                Path(actual_locators["local_forecast"]).with_name("outside.json")
+            )
+        elif mutation == "role_swap":
+            actual_locators["local_forecast"] = actual_locators["pooled_forecast"]
+        elif mutation == "oversized_part":
+            assert runtime_max_part_bytes == implementation._MAX_PART_BYTES
+            manifest_path = Path(actual_locators["local_forecast"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            part_path = Path(actual_locators["selection"]).parent / manifest["parts"][0]["path"]
+            original_lstat = os.lstat
+
+            def oversized_lstat(path: Any, *args: Any, **kwargs: Any) -> Any:
+                actual_stat = original_lstat(path, *args, **kwargs)
+                if not args and not kwargs and Path(path) == part_path:
+                    return SimpleNamespace(
+                        st_mode=actual_stat.st_mode,
+                        st_size=runtime_max_part_bytes + 1,
+                    )
+                return actual_stat
+
+            monkeypatch.setattr(os, "lstat", oversized_lstat)
+        else:
+            name = "outcome_evidence" if mutation == "outcome_tag" else "local_forecast"
+            manifest_path = Path(actual_locators[name])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if mutation == "header_digest":
+                manifest["header_sha256"] = "0" * 64
+            elif mutation == "storage":
+                manifest["storage"] = "other"
+            elif mutation == "register":
+                manifest["partition_mapping_fields"] = ["unexpected"]
+            elif mutation == "reference_keys":
+                del manifest["parts"][0]["path"]
+            elif mutation == "reference_path":
+                manifest["parts"][0]["path"] = "../escape.json"
+            elif mutation == "reference_index":
+                manifest["parts"][0]["part_index"] = 1
+            elif mutation == "reference_hash":
+                manifest["parts"][0]["sha256"] = "0" * 64
+            elif mutation == "reference_count":
+                manifest["parts"][0]["row_count"] = 0
+            elif mutation == "part_envelope":
+                mutate_part(
+                    Path(actual_locators["selection"]).parent,
+                    manifest,
+                    lambda envelope: envelope.__setitem__("contract", "other"),
+                )
+            elif mutation == "part_lineage":
+                mutate_part(
+                    Path(actual_locators["selection"]).parent,
+                    manifest,
+                    lambda envelope: envelope.__setitem__("parent_semantic_id", "0" * 64),
+                )
+            elif mutation == "outcome_tag":
+                mutate_part(
+                    Path(actual_locators["selection"]).parent,
+                    manifest,
+                    lambda envelope: envelope["rows"][0].__setitem__("field", "other"),
+                )
+            elif mutation == "logical_record":
+                mutate_part(
+                    Path(actual_locators["selection"]).parent,
+                    manifest,
+                    lambda envelope: envelope["rows"][0]["value"].pop("asset"),
+                )
+            else:
+                raise AssertionError(f"unhandled mutation: {mutation}")
+            write_document(manifest_path, manifest)
+        return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    with pytest.raises(FreezeError):
+        implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+def test_compact_partition_cardinality_matches_runtime_contract(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    assert runtime_max_part_bytes == implementation._MAX_PART_BYTES
+    empty_manifest = {"parts": [], "row_count": 0, "identity_field": "dataset_id"}
+    assert (
+        implementation._declared_partition_paths(
+            tmp_path, "empty.json", empty_manifest, identity_field="dataset_id"
+        )
+        == []
+    )
+
+    with pytest.raises(ValueError, match="non-canonical"):
+        implementation._declared_partition_paths(
+            tmp_path,
+            "zero.json",
+            {
+                "parts": [
+                    {
+                        "path": "zero.json.parts/part-000000.json",
+                        "sha256": "a" * 64,
+                        "row_count": 0,
+                        "part_index": 0,
+                    }
+                ],
+                "row_count": 0,
+                "identity_field": "dataset_id",
+            },
+            identity_field="dataset_id",
+        )
+
+    part_bytes = b"{}"
+    part_path = tmp_path / "normal.json.parts" / "part-000000.json"
+    part_path.parent.mkdir()
+    part_path.write_bytes(part_bytes)
+    normal_manifest = {
+        "parts": [
+            {
+                "path": "normal.json.parts/part-000000.json",
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "row_count": 1,
+                "part_index": 0,
+            }
+        ],
+        "row_count": 1,
+        "identity_field": "dataset_id",
+    }
+    assert implementation._declared_partition_paths(
+        tmp_path, "normal.json", normal_manifest, identity_field="dataset_id"
+    ) == ["normal.json.parts/part-000000.json"]
 
 
 def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path) -> None:
@@ -496,19 +815,164 @@ def test_parts_wrapper_validates_hash_and_reports_consumed_parts(tmp_path: Path)
         _read_json_document(path, limits)
 
 
-def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
+def test_native_loader_relative_and_absolute_roots_share_authenticated_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    part_rows = [{"decision_time": "t", "target_id": "x"}]
+    part_bytes = json.dumps(part_rows, separators=(",", ":")).encode()
+    wrapper = {
+        "contract": "test-wrapper",
+        "parts": [
+            {
+                "locator": "part.json",
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "contract": "test-part",
+                "identity": "part-1",
+                "byte_size": len(part_bytes),
+                "row_count": len(part_rows),
+            }
+        ],
+    }
+    (tmp_path / "part.json").write_bytes(part_bytes)
+    wrapper_path = tmp_path / "wrapper.json"
+    wrapper_path.write_text(json.dumps(wrapper), encoding="utf-8")
+    limits = {
+        "max_source_bytes": 100_000,
+        "max_source_rows": 10,
+        "max_row_bytes": 10_000,
+        "max_nested_depth": 8,
+        "max_part_rows": 3,
+    }
+
+    absolute_result = implementation._read_json_document(wrapper_path, limits)
+    monkeypatch.chdir(tmp_path.parent)
+    relative_path = Path(tmp_path.name) / "wrapper.json"
+    relative_result = implementation._read_json_document(relative_path, limits)
+    assert relative_result == absolute_result
+
+    alias = tmp_path.parent / "relative-root-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError):
+        implementation._read_json_document(alias / "wrapper.json", limits)
+
+    traversed_path = Path(tmp_path.name) / ".." / tmp_path.name / "wrapper.json"
+    with pytest.raises(FreezeError):
+        implementation._read_json_document(traversed_path, limits)
+
+
+def test_native_compact_loader_relative_and_absolute_roots_share_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    logical_row = {"decision_time": "t", "target_id": "x"}
+    envelope = {
+        "contract": "qtrad-r2-partitioned-json-row-part-v1",
+        "schema_version": 1,
+        "parent_contract": "test-wrapper",
+        "parent_semantic_id": "dataset-1",
+        "part_index": 0,
+        "rows": [{"value": logical_row}],
+    }
+    part_bytes = implementation._canonical_bytes(envelope)
+    part_relative = "wrapper.json.parts/part-000000.json"
+    (tmp_path / part_relative).parent.mkdir()
+    (tmp_path / part_relative).write_bytes(part_bytes)
+    manifest = {
+        "contract": "test-wrapper",
+        "dataset_id": "dataset-1",
+        "storage": implementation._PARTITIONED_ROWS_STORAGE,
+        "identity_field": "dataset_id",
+        "row_count": 1,
+        "parts": [
+            {
+                "path": part_relative,
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+                "row_count": 1,
+                "part_index": 0,
+            }
+        ],
+        "partition_row_field": "value",
+        "partition_fields": [],
+        "partition_mapping_fields": [],
+    }
+    physical_fields = {"storage", "identity_field", "row_count", "parts", "header_sha256"}
+    header = {key: value for key, value in manifest.items() if key not in physical_fields}
+    manifest["header_sha256"] = hashlib.sha256(implementation._canonical_bytes(header)).hexdigest()
+    wrapper_path = tmp_path / "wrapper.json"
+    wrapper_bytes = implementation._canonical_bytes(manifest)
+    wrapper_path.write_bytes(wrapper_bytes)
+    limits = {
+        "manifest_root": str(tmp_path),
+        "manifest_relative_path": "wrapper.json",
+        "max_source_bytes": 100_000,
+        "physical_required_keys": list(manifest),
+        "expected_identity_field": "dataset_id",
+        "expected_wrapper_contract": "test-wrapper",
+        "expected_wrapper_identity": "dataset-1",
+        "partition_row_field": "value",
+        "partition_fields": [],
+        "partition_mapping_fields": [],
+        "required_record_keys": ["decision_time", "target_id"],
+        "max_consumed_parts": 2,
+        "max_elapsed_seconds": 10,
+        "max_part_rows": 3,
+        "max_row_bytes": 10_000,
+        "max_source_rows": 10,
+        "_physical_budget": None,
+    }
+
+    absolute_metadata, absolute_iterator, _, _ = implementation._open_partitioned_json_document(
+        wrapper_path, limits
+    )
+    absolute_parts = list(absolute_iterator)
+    monkeypatch.chdir(tmp_path.parent)
+    relative_limits = {**limits, "manifest_root": tmp_path.name}
+    relative_path = Path(tmp_path.name) / "wrapper.json"
+    relative_metadata, relative_iterator, _, _ = implementation._open_partitioned_json_document(
+        relative_path, relative_limits
+    )
+    assert relative_metadata == absolute_metadata
+    assert list(relative_iterator) == absolute_parts
+
+    alias = tmp_path.parent / "compact-root-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError):
+        implementation._open_partitioned_json_document(
+            alias / "wrapper.json", {**limits, "manifest_root": "compact-root-alias"}
+        )
+
+    traversed_root = Path(tmp_path.name) / ".." / tmp_path.name
+    with pytest.raises(FreezeError):
+        implementation._open_partitioned_json_document(
+            traversed_root / "wrapper.json", {**limits, "manifest_root": str(traversed_root)}
+        )
+
+
+def test_fixture_loader_scans_all_parts_before_earliest_selection() -> None:
     from qtrad.application.r3_historical_exploratory import load_fixture_rows
 
     config = FreezeConfig.from_path(CONFIG)
-    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    fixture = synthetic_fixture()
+    latest_decision = max(row.decision_time for row in fixture)
+    no_order_fixture = tuple(
+        replace(row, period=f"{row.period}-fixture-late-earlier")
+        if row.decision_time == latest_decision
+        else row
+        for row in fixture
+    )
+    rows, metadata = load_fixture_rows(no_order_fixture, config)
     assert len(rows) == 18
+    assert {row.decision_time for row in rows} >= {"1969-01-01T00:00:00Z"}
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
-    assert metadata["selection"]["stop_state"] == "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND"
-    assert all(state == "NOT_SCANNED_AFTER_BOUND" for state in metadata["unopened_parts"].values())
-    assert metadata["stop_reason"] == "EARLIEST_COMPLETE_GROUP_BOUND"
-    assert metadata["consumed_parts_count"] == 8
-    assert all(len(hashes) == 2 for hashes in metadata["source_scan_part_hashes"].values())
+    assert metadata["selection"]["stop_state"] == "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF"
+    assert all(state == "EXHAUSTED" for state in metadata["unopened_parts"].values())
+    assert metadata["stop_reason"] == "FULL_SCAN_REQUIRED_NO_ORDER_PROOF"
+    assert metadata["consumed_parts_count"] == 13
+    assert {len(hashes) for hashes in metadata["source_scan_part_hashes"].values()} == {3, 4}
     report = analyse_fixture(rows, config, retained_metadata=metadata).report
     graph_receipts = {
         control["id"]: control["execution_receipt"] for control in report["graph"]["controls"]
@@ -528,6 +992,100 @@ def test_fixture_loader_injects_terminal_authority_and_selection() -> None:
     assert metadata["selected_bytes"] < metadata["consumed_bytes"]
     assert metadata["selected_bytes_kind"] == "logical_serialised_fixture_row_bytes"
     assert len(metadata["source_scan_wrapper_bytes"]) == 6
+
+
+def test_native_fixture_receipts_are_cumulative_and_outcome_values_do_not_select() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    fixture = synthetic_fixture()
+    selected, metadata = load_fixture_rows(fixture, config)
+    mutated = tuple(replace(row, realised_return=row.realised_return + 0.25) for row in fixture)
+    mutated_selected, mutated_metadata = load_fixture_rows(mutated, config)
+    assert tuple(row.decision_time for row in selected) == tuple(
+        row.decision_time for row in mutated_selected
+    )
+    assert (
+        metadata["selection"]["selected_decision_times"]
+        == mutated_metadata["selection"]["selected_decision_times"]
+    )
+    assert metadata["source_scan_parts"] > metadata["selected_groups"]
+    assert metadata["source_scan_read_operations"] >= metadata["source_scan_parts"]
+    assert metadata["source_scan_bytes"] == metadata["consumed_bytes"]
+    assert metadata["source_limits"]["max_part_bytes"] == 536_870_912
+    assert metadata["selection_state"]["full_payload_materialisation"] is False
+    assert (
+        metadata["selection_state"]["bounded_id_state_peak"]
+        <= metadata["source_limits"]["max_rows"]
+    )
+    assert metadata["native_target_source"]["pre_holdout_parts_unopened"] == 1
+
+
+def test_retained_cli_requires_target_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "r3_historical_exploratory.py",
+            "--retained",
+            "--selection",
+            "selection.json",
+            "--consumed",
+            "consumed.json",
+            "--local-forecast",
+            "local.json",
+            "--pooled-forecast",
+            "pooled.json",
+            "--zero-forecast",
+            "zero.json",
+            "--outcome-evidence",
+            "outcome.json",
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path("ops/research/r3_historical_exploratory.py", run_name="__main__")
+    assert error.value.code == 2
+
+
+def test_retained_source_inventory_requires_exact_declared_and_scanned_bounds() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    streaming = FreezeConfig.from_path(CONFIG).document["retained_loader"]["streaming_policy"]
+    declared = {
+        "local_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "pooled_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "zero_forecast": {"row_count": 202_709, "parts": [None] * 25},
+        "outcome_evidence": {"row_count": 608_127, "parts": [None] * 75},
+    }
+    implementation._validate_declared_source_inventory(streaming, declared)
+    declared["outcome_evidence"]["parts"].append(None)
+    with pytest.raises(FreezeError, match="declared source inventory"):
+        implementation._validate_declared_source_inventory(streaming, declared)
+
+    part_bytes = [4_198_824, 2_476_431, *([2_476_354] * 148)]
+    receipts = {
+        "local_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[:25]
+        ],
+        "pooled_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[25:50]
+        ],
+        "zero_forecast": [
+            {"physical_rows": 202_709 // 25, "bytes": size} for size in part_bytes[50:75]
+        ],
+        "outcome_evidence": [
+            {"physical_rows": 608_127 // 75, "bytes": size} for size in part_bytes[75:]
+        ],
+    }
+    with pytest.raises(FreezeError, match="scanned source inventory"):
+        implementation._validate_scanned_source_inventory(streaming, receipts)
+
+    rows = [202_709] * 3 + [608_127]
+    for source, expected_rows in zip(receipts, rows, strict=True):
+        for receipt in receipts[source]:
+            receipt["physical_rows"] = 0
+        receipts[source][0]["physical_rows"] = expected_rows
+    implementation._validate_scanned_source_inventory(streaming, receipts)
 
 
 def test_swapped_retained_role_records_fail_closed() -> None:
@@ -984,3 +1542,432 @@ def test_renderer_rejects_frozen_role_wrapper_mutation() -> None:
     report["retained_parents"]["role_bindings"]["POOLED_LOCAL_RIDGE"]["wrapper_sha256"] = "0" * 64
     with pytest.raises(FreezeError, match="renderer"):
         render_markdown(MicroRun(report, result.work_count), config)
+
+
+def test_native_parts_root_rejects_orphans_and_ancestor_symlinks(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    parts_root = wrapper.with_name("target-source.json.parts")
+    (parts_root / "targets").mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    implementation._validate_native_authorised_root(wrapper)
+    (parts_root / "orphan.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FreezeError, match="undeclared entry"):
+        implementation._validate_native_authorised_root(wrapper)
+
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(FreezeError, match="parts root"):
+        implementation._validate_native_authorised_root(symlink_parent / "target-source.json")
+
+
+def test_native_physical_parts_shape_and_pre_holdout_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    wrapper = tmp_path / "target-source.json"
+    wrapper.write_bytes(b"{}")
+    parts_root = wrapper.with_name("target-source.json.parts")
+    targets = parts_root / "targets"
+    targets.mkdir(parents=True)
+    (parts_root / "opportunities").mkdir()
+    rows = [{"target_id": "target-1", "decision_time": "t"}]
+    envelope = {
+        "contract": implementation._TARGET_SOURCE_PART_CONTRACT,
+        "schema_version": 1,
+        "source_id": "source-1",
+        "kind": "targets",
+        "part_index": 0,
+        "rows": rows,
+    }
+    encoded = json.dumps(envelope, separators=(",", ":")).encode()
+    part = targets / "part-000000.json"
+    part.write_bytes(encoded)
+    receipt: dict[str, Any] = {"max_parts": 1, "max_part_bytes": 10_000}
+    result = list(
+        implementation._iter_native_source_parts(
+            wrapper,
+            [
+                (
+                    "target-source.json.parts/targets/part-000000.json",
+                    hashlib.sha256(encoded).hexdigest(),
+                    1,
+                )
+            ],
+            kind="targets",
+            source_id="source-1",
+            receipt=receipt,
+        )
+    )
+    assert result == rows
+    assert receipt["physical_parts"] == 1
+    part.write_bytes(encoded.replace(b"source-1", b"source-2"))
+    with pytest.raises(FreezeError, match="lineage"):
+        list(
+            implementation._iter_native_source_parts(
+                wrapper,
+                [
+                    (
+                        "target-source.json.parts/targets/part-000000.json",
+                        hashlib.sha256(part.read_bytes()).hexdigest(),
+                        1,
+                    )
+                ],
+                kind="targets",
+                source_id="source-1",
+                receipt={"max_parts": 1, "max_part_bytes": 10_000},
+            )
+        )
+
+    calls: list[str] = []
+
+    def forbidden_stat(_path: Path) -> bool:
+        calls.append("stat")
+        raise AssertionError("pre-holdout stat")
+
+    def forbidden_read(_path: Path) -> bytes:
+        calls.append("read")
+        raise AssertionError("pre-holdout read")
+
+    monkeypatch.setattr(Path, "is_file", forbidden_stat)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read)
+    manifest = {
+        "pre_holdout_target_parts": [
+            {
+                "path": "target-source.json.parts/pre-holdout-target/part-000000.json",
+                "sha256": "0" * 64,
+                "row_count": 1,
+            }
+        ]
+    }
+    assert implementation._native_source_references(
+        wrapper, manifest, "pre_holdout_target_parts", inspect_files=False
+    ) == [
+        (
+            "target-source.json.parts/pre-holdout-target/part-000000.json",
+            "0" * 64,
+            1,
+        )
+    ]
+    assert calls == []
+
+
+def test_native_declared_inventory_qualifies_child_and_path(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    forecast_part = tmp_path / "local_forecast.json.parts" / "part-000000.json"
+    outcome_part = tmp_path / "outcome-evidence.json.parts" / "part-000000.json"
+    forecast_part.parent.mkdir(parents=True)
+    outcome_part.parent.mkdir(parents=True)
+    forecast_part.write_text("{}", encoding="utf-8")
+    outcome_part.write_text("{}", encoding="utf-8")
+    forecast_relative = forecast_part.relative_to(tmp_path).as_posix()
+    outcome_relative = outcome_part.relative_to(tmp_path).as_posix()
+    budget: dict[str, Any] = {"max_declared_parts": 1}
+
+    implementation._register_declared_inventory(budget, "local_forecast", [forecast_relative])
+    implementation._register_declared_inventory(budget, "local_forecast", [forecast_relative])
+    assert budget["declared_paths"] == {f"local_forecast:{forecast_relative}"}
+    with pytest.raises(FreezeError, match="declared source inventory"):
+        implementation._register_declared_inventory(budget, "outcome_evidence", [outcome_relative])
+
+
+def test_native_physical_budget_read_operations_fail_closed() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    budget: dict[str, Any] = {"read_operations": 0, "max_read_operations": 1}
+    implementation._charge_physical_budget(budget, read_operations=1)
+    assert budget["read_operations"] == 1
+    with pytest.raises(FreezeError, match="read_operations"):
+        implementation._charge_physical_budget(budget, read_operations=1)
+
+
+def test_native_marker_wrapper_accounting_is_exact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    fixture_rows = synthetic_fixture()
+    _, baseline = implementation.load_fixture_rows(fixture_rows, config)
+    original_open = implementation._open_json_document
+
+    def padded_marker(path: Path, limits: Mapping[str, Any]) -> Any:
+        opened = original_open(path, limits)
+        if path.name == "selection.json":
+            return opened[0], opened[1], opened[2] + 7, opened[3]
+        if path.name == "consumed.json":
+            return opened[0], opened[1], opened[2] + 11, opened[3]
+        return opened
+
+    monkeypatch.setattr(implementation, "_open_json_document", padded_marker)
+    _, mutated = implementation.load_fixture_rows(fixture_rows, config)
+    assert (
+        mutated["source_scan_wrapper_bytes"]["selection"]
+        == baseline["source_scan_wrapper_bytes"]["selection"] + 7
+    )
+    assert (
+        mutated["source_scan_wrapper_bytes"]["consumed"]
+        == baseline["source_scan_wrapper_bytes"]["consumed"] + 11
+    )
+    assert mutated["source_scan_bytes"] == baseline["source_scan_bytes"] + 18
+    assert mutated["consumed_bytes"] == mutated["source_scan_bytes"]
+    assert mutated["source_scan_read_operations"] == baseline["source_scan_read_operations"]
+
+    def reject_marker_read(path: Path, limits: Mapping[str, Any]) -> Any:
+        if path.name == "selection.json":
+            budget = limits["_physical_budget"]
+            assert isinstance(budget, dict)
+            budget["max_read_operations"] = int(budget["read_operations"])
+        return original_open(path, limits)
+
+    monkeypatch.setattr(implementation, "_open_json_document", reject_marker_read)
+    with pytest.raises(FreezeError, match="read_operations"):
+        implementation.load_fixture_rows(fixture_rows, config)
+
+
+@pytest.mark.parametrize("field", ("instrument_id", "decision_time", "target_horizon_seconds"))
+def test_native_opportunity_identity_matches_target(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    original_loader = implementation.load_retained_rows
+
+    def mutated_loader(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None = None,
+        _fixture: bool = False,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        actual_locators = dict(locators)
+        manifest_path = Path(actual_locators["target_source"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        reference = manifest["opportunity_parts"][0]
+        part_path = manifest_path.parent / reference["path"]
+        envelope = json.loads(part_path.read_text(encoding="utf-8"))
+        row = envelope["rows"][0]
+        if field == "instrument_id":
+            row[field] = next(
+                instrument for instrument in implementation._TARGET_IDS if instrument != row[field]
+            )
+        elif field == "decision_time":
+            row[field] = "2099-01-01T00:00:00Z"
+        else:
+            row[field] = 901
+        encoded = implementation._canonical_bytes(envelope)
+        part_path.write_bytes(encoded)
+        reference["sha256"] = hashlib.sha256(encoded).hexdigest()
+        manifest["closure_id"] = implementation._native_source_closure(manifest)
+        manifest_path.write_bytes(implementation._canonical_bytes(manifest))
+        return original_loader(fixture_config, locators=actual_locators, _fixture=True)
+
+    monkeypatch.setattr(implementation, "load_retained_rows", mutated_loader)
+    with pytest.raises(FreezeError, match="opportunity identity differs from target"):
+        implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "orphan_file",
+        "orphan_directory",
+        "orphan_symlink",
+        "symlinked_root",
+        "symlinked_parent",
+        "symlinked_grandparent",
+        "declared_symlink",
+    ),
+)
+def test_native_outcome_parts_tree_rejects_undeclared_and_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    real_parent = tmp_path / "real" / "anchor"
+    real_parent.mkdir(parents=True)
+    manifest_path = real_parent / "outcome-evidence.json"
+    root = real_parent / "outcome-evidence.json.parts"
+    root.mkdir()
+    part = root / "part-000000.json"
+    part.write_bytes(b"part")
+    references: list[Mapping[str, Any]] = [
+        {
+            "path": "outcome-evidence.json.parts/part-000000.json",
+            "sha256": hashlib.sha256(b"part").hexdigest(),
+            "row_count": 1,
+            "part_index": 0,
+        }
+    ]
+    if mutation == "orphan_file":
+        (root / "orphan.json").write_text("orphan", encoding="utf-8")
+
+        def forbidden_is_file(_path: Path) -> bool:
+            raise AssertionError("orphan stat")
+
+        monkeypatch.setattr(Path, "is_file", forbidden_is_file)
+    elif mutation == "orphan_directory":
+        (root / "orphan").mkdir()
+    elif mutation == "orphan_symlink":
+        target = tmp_path / "symlink-target"
+        target.write_text("target", encoding="utf-8")
+        (root / "orphan").symlink_to(target)
+    elif mutation == "symlinked_root":
+        real_root = root.with_name("outcome-evidence.json.parts.real")
+        root.rename(real_root)
+        root.symlink_to(real_root, target_is_directory=True)
+    elif mutation == "symlinked_parent":
+        alias = tmp_path / "parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        manifest_path = alias / manifest_path.name
+    elif mutation == "symlinked_grandparent":
+        alias = tmp_path / "grandparent-alias"
+        alias.symlink_to(tmp_path / "real", target_is_directory=True)
+        manifest_path = alias / "anchor" / manifest_path.name
+    else:
+        real_part = root / "part-000000.real"
+        part.rename(real_part)
+        part.symlink_to(real_part.name)
+
+    with pytest.raises(FreezeError):
+        implementation._validate_native_outcome_parts_tree(
+            manifest_path, references, manifest_relative_path="outcome-evidence.json"
+        )
+
+
+def test_native_outcome_parts_tree_accepts_normal_physical_tree(tmp_path: Path) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    parent = tmp_path / "normal"
+    parent.mkdir()
+    manifest_path = parent / "outcome-evidence.json"
+    manifest_path.write_bytes(b"{}")
+    root = parent / "outcome-evidence.json.parts"
+    root.mkdir()
+    part = root / "part-000000.json"
+    part.write_bytes(b"part")
+    references: list[Mapping[str, Any]] = [
+        {
+            "path": "outcome-evidence.json.parts/part-000000.json",
+            "sha256": hashlib.sha256(b"part").hexdigest(),
+            "row_count": 1,
+            "part_index": 0,
+        }
+    ]
+    implementation._validate_native_outcome_parts_tree(
+        manifest_path, references, manifest_relative_path="outcome-evidence.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "normal",
+        "wrapper_sha",
+        "wrapper_symlink",
+        "parent_symlink",
+        "grandparent_symlink",
+        "declared_part_symlink",
+    ),
+)
+def test_native_authenticated_open_surface_guard(tmp_path: Path, mutation: str) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    if mutation == "grandparent_symlink":
+        real_grandparent = tmp_path / "real-grandparent"
+        real_parent = real_grandparent / "parent"
+        real_parent.mkdir(parents=True)
+        alias_grandparent = tmp_path / "grandparent-alias"
+        alias_grandparent.symlink_to(real_grandparent, target_is_directory=True)
+        wrapper = alias_grandparent / "parent" / "wrapper.json"
+    elif mutation == "parent_symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        alias_parent = tmp_path / "parent-alias"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        wrapper = alias_parent / "wrapper.json"
+    else:
+        wrapper = tmp_path / "wrapper.json"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+
+    encoded = b'{"ok":true}'
+    wrapper.write_bytes(encoded)
+    expected = hashlib.sha256(encoded).hexdigest()
+    part_relative = PurePosixPath("wrapper.json.parts/part-000000.json")
+    part = wrapper.parent / part_relative
+    part.parent.mkdir()
+    part.write_bytes(encoded)
+
+    if mutation == "wrapper_sha":
+        with pytest.raises(FreezeError, match="byte hash"):
+            implementation._native_authenticated_read(
+                wrapper, PurePosixPath(wrapper.name), expected_sha256="0" * 64
+            )
+        return
+    if mutation == "wrapper_symlink":
+        real_wrapper = wrapper.with_name("wrapper.real")
+        wrapper.rename(real_wrapper)
+        wrapper.symlink_to(real_wrapper.name)
+    elif mutation == "declared_part_symlink":
+        real_part = part.with_name("part.real")
+        part.rename(real_part)
+        part.symlink_to(real_part.name)
+
+    if mutation == "normal":
+        path, actual = implementation._native_authenticated_read(
+            wrapper, PurePosixPath(wrapper.name), expected_sha256=expected
+        )
+        assert path == wrapper.absolute()
+        assert actual == encoded
+        return
+
+    with pytest.raises(FreezeError):
+        relative = (
+            part_relative if mutation == "declared_part_symlink" else PurePosixPath(wrapper.name)
+        )
+        implementation._native_authenticated_read(wrapper, relative, expected_sha256=expected)
+
+
+def test_native_json_open_surface_has_one_authenticated_read_boundary() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    tree = ast.parse(inspect.getsource(implementation))
+    loader_names = {
+        "_declared_partition_paths",
+        "_open_partitioned_json_document",
+        "_open_json_document",
+        "_iter_native_source_parts",
+        "_load_native_target_source",
+        "_load_native_outcome_values",
+        "_load_native_retained_rows",
+        "_validate_native_outcome_parts_tree",
+    }
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in loader_names:
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            target = call.func
+            if isinstance(target, ast.Name) and target.id == "open":
+                violations.append(f"{node.name}:open")
+            elif isinstance(target, ast.Attribute) and target.attr in {
+                "open",
+                "read_bytes",
+                "read_text",
+                "resolve",
+                "stat",
+                "is_file",
+                "is_dir",
+                "is_symlink",
+            }:
+                violations.append(f"{node.name}:{target.attr}")
+    assert violations == []

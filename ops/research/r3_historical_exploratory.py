@@ -67,6 +67,7 @@ def main() -> int:
     parser.add_argument("--pooled-forecast")
     parser.add_argument("--zero-forecast")
     parser.add_argument("--outcome-evidence")
+    parser.add_argument("--target-source", help="bounded native target-source manifest")
     parser.add_argument("--output", help="create-only report destination")
     parser.add_argument(
         "--output-format",
@@ -89,6 +90,9 @@ def main() -> int:
         }
         if any(value is None for value in locator_values.values()):
             parser.error("--retained requires all exact child locator arguments")
+        if args.target_source is None:
+            parser.error("--retained requires --target-source")
+        locator_values["target_source"] = args.target_source
         rows, retained_metadata = load_retained_rows(
             config, locators={key: str(value) for key, value in locator_values.items()}
         )

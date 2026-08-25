@@ -126,7 +126,8 @@
             "pooled_forecast": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/forecasts/d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json",
             "zero_forecast": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/forecasts/93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json",
             "outcome_evidence": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/outcome-evidence.json"},
-        "decode_policy": "decode only selected forecast/outcome parts after terminal authority; never replay ancestry",
+        "manifest_root": "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation",
+        "decode_policy": "stream all authenticated forecast/outcome parts one at a time after terminal authority; never replay ancestry",
         "selection_policy": {
             "join_fields": [
                 "decision_time",
@@ -149,10 +150,15 @@
             "outcome_blind": true},
         "streaming_policy": {
             "parts_first": true,
-            "stop_after_selected_groups": true,
+            "stop_after_selected_groups": false,
             "hash_consumed_parts": true,
             "max_source_rows": 3376258,
-            "max_source_bytes": 2147483648},
+            "max_source_bytes": 2147483648,
+            "max_consumed_parts": 150,
+            "expected_source_rows": 1216254,
+            "expected_source_part_bytes": 373175647,
+            "expected_source_parts": 150,
+            "expected_largest_part_bytes": 4198824},
         "decoder_limits": {
             "max_row_bytes": 16384,
             "max_nested_depth": 8,
@@ -178,33 +184,84 @@
                 "identity_field": "dataset_id",
                 "identity": "8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9",
                 "sha256": "a11e7096d25cb0ffcda3c4c0bd2efd5d6fde51c50ff8607598b957176992fd0a",
-                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"],
+                "physical_required_keys": ["configuration_id", "contract", "dataset_id", "evidence_class", "expected_opportunity_ids", "feature_dataset_id", "final_fit_id", "final_fit_ids", "header_sha256", "holdout_outcomes_accessed", "holdout_scope", "identity_field", "opportunity_target_ids", "partition_fields", "partition_mapping_fields", "partition_row_field", "parts", "row_count", "schema_version", "selection_manifest_id", "source_class", "storage"],
+                "manifest_relative_path": "forecasts/8a4fe578512816dc41e644ffd8a69e462440429eff5f76fb9bee5f477f36b4a9.json",
+                "partition_row_field": "rows",
+                "partition_fields": ["rows"],
+                "partition_mapping_fields": []
             },
             "pooled_forecast": {
                 "contract": "qtrad-r2-holdout-forecast-v1",
                 "identity_field": "dataset_id",
                 "identity": "d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b",
                 "sha256": "e973e855ab2d62585cd8b809d9a57e74f6fc5b0908b292c08b7ad42ba16df6b6",
-                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"],
+                "physical_required_keys": ["configuration_id", "contract", "dataset_id", "evidence_class", "expected_opportunity_ids", "feature_dataset_id", "final_fit_id", "final_fit_ids", "header_sha256", "holdout_outcomes_accessed", "holdout_scope", "identity_field", "opportunity_target_ids", "partition_fields", "partition_mapping_fields", "partition_row_field", "parts", "row_count", "schema_version", "selection_manifest_id", "source_class", "storage"],
+                "manifest_relative_path": "forecasts/d2d07d4059ca989a97a2e24f663f28949515592fcaffbae7ea7b0da0ca8b6f6b.json",
+                "partition_row_field": "rows",
+                "partition_fields": ["rows"],
+                "partition_mapping_fields": []
             },
             "zero_forecast": {
                 "contract": "qtrad-r2-holdout-forecast-v1",
                 "identity_field": "dataset_id",
                 "identity": "93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223",
                 "sha256": "bfba06f10de85ad356bfc587d2010544a3f3959d13204f987f22773e916cd72d",
-                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"]
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "feature_dataset_id", "configuration_id", "final_fit_id", "final_fit_ids", "rows", "expected_opportunity_ids", "opportunity_target_ids", "source_class", "evidence_class", "holdout_scope", "holdout_outcomes_accessed", "dataset_id"],
+                "physical_required_keys": ["configuration_id", "contract", "dataset_id", "evidence_class", "expected_opportunity_ids", "feature_dataset_id", "final_fit_id", "final_fit_ids", "header_sha256", "holdout_outcomes_accessed", "holdout_scope", "identity_field", "opportunity_target_ids", "partition_fields", "partition_mapping_fields", "partition_row_field", "parts", "row_count", "schema_version", "selection_manifest_id", "source_class", "storage"],
+                "manifest_relative_path": "forecasts/93eb9453c269a438eaf2b1a149653449d526bcde3354a7892859097c05ec5223.json",
+                "partition_row_field": "rows",
+                "partition_fields": ["rows"],
+                "partition_mapping_fields": []
             },
             "outcome_evidence": {
                 "contract": "qtrad-r2-holdout-outcome-evidence-v1",
                 "identity_field": "outcome_evidence_id",
                 "identity": "480ef61aec7daff49eadbec7d5ec6dc7c7f6f702c92b6a0bdbc9a7c05a342f8a",
                 "sha256": "44be69c09433f4e237eb78535a2e0ba0cab6de67c96d5b79e6e1d69df28f13b1",
-                "required_keys": ["contract", "schema_version", "selection_manifest_id", "seal_id", "opened_marker_id", "experiment_configuration_id", "foundation_bundle_id", "feature_dataset_id", "target_dataset_id", "holdout_range", "expected_target_ids", "source_row_ids", "outcomes", "source_class", "evidence_class", "holdout_scope", "outcome_evidence_id"]
+                "required_keys": ["contract", "schema_version", "selection_manifest_id", "seal_id", "opened_marker_id", "experiment_configuration_id", "foundation_bundle_id", "feature_dataset_id", "target_dataset_id", "holdout_range", "expected_target_ids", "source_row_ids", "outcomes", "source_class", "evidence_class", "holdout_scope", "outcome_evidence_id"],
+                "physical_required_keys": ["contract", "schema_version", "selection_manifest_id", "seal_id", "opened_marker_id", "experiment_configuration_id", "foundation_bundle_id", "feature_dataset_id", "target_dataset_id", "holdout_range", "source_class", "evidence_class", "holdout_scope", "outcome_evidence_id", "partition_row_field", "partition_fields", "partition_mapping_fields", "header_sha256", "storage", "identity_field", "row_count", "parts"],
+                "manifest_relative_path": "outcome-evidence.json",
+                "partition_row_field": "outcomes",
+                "partition_fields": ["expected_target_ids", "source_row_ids", "outcomes"],
+                "partition_mapping_fields": []
+            }
+        },
+        "target_source": {
+            "contract": "qtrad-r2-holdout-target-source-v1",
+            "schema_version": 1,
+            "storage": "qtrad-r2-holdout-target-source-bounded-parts-v1",
+            "source_id": "b2c3442578bcc65a4b3ee573d34cef474f0dfb09cbdd563bacb1a7740a449994",
+            "wrapper_sha256": "672206c558f7fd7db01f7f493f583b30d8944268ffaefa1df314f1f6151a0140",
+            "closure_id": "216848d5446882763799870051b460e17aba2149cf90a47d361958e8da51c526",
+            "source_target_dataset_id": "2a09e6146e6feaa1e707f245c8585949fdc15a3a92828f37e1a9e93866de8e5f",
+            "target_index_dataset_id": "822c4d2b873d0b704481077ef3fb1cddff25deabe574d3177caa9c5a5e45504f",
+            "foundation_configuration_id": "c45c2a8be643771bb1940a35d34a990c8b5976e56b551142e376634de57bb9b6",
+            "observation_dataset_id": "ae6a07f5a7201a184e7d506f2d8f4fd2a27d77045fdf00d383daabe904e9ef41",
+            "availability_evidence_id": "cc8f9ab805ec1f2e0b26bfd132c1209c8f80ac331f8b996d3d8799776b6d5c69",
+            "causal_metadata_dataset_id": "0f23d7b17629e50d7ee921edf0dbb910d2e42b03b0ba06c39f12286065fc16fd",
+            "causal_panel_dataset_id": "bb757d25b4e922740905dbab929f7a50492f61f3d60537e023d6a8143040918f",
+            "authorised_families": {
+                "targets": {"row_count": 1058629, "part_count": 9},
+                "opportunities": {"row_count": 207924, "part_count": 2}
+            },
+            "forbidden_families": ["pre_holdout_target_parts"],
+            "combined_inventory": {
+                "row_count": 1266553,
+                "part_count": 11,
+                "byte_count": 712575890,
+                "largest_part_bytes": 67108825
+            },
+            "hard_limits": {
+                "max_rows": 3376258,
+                "max_bytes": 2147483648,
+                "max_part_bytes": 536870912
             }
         }
     },
     "scale_projection": {
-        "retained_row_count": 3376258,
+        "retained_row_count": 1216254,
         "target_count": 6,
         "group_count": 3,
         "fixture_row_count": 18,
@@ -222,7 +279,7 @@
                 "horizon_minutes",
                 "period"],
             "outcome_blind": true},
-        "source_scan": {"rows": 3376258, "bytes": 2147483648, "parts": 75},
+        "source_scan": {"rows": 1216254, "bytes": 373175647, "parts": 150},
         "decoder_limits": {
             "max_row_bytes": 16384,
             "max_nested_depth": 8,
@@ -230,7 +287,7 @@
             "max_selected_rows": 64},
         "streaming_policy": {
             "parts_first": true,
-            "stop_after_selected_groups": true,
+            "stop_after_selected_groups": false,
             "hash_consumed_parts": true,
             "peak_memory_margin_mb": 256},
         "stop_conditions": [
@@ -312,4 +369,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "cf80f2543379344cc1bbf62cd324f78e136ace2d76a0e514ead38d34678bbc14"}
+    "semantic_identity": "3fecb92df8221d776d3311d4764766fbdb0790ebe064de95b223749e0f87a92d"}
