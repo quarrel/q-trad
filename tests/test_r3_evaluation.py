@@ -390,6 +390,38 @@ def test_multihorizon_lifecycle_nets_once_per_event_and_finances_held_sleeves(tm
     )
 
 
+def test_multihorizon_lifecycle_records_zero_delta_holding_finance(tmp_path):
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    events = report.lifecycle_events
+    assert events is not None
+
+    holding_event = next(
+        event
+        for event in events
+        if event.physical_delta == (("ASSET_A", Decimal("0")),)
+        and event.physical_position[0][1] != Decimal("0")
+    )
+    assert holding_event.next_event_time - holding_event.event_time > timedelta(0)
+    assert holding_event.physical_position == (("ASSET_A", Decimal("0.125")),)
+    assert holding_event.transaction_cost == (("ASSET_A", Decimal("0")),)
+    assert holding_event.sleeve_transaction_costs
+    assert all(amount == Decimal("0") for _, amount in holding_event.sleeve_transaction_costs)
+
+    financing = holding_event.financing_cost[0][1]
+    assert financing > Decimal("0")
+    assert holding_event.sleeve_financing_costs == (
+        ("long-60m", financing / Decimal("2")),
+        ("short-60m", financing / Decimal("2")),
+    )
+    assert (
+        sum(
+            (amount for _, amount in holding_event.sleeve_financing_costs),
+            Decimal("0"),
+        )
+        == financing
+    )
+
+
 def test_lifecycle_event_identity_chain_rejects_mutation(tmp_path):
     report = run_fixture(tmp_path, (5, 15, 30))
     events = report.lifecycle_events
