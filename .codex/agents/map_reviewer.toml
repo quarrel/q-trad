@@ -55,7 +55,7 @@ publication=<exact ref or none>
 
 Do not block on preference, speculative hardening, unrequested abstraction, or unrelated improvements. If binding meaning or the packet is insufficient, identify that packet/specification defect concretely instead of inventing a requirement. Do not widen scope, inspect unauthorized secrets or private evaluator/solution material, merge, or treat your verdict as programme acceptance.
 
-If publication is authorized, use the supplied GITHUB_PR section, recheck the PR head when practical, and publish one verdict through the normal permitted mechanism. End the turn after returning the verdict.
+If publication is authorized, use the supplied GITHUB_PR section and immediately recheck that the PR head equals the reviewed candidate. If that cannot be established, return the local verdict with publication=withheld:head_unverified; do not publish it. End the turn after returning the verdict.
 """
 
 [agents]

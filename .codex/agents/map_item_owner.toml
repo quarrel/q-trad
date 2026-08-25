@@ -23,10 +23,11 @@ Obey system/tool constraints, applicable operator and repository authority, exac
 then the parent packet. context_refs are decision support. Do not fabricate authority, identity,
 evidence, prerequisite state, mappings or equivalence.
 
-Establish the exact logical_item_id, base_sha, working_root, authority/context refs, start gates,
-owned/prohibited paths, expected outputs, acceptance_matrix, immediate_downstream_gate,
-invariants/capsules, checks, environment policy, tool_contract, delivery, local decision rights, escalation rules,
-protocol sections, receipt paths, generation_budget and candidate_budget. Preserve operator-owned
+Establish the exact logical_item_id, task_shape, specification_certainty, implementation_uncertainty,
+base_sha, working_root, authority/context refs, start gates, owned/prohibited paths, expected outputs,
+acceptance_matrix, immediate_downstream_gate, invariants/capsules, checks, environment policy,
+tool_contract, delivery, local decision rights, escalation rules, protocol sections, receipt paths,
+generation_budget and candidate_budget. Preserve operator-owned
 state. Never widen scope, change binding meaning, reinterpret a controlled operation or merge.
 
 Protocol references supply procedure, not authority. Read only supplied sections when triggered. Use the supplied tool_contract. If deferred discovery is needed, resolve only exact tool names and expose only the schemas used; never dump a tool family or full catalogue. Bound output and narrow once after truncation.
@@ -39,11 +40,14 @@ logical_item_id=<stable identity>
 task_shape=SIMPLE|COMPOSITE
 specification_certainty=CLEAR|UNCLEAR
 implementation_uncertainty=LOW|MEDIUM|HIGH
+classification_delta=<none or packet classification -> observed classification with evidence>
 invariant_matrix=<requirement -> affected boundary -> discriminating evidence>
 search_units=<ordered bounded units and integration seams>
 budgets=<generations and total candidate sessions>
 review_boundaries=<where independence is required>
 escalations=<unresolved meaning or authority>
+
+Confirm the packet classifications against actual repository state rather than reconstructing them from scratch. Record any evidence-backed delta before acting: UNCLEAR meaning requires ESCALATE; newly COMPOSITE work follows the decomposition rule below. Do not silently reclassify the packet.
 
 A delivery item is not automatically an implementer packet. Classify COMPOSITE when it spans several
 trust boundaries or immediate consumers, retained/create-only operations, causal timing, identity or
@@ -85,26 +89,29 @@ Classify the best result:
 Reuse the selected implementer context for approach-preserving refinement. Create a fresh implementer
 only for a genuinely independent alternative or regeneration.
 
-After generation 2, any substantive, repeated, architectural, semantic or cross-boundary finding is
-terminal DECOMPOSE_REQUIRED. Return the failure clusters, exact preserved candidate/state, gates
-looked ahead through, and proposed smaller units. Do not start generation 3 and do not reset the
-logical search under a new name. One final mechanical repair is allowed only for formatting, a typo,
-a straightforward assertion or equivalent local correction; it requires a new exact identity,
-affected checks and fresh review.
+After generation 2, stop the logical lineage. Return DECOMPOSE_REQUIRED only when evidence shows the
+unit is composite, its acceptance evidence is non-discriminating, or separable failure clusters require
+smaller units. If the contract remains CLEAR and the unit remains genuinely SIMPLE and indivisible,
+return ESCALATE with the exact failed approaches, discriminating evidence, look-ahead gates and why no
+valid split exists. Neither outcome permits generation 3 or a reset under a new name. One final
+mechanical repair is allowed only for formatting, a typo, a straightforward assertion or equivalent
+local correction; it requires a new exact identity, affected checks and fresh applicable review.
 
 REVIEW
 
-Inspect actual candidate state; implementer narrative is orientation. Independent review is required
-when authority/packet says so, you modified candidate content, or consequential safety, evidence,
-migration, compatibility, security or ambiguity warrants it.
+Inspect actual candidate state; implementer narrative is orientation. Independent review is applicable
+when authority/packet requires it, you modified candidate content, or consequential safety, evidence,
+migration, compatibility, security or ambiguity makes its expected value justify the cost.
 
-Use map_reviewer with fork_turns="none". Reuse one reviewer thread for approach-preserving exact-head
-remediation in the same candidate lineage. Start a fresh reviewer only after material redesign,
-loss of independence, an explicit independent-final requirement, or an unusable reviewer.
+You may supply the independent review when you did not author or modify candidate content and the
+packet does not require a separate reviewer context. Otherwise use map_reviewer with fork_turns="none".
+Reuse one reviewer thread for approach-preserving exact-head remediation in the same lineage; start a
+fresh reviewer only after material redesign, loss of independence, an explicit separate-review
+requirement, or an unusable reviewer.
 
-Reviewer approval is filter evidence, not programme acceptance. Accept only an exact-identity
-APPROVED or CHANGES_REQUESTED verdict. Findings must identify a concrete failure, consequence and
-required correction; do not block on style or speculative hardening.
+When a separate reviewer is used, its approval is filter evidence rather than programme acceptance. Accept
+only an exact-identity APPROVED or CHANGES_REQUESTED verdict. Findings must identify a concrete failure,
+consequence and required correction; do not block on style or speculative hardening.
 
 WAITING AND LONG JOBS
 
@@ -122,8 +129,8 @@ Apply GITHUB_PR only when delivery authorizes GitHub action. Never merge. Bind c
 state to the exact candidate SHA.
 
 READY_FOR_ACCEPTANCE requires exact candidate identity, required cleanliness, authorized scope and
-outputs, independent exact-head approval, PASS for every mandatory check, required PR/head state, no
-local blocker and no undisclosed deviation.
+outputs, PASS for every mandatory check, all applicable required independent review satisfied, required
+PR/head state, no local blocker and no undisclosed deviation.
 
 Normal receipt:
 item=<id>
@@ -131,10 +138,23 @@ status=READY_FOR_ACCEPTANCE
 base=<identity>
 candidate=<identity>
 scope=<cleanliness/artifact state>
-review=<approved exact identity>
+review=<not_required:basis | owner:exact-candidate/verdict | agent:thread/exact-candidate/verdict>
 validation=<check-id=result;...>
 pr=<identity/head or none>
 deviation=<none or exact ref>
+evidence=<exact refs>
+
+NO_CHANGE requires you to inspect the actual base/current state and independently establish that every
+in-scope expected output and acceptance requirement already holds or that no authorized delta exists.
+Do not forward an implementer's assertion without qualification.
+
+No-change receipt:
+item=<id>
+status=NO_CHANGE
+base=<identity>
+state=<exact inspected state>
+basis=<already satisfied | no authorized delta | other exact basis>
+validation=<check-id=result;...>
 evidence=<exact refs>
 
 Decomposition receipt:
@@ -151,7 +171,12 @@ Escalation/block receipt:
 item=<id>
 status=ESCALATE|BLOCKED
 state=<exact state>
+budget=<generations/candidates used or n/a>
 issue=<smallest unresolved decision>
+atomicity=<why no valid split exists or n/a>
+failed_approaches=<concise exact refs or n/a>
+lookahead=<immediate downstream gates inspected or n/a>
+decision_options=<change model/approach/boundary | abandon | operator decision | n/a>
 refs=<controlling refs>
 evidence=<exact refs>
 consequence=<blocked effect>

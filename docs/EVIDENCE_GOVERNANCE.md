@@ -7,9 +7,10 @@ compatibility and migration, retained-scale execution, verification, promotion a
 research authority. It applies whether work is performed directly or through MAP. MAP supplies
 generic orchestration procedure; this document supplies q-trad authority and scientific constraints.
 
-Read the active plan and the relevant accepted ADR or runbook as well. Historical documents under
-`docs/archive/` are evidence, not current authority unless an active source names the surviving
-boundary.
+For direct work, read only the relevant active-plan sections and accepted ADR or runbook governing the
+boundary. For delegated MAP work, follow the exact supplied plan/ADR/runbook references; do not load a
+whole authority merely because the packet cites one section. Historical documents under `docs/archive/`
+are evidence, not current authority unless an active source names the surviving boundary.
 
 ## Evidence handoff
 

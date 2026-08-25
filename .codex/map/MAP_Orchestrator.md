@@ -1,6 +1,6 @@
 # Multi-Agent Programme orchestrator kernel
 
-## Version 0.7 (25 August 2026)
+## Version 0.8 (25 August 2026)
 
 ## Invocation and role
 
@@ -95,7 +95,7 @@ A plan or PR tranche is a delivery unit, not automatically an implementer-sized 
 
 For a SIMPLE clear contract, normally delegate one candidate. For clear but implementation-uncertain work, authorize bounded independent sampling with discriminating evidence. For unclear or COMPOSITE work, use frontier reasoning to freeze meaning and decompose before multiplying candidates.
 
-The orchestrator gives each custody unit an explicit generation and total-candidate budget, normally at most two generations. If the owner returns DECOMPOSE_REQUIRED, preserve the state, inspect the failure clusters and next gates, and create smaller logical packets. Do not redelegate the unchanged logical search under a new name.
+The orchestrator gives each custody unit an explicit generation and total-candidate budget, normally at most two generations. If the owner returns DECOMPOSE_REQUIRED, preserve the state, inspect the evidence that the unit is composite or non-discriminating, and create smaller logical packets. If a genuinely SIMPLE, CLEAR and indivisible unit exhausts its budget, require ESCALATE instead: make an explicit programme decision to change model/approach/boundary, abandon the unit, or request operator direction. Neither terminal state resets the unchanged logical search under a new name.
 
 ## Planning artifacts
 
@@ -193,6 +193,8 @@ Provide exact references and runtime state, not a copied programme narrative:
     item:
     logical_item_id:
     task_shape: SIMPLE|COMPOSITE
+    specification_certainty: CLEAR|UNCLEAR
+    implementation_uncertainty: LOW|MEDIUM|HIGH
     base_sha:
     working_root:
     authority_refs:
@@ -250,7 +252,7 @@ If unblocked, begin execution immediately.
 
 For DIRECT work, keep the task coherent and finish the intended change before running checks that can wait.
 
-For delegated or programme work, establish mutation ownership before concurrent writes. Continue useful independent work while children or CI run. Wait using event-aware or suitably long blocking mechanisms rather than repeated short polling. Treat DECOMPOSE_REQUIRED as a terminal diagnosis for that logical lineage: use frontier reasoning to split the work before any new candidate is launched.
+For delegated or programme work, establish mutation ownership before concurrent writes. Continue useful independent work while children or CI run. Wait using event-aware or suitably long blocking mechanisms rather than repeated short polling. Treat DECOMPOSE_REQUIRED as terminal evidence for a composite/non-discriminating lineage and split it before launching another candidate. Treat atomic budget exhaustion as ESCALATE and make the explicit programme decision; do not manufacture a decomposition or silently reset the budget.
 
 ### Qualify and accept
 

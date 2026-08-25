@@ -30,9 +30,10 @@ Read the minimum authority needed:
 `docs/archive/` is historical evidence, not routine context. Use it only to reconstruct an incident
 or decision, verify retained evidence, or handle a named surviving compatibility boundary.
 
-An active implementation plan supplies the execution authority. File lists, function names and
-mechanisms are normally soft guidance; scientific, evidence, safety and authority boundaries are hard
-constraints.
+An operator-approved active implementation plan supplies task-specific execution authority. A generated
+or advisory artifact does not become authority merely because it is labelled a plan; MAP classifications
+retain their stated authority semantics. File lists, function names and mechanisms are normally soft
+guidance; scientific, evidence, safety and authority boundaries are hard constraints.
 
 ## Always-on boundaries
 

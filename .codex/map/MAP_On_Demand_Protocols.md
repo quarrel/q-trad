@@ -1,6 +1,6 @@
 # Multi-Agent Programme orchestrator — on-demand protocols
 
-## Version 0.8 (25 August 2026)
+## Version 0.9 (25 August 2026)
 
 Read only a section triggered by MAP_Orchestrator.md or explicitly referenced in a delegated packet.
 
@@ -145,7 +145,7 @@ React only to:
     ESCALATE
     BLOCKED
 
-Resolve only the programme-level decision. DECOMPOSE_REQUIRED terminates the current logical search lineage: preserve its exact state, use the failure clusters and look-ahead evidence to split it into smaller packets, and do not reset its budget through a new owner or name. Return a changed boundary to the same owner only when the lineage budget remains live.
+Resolve only the programme-level decision. DECOMPOSE_REQUIRED terminates the current logical search lineage when evidence shows a composite/non-discriminating unit: preserve exact state, use the failure clusters and look-ahead evidence to split it, and do not reset its budget through a new owner or name. ESCALATE terminates a CLEAR, SIMPLE, indivisible lineage whose budget is exhausted: preserve the same evidence and require an explicit decision to change model/approach/boundary, abandon it, or seek operator direction. Return a changed boundary to the same owner only when the original lineage budget remains live.
 
 ### Acceptance
 
@@ -360,7 +360,7 @@ An open, non-draft, mergeable, approved, or green PR is not acceptance by itself
 
 ### Review publication
 
-Bind the verdict to the exact reviewed SHA. Immediately before publication, recheck the PR head when practical.
+Bind the verdict to the exact reviewed SHA. Immediately before publication, recheck that the PR head equals that SHA. If the head cannot be established, retain and return the local verdict but do not publish it.
 
 Publish one complete verdict through the repository's normal review mechanism. If GitHub prevents formal self-review because author and reviewer identity are the same, publish the structured verdict once as a top-level PR comment instead. Do not publish both.
 
