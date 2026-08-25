@@ -1549,3 +1549,40 @@ def test_native_physical_budget_read_operations_fail_closed() -> None:
     assert budget["read_operations"] == 1
     with pytest.raises(FreezeError, match="read_operations"):
         implementation._charge_physical_budget(budget, read_operations=1)
+
+
+def test_native_marker_wrapper_accounting_is_exact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    fixture_rows = synthetic_fixture()
+    _, baseline = implementation.load_fixture_rows(fixture_rows, config)
+    original_open = implementation._open_json_document
+
+    def padded_marker(path: Path, limits: Mapping[str, Any]) -> Any:
+        opened = original_open(path, limits)
+        if path.name == "selection.json":
+            return opened[0], opened[1], opened[2] + 7, opened[3]
+        if path.name == "consumed.json":
+            return opened[0], opened[1], opened[2] + 11, opened[3]
+        return opened
+
+    monkeypatch.setattr(implementation, "_open_json_document", padded_marker)
+    _, mutated = implementation.load_fixture_rows(fixture_rows, config)
+    assert (
+        mutated["source_scan_wrapper_bytes"]["selection"]
+        == baseline["source_scan_wrapper_bytes"]["selection"] + 7
+    )
+    assert (
+        mutated["source_scan_wrapper_bytes"]["consumed"]
+        == baseline["source_scan_wrapper_bytes"]["consumed"] + 11
+    )
+    assert mutated["source_scan_bytes"] == baseline["source_scan_bytes"] + 18
+    assert mutated["consumed_bytes"] == mutated["source_scan_bytes"]
+    assert mutated["source_scan_read_operations"] == baseline["source_scan_read_operations"]
+
+    budget: dict[str, Any] = {"read_operations": 1, "max_read_operations": 1}
+    with pytest.raises(FreezeError, match="read_operations"):
+        implementation._charge_physical_budget(budget, read_operations=1)

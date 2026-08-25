@@ -4051,8 +4051,9 @@ def _load_native_retained_rows(
         "max_declared_parts": target_declared_cap + int(streaming["max_consumed_parts"]),
         # Target source is scanned twice; three forecast children twice; outcome once.
         "max_physical_parts": target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7,
+        # Nine data wrappers plus the two lifecycle marker wrappers are read once.
         "max_read_operations": (
-            target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7 + 2 + 7
+            target_declared_cap * 2 + int(streaming["max_consumed_parts"]) * 7 + 2 + 7 + 2
         ),
         "max_physical_rows": int(target_source_hard["max_rows"]) * 2 + max_rows * 7,
         "max_physical_part_bytes": int(target_source_hard["max_bytes"]) * 2 + max_bytes * 7,
@@ -4116,18 +4117,26 @@ def _load_native_retained_rows(
             "expected_identity_field": declaration["identity_field"],
             "expected_wrapper_identity": None if fixture else declaration["identity"],
             "required_record_keys": declaration["required_keys"],
+            "_physical_budget": physical_budget,
         }
+        read_operations_before = int(physical_budget["read_operations"])
+        wrapper_bytes_before = int(physical_budget["wrapper_bytes"])
         metadata, parts, marker_size, _digest = _open_json_document(
             Path(locators[name]), marker_limits
         )
+        _charge_physical_budget(physical_budget, wrapper_bytes=marker_size, read_operations=1)
+        marker_wrapper_bytes = int(physical_budget["wrapper_bytes"]) - wrapper_bytes_before
+        marker_read_operations = int(physical_budget["read_operations"]) - read_operations_before
+        if marker_wrapper_bytes != marker_size or marker_read_operations != 1:
+            raise FreezeError(f"native {name} marker accounting drifted")
         _validate_child_metadata(name, metadata, loader, fixture=fixture)
         receipt: dict[str, Any] = {
-            "wrapper_bytes": marker_size,
+            "wrapper_bytes": marker_wrapper_bytes,
             "parts": 0,
             "rows": 0,
             "bytes": 0,
             "part_hashes": [],
-            "read_operations": 1,
+            "read_operations": marker_read_operations,
         }
         decoded = [row for _descriptor, rows, _part_size in parts for row in rows]
         if len(decoded) != 1:
