@@ -2813,6 +2813,53 @@ def _reject_symlink_components(root: Path, relative: PurePosixPath) -> None:
             raise ValueError("symlink in authorised path")
 
 
+def _reject_native_authenticated_components(
+    anchor: Path,
+    relative: PurePosixPath,
+) -> None:
+    """Reject symlinks from an authenticated anchor through a declared child."""
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("unsafe authenticated path")
+    anchor_absolute = anchor.absolute()
+    ancestors = tuple(reversed((*anchor_absolute.parents, anchor_absolute)))
+    for component in ancestors:
+        if component.is_symlink():
+            raise ValueError("symlink in authenticated anchor")
+    current = anchor_absolute.parent
+    for component_name in relative.parts:
+        current = current / component_name
+        if current.is_symlink():
+            raise ValueError("symlink in authenticated path")
+
+
+def _native_authenticated_read(
+    anchor: Path,
+    relative: PurePosixPath,
+    *,
+    expected_sha256: object = None,
+    anchor_is_directory: bool = False,
+) -> tuple[Path, bytes]:
+    """Lstat an authenticated lexical path, then read and hash its regular file."""
+    try:
+        _reject_native_authenticated_components(anchor, relative)
+        anchor_absolute = anchor.absolute()
+        base = anchor_absolute if anchor_is_directory else anchor_absolute.parent
+        candidate = base.joinpath(*relative.parts)
+        if candidate.is_symlink() or not candidate.is_file():
+            raise FreezeError("authenticated JSON path is missing or unsafe")
+        encoded = candidate.read_bytes()
+    except FreezeError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise FreezeError("authenticated JSON path cannot be read") from exc
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or hashlib.sha256(encoded).hexdigest() != expected_sha256
+    ):
+        raise FreezeError("authenticated JSON path byte hash mismatch")
+    return candidate, encoded
+
+
 def _declared_partition_paths(
     root: Path,
     manifest_relative_path: str,
@@ -2877,7 +2924,9 @@ def _declared_partition_paths(
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError("unsafe compact part path")
         try:
-            _reject_symlink_components(root, relative_path)
+            _reject_native_authenticated_components(
+                root.joinpath(*relative_manifest.parts), relative_path
+            )
         except OSError as exc:
             raise ValueError("unsafe compact part path") from exc
         candidate = root.joinpath(*relative_path.parts)
@@ -2965,15 +3014,20 @@ def _open_partitioned_json_document(
     manifest_relative = cast(str, limits["manifest_relative_path"])
     if path != root / PurePosixPath(manifest_relative):
         raise FreezeError("retained manifest path differs from frozen preparation root")
-    if not path.is_file() or path.is_symlink():
-        raise FreezeError("retained compact manifest is missing or unsafe")
-    raw_bytes = path.read_bytes()
+    try:
+        _manifest_path, raw_bytes = _native_authenticated_read(
+            root,
+            PurePosixPath(manifest_relative),
+            expected_sha256=limits.get("expected_wrapper_sha256"),
+            anchor_is_directory=True,
+        )
+    except FreezeError as exc:
+        raise FreezeError("retained compact manifest is missing or unsafe") from exc
+    if _manifest_path != path.absolute():
+        raise FreezeError("retained manifest path differs from frozen preparation root")
     if len(raw_bytes) > int(limits["max_source_bytes"]):
         raise FreezeError("retained child exceeds frozen source-byte bound")
     wrapper_hash = hashlib.sha256(raw_bytes).hexdigest()
-    expected_wrapper_hash = limits.get("expected_wrapper_sha256")
-    if expected_wrapper_hash is not None and wrapper_hash != expected_wrapper_hash:
-        raise FreezeError("retained wrapper byte hash mismatch")
     try:
         payload: object = cast(object, json.loads(raw_bytes))
     except json.JSONDecodeError as exc:
@@ -3046,16 +3100,20 @@ def _open_partitioned_json_document(
                 raise FreezeError("retained compact part reference fields are incomplete")
             if reference["path"] != relative or reference["part_index"] != expected_index:
                 raise FreezeError("retained compact part reference is non-canonical")
-            part_path = root / PurePosixPath(relative)
-            if not part_path.is_file() or part_path.is_symlink():
-                raise FreezeError("retained compact part is missing or unsafe")
             try:
-                part_size = part_path.stat().st_size
-            except OSError as exc:
+                _part_path, part_bytes = _native_authenticated_read(
+                    root,
+                    PurePosixPath(relative),
+                    expected_sha256=reference["sha256"],
+                    anchor_is_directory=True,
+                )
+            except FreezeError as exc:
                 raise FreezeError("retained compact part is missing or unsafe") from exc
+            if _part_path != (root / PurePosixPath(relative)).absolute():
+                raise FreezeError("retained compact part path differs from manifest root")
+            part_size = len(part_bytes)
             if part_size > _MAX_PART_BYTES:
                 raise FreezeError("retained compact part exceeds the 64 MiB limit")
-            part_bytes = part_path.read_bytes()
             if hashlib.sha256(part_bytes).hexdigest() != reference["sha256"]:
                 raise FreezeError("retained compact part byte hash mismatch")
             try:
@@ -3144,19 +3202,20 @@ def _open_json_document(
     """Validate a wrapper immediately, then decode one declared part per iteration."""
     if "physical_required_keys" in limits:
         return _open_partitioned_json_document(path, limits)
-    if not path.is_file():
-        raise FreezeError(f"retained child path does not exist: {path}")
-    size = path.stat().st_size
+    try:
+        _wrapper_path, raw_bytes = _native_authenticated_read(
+            path,
+            PurePosixPath(path.name),
+            expected_sha256=limits.get("expected_wrapper_sha256"),
+        )
+    except FreezeError as exc:
+        raise FreezeError(f"retained child path does not exist: {path}") from exc
+    if _wrapper_path != path.absolute():
+        raise FreezeError(f"retained child path differs from authenticated path: {path}")
+    size = len(raw_bytes)
     if size > int(limits["max_source_bytes"]):
         raise FreezeError("retained child exceeds frozen source-byte bound")
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        raise FreezeError(f"cannot read retained child: {path}") from exc
     wrapper_hash = hashlib.sha256(raw_bytes).hexdigest()
-    expected_wrapper_hash = limits.get("expected_wrapper_sha256")
-    if expected_wrapper_hash is not None and wrapper_hash != expected_wrapper_hash:
-        raise FreezeError(f"retained wrapper byte hash mismatch: {path}")
     try:
         payload = json.loads(raw_bytes)
     except json.JSONDecodeError as exc:
@@ -3404,7 +3463,7 @@ def _native_source_references(
         part_path = manifest_path.parent.joinpath(*relative.parts)
         if inspect_files:
             try:
-                _reject_symlink_components(manifest_path.parent, relative)
+                _reject_native_authenticated_components(manifest_path, relative)
             except (OSError, ValueError) as exc:
                 raise FreezeError(f"native target-source {field} path is unsafe") from exc
             if not part_path.is_file():
@@ -3464,23 +3523,6 @@ def _validate_native_authorised_tree(
         raise FreezeError(f"native target-source {kind} family does not match declarations")
 
 
-def _reject_native_outcome_symlink_components(
-    anchor: Path,
-    relative: PurePosixPath,
-) -> None:
-    """Reject symlinks from the authenticated anchor through a declared child."""
-    anchor_absolute = anchor.absolute()
-    ancestors = tuple(reversed((*anchor_absolute.parents, anchor_absolute)))
-    for component in ancestors:
-        if component.is_symlink():
-            raise ValueError("symlink in authenticated outcome anchor")
-    current = anchor_absolute.parent
-    for component_name in relative.parts:
-        current = current / component_name
-        if current.is_symlink():
-            raise ValueError("symlink in authenticated outcome path")
-
-
 def _validate_native_outcome_parts_tree(
     manifest_path: Path,
     references: Sequence[Any],
@@ -3507,11 +3549,11 @@ def _validate_native_outcome_parts_tree(
             raise FreezeError("native outcome part reference is duplicated")
         declared.add(relative_path.name)
         try:
-            _reject_native_outcome_symlink_components(manifest_path, relative_path)
+            _reject_native_authenticated_components(manifest_path, relative_path)
         except (OSError, ValueError) as exc:
             raise FreezeError("native outcome parts tree is unsafe") from exc
     try:
-        _reject_native_outcome_symlink_components(manifest_path, root_relative)
+        _reject_native_authenticated_components(manifest_path, root_relative)
         root = manifest_path.parent / root_relative
         entries = tuple(root.iterdir())
     except (OSError, ValueError) as exc:
@@ -3542,14 +3584,15 @@ def _iter_native_source_parts(
         if int(receipt.get("parts", 0)) >= max_parts:
             raise FreezeError(f"native target-source {kind} exceeds cumulative part bound")
         try:
-            _reject_symlink_components(manifest_path.parent, PurePosixPath(relative))
-        except (OSError, ValueError) as exc:
-            raise FreezeError(f"native target-source {kind} part is unsafe") from exc
-        part_path = manifest_path.parent / PurePosixPath(relative)
-        try:
-            encoded = part_path.read_bytes()
-        except OSError as exc:
+            _part_path, encoded = _native_authenticated_read(
+                manifest_path,
+                PurePosixPath(relative),
+                expected_sha256=expected_hash,
+            )
+        except FreezeError as exc:
             raise FreezeError(f"native target-source {kind} part cannot be read") from exc
+        if _part_path != manifest_path.parent / PurePosixPath(relative):
+            raise FreezeError(f"native target-source {kind} part path differs from manifest")
         actual_hash = hashlib.sha256(encoded).hexdigest()
         if actual_hash != expected_hash:
             raise FreezeError(f"native target-source {kind} part byte hash differs")
@@ -3618,15 +3661,16 @@ def _load_native_target_source(
 ]:
     """Load only target/opportunity bounded parts; pre-holdout refs are never touched."""
     try:
-        _reject_symlink_components(path.parent, PurePosixPath(path.name))
-    except (OSError, ValueError) as exc:
+        _wrapper_path, encoded = _native_authenticated_read(
+            path,
+            PurePosixPath(path.name),
+            expected_sha256=None if fixture else expected["wrapper_sha256"],
+        )
+    except FreezeError as exc:
         raise FreezeError("native target-source wrapper is missing or unsafe") from exc
-    if not path.is_file():
-        raise FreezeError("native target-source wrapper is missing or unsafe")
-    encoded = path.read_bytes()
+    if _wrapper_path != path.absolute():
+        raise FreezeError("native target-source wrapper path differs from locator")
     _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded), read_operations=1)
-    if not fixture and hashlib.sha256(encoded).hexdigest() != expected["wrapper_sha256"]:
-        raise FreezeError("native target-source wrapper byte hash mismatch")
     try:
         value = json.loads(encoded)
     except json.JSONDecodeError as exc:
@@ -3774,12 +3818,15 @@ def _load_native_outcome_values(
     """Stream tagged outcomes, retaining values only for the bounded selected IDs."""
     del fixture
     try:
-        _reject_native_outcome_symlink_components(path, PurePosixPath(path.name))
-    except (OSError, ValueError) as exc:
+        _wrapper_path, encoded_wrapper = _native_authenticated_read(
+            path,
+            PurePosixPath(path.name),
+            expected_sha256=limits.get("expected_wrapper_sha256"),
+        )
+    except FreezeError as exc:
         raise FreezeError("native outcome wrapper is missing or unsafe") from exc
-    if not path.is_file():
-        raise FreezeError("native outcome wrapper is missing or unsafe")
-    encoded_wrapper = path.read_bytes()
+    if _wrapper_path != path.absolute():
+        raise FreezeError("native outcome wrapper path differs from locator")
     _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded_wrapper), read_operations=1)
     if receipt is not None:
         receipt["wrapper_bytes"] = len(encoded_wrapper)
@@ -3868,13 +3915,15 @@ def _load_native_outcome_values(
         ):
             raise FreezeError("native outcome part reference hash is malformed")
         try:
-            _reject_symlink_components(path.parent, PurePosixPath(relative))
-        except (OSError, ValueError) as exc:
+            _part_path, encoded = _native_authenticated_read(
+                path,
+                PurePosixPath(relative),
+                expected_sha256=digest,
+            )
+        except FreezeError as exc:
             raise FreezeError("native outcome part is unsafe") from exc
-        part_path = path.parent / PurePosixPath(relative)
-        if not part_path.is_file():
-            raise FreezeError("native outcome part is unavailable")
-        encoded = part_path.read_bytes()
+        if _part_path != (path.parent / PurePosixPath(relative)).absolute():
+            raise FreezeError("native outcome part path differs from manifest")
         if receipt is not None:
             receipt["parts"] = int(receipt.get("parts", 0)) + 1
             receipt["rows"] = int(receipt.get("rows", 0)) + row_count
@@ -3883,8 +3932,6 @@ def _load_native_outcome_values(
                 int(receipt.get("largest_part_bytes", 0)), len(encoded)
             )
             receipt.setdefault("part_hashes", []).append(hashlib.sha256(encoded).hexdigest())
-        if hashlib.sha256(encoded).hexdigest() != digest:
-            raise FreezeError("native outcome part byte hash mismatch")
         try:
             payload = json.loads(encoded)
         except json.JSONDecodeError as exc:
@@ -4159,6 +4206,7 @@ def _load_native_retained_rows(
             "expected_wrapper_contract": declaration["contract"],
             "expected_identity_field": declaration["identity_field"],
             "expected_wrapper_identity": None if fixture else declaration["identity"],
+            "expected_wrapper_sha256": None if fixture else declaration["sha256"],
             "required_record_keys": None,
             "physical_required_keys": declaration["physical_required_keys"],
             "manifest_relative_path": declaration["manifest_relative_path"],
@@ -4179,10 +4227,11 @@ def _load_native_retained_rows(
             "max_source_bytes": max_bytes,
             "max_elapsed_seconds": streaming.get("max_elapsed_seconds", 1e12),
             "max_consumed_parts": streaming["max_consumed_parts"],
+            "max_read_operations": int(physical_budget["max_read_operations"]),
             "expected_wrapper_contract": declaration["contract"],
             "expected_identity_field": declaration["identity_field"],
             "expected_wrapper_identity": None if fixture else declaration["identity"],
-            "required_record_keys": declaration["required_keys"],
+            "expected_wrapper_sha256": None if fixture else declaration["sha256"],
             "_physical_budget": physical_budget,
         }
         read_operations_before = int(physical_budget["read_operations"])

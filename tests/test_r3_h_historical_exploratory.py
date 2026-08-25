@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from decimal import ROUND_HALF_EVEN, Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -1728,3 +1728,72 @@ def test_native_outcome_parts_tree_accepts_normal_physical_tree(tmp_path: Path) 
     implementation._validate_native_outcome_parts_tree(
         manifest_path, references, manifest_relative_path="outcome-evidence.json"
     )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "normal",
+        "wrapper_sha",
+        "wrapper_symlink",
+        "parent_symlink",
+        "grandparent_symlink",
+        "declared_part_symlink",
+    ),
+)
+def test_native_authenticated_open_surface_guard(tmp_path: Path, mutation: str) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    if mutation == "grandparent_symlink":
+        real_grandparent = tmp_path / "real-grandparent"
+        real_parent = real_grandparent / "parent"
+        real_parent.mkdir(parents=True)
+        alias_grandparent = tmp_path / "grandparent-alias"
+        alias_grandparent.symlink_to(real_grandparent, target_is_directory=True)
+        wrapper = alias_grandparent / "parent" / "wrapper.json"
+    elif mutation == "parent_symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        alias_parent = tmp_path / "parent-alias"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        wrapper = alias_parent / "wrapper.json"
+    else:
+        wrapper = tmp_path / "wrapper.json"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+
+    encoded = b'{"ok":true}'
+    wrapper.write_bytes(encoded)
+    expected = hashlib.sha256(encoded).hexdigest()
+    part_relative = PurePosixPath("wrapper.json.parts/part-000000.json")
+    part = wrapper.parent / part_relative
+    part.parent.mkdir()
+    part.write_bytes(encoded)
+
+    if mutation == "wrapper_sha":
+        with pytest.raises(FreezeError, match="byte hash"):
+            implementation._native_authenticated_read(
+                wrapper, PurePosixPath(wrapper.name), expected_sha256="0" * 64
+            )
+        return
+    if mutation == "wrapper_symlink":
+        real_wrapper = wrapper.with_name("wrapper.real")
+        wrapper.rename(real_wrapper)
+        wrapper.symlink_to(real_wrapper.name)
+    elif mutation == "declared_part_symlink":
+        real_part = part.with_name("part.real")
+        part.rename(real_part)
+        part.symlink_to(real_part.name)
+
+    if mutation == "normal":
+        path, actual = implementation._native_authenticated_read(
+            wrapper, PurePosixPath(wrapper.name), expected_sha256=expected
+        )
+        assert path == wrapper.absolute()
+        assert actual == encoded
+        return
+
+    with pytest.raises(FreezeError):
+        relative = (
+            part_relative if mutation == "declared_part_symlink" else PurePosixPath(wrapper.name)
+        )
+        implementation._native_authenticated_read(wrapper, relative, expected_sha256=expected)
