@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import resource
+import stat
 import sys
 import tempfile
 import time
@@ -2802,34 +2804,32 @@ def _json_depth(value: Any) -> int:
     return 0
 
 
-def _reject_symlink_components(root: Path, relative: PurePosixPath) -> None:
-    """Reject symlinks at every component from an authorised root to a child."""
-    if root.is_symlink():
-        raise ValueError("symlink in authorised root")
-    current = root
-    for component in relative.parts:
-        current = current / component
-        if current.is_symlink():
-            raise ValueError("symlink in authorised path")
-
-
 def _reject_native_authenticated_components(
     anchor: Path,
     relative: PurePosixPath,
+    *,
+    anchor_is_directory: bool = False,
 ) -> None:
-    """Reject symlinks from an authenticated anchor through a declared child."""
+    """Reject symlinks and unsafe lexical components from an authenticated anchor."""
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("unsafe authenticated path")
     anchor_absolute = anchor.absolute()
     ancestors = tuple(reversed((*anchor_absolute.parents, anchor_absolute)))
     for component in ancestors:
-        if component.is_symlink():
+        component_stat = os.lstat(component)
+        if stat.S_ISLNK(component_stat.st_mode):
             raise ValueError("symlink in authenticated anchor")
-    current = anchor_absolute.parent
-    for component_name in relative.parts:
+    anchor_stat = os.lstat(anchor_absolute)
+    if anchor_is_directory and not stat.S_ISDIR(anchor_stat.st_mode):
+        raise ValueError("authenticated anchor is not a directory")
+    current = anchor_absolute if anchor_is_directory else anchor_absolute.parent
+    for index, component_name in enumerate(relative.parts):
         current = current / component_name
-        if current.is_symlink():
+        component_stat = os.lstat(current)
+        if stat.S_ISLNK(component_stat.st_mode):
             raise ValueError("symlink in authenticated path")
+        if index < len(relative.parts) - 1 and not stat.S_ISDIR(component_stat.st_mode):
+            raise ValueError("authenticated path component is not a directory")
 
 
 def _native_authenticated_read(
@@ -2838,16 +2838,25 @@ def _native_authenticated_read(
     *,
     expected_sha256: object = None,
     anchor_is_directory: bool = False,
+    max_bytes: int | None = None,
 ) -> tuple[Path, bytes]:
-    """Lstat an authenticated lexical path, then read and hash its regular file."""
+    """Lstat an authenticated lexical path, then read it without following links."""
     try:
-        _reject_native_authenticated_components(anchor, relative)
+        _reject_native_authenticated_components(
+            anchor, relative, anchor_is_directory=anchor_is_directory
+        )
         anchor_absolute = anchor.absolute()
         base = anchor_absolute if anchor_is_directory else anchor_absolute.parent
         candidate = base.joinpath(*relative.parts)
-        if candidate.is_symlink() or not candidate.is_file():
+        final_stat = os.lstat(candidate)
+        if not stat.S_ISREG(final_stat.st_mode):
             raise FreezeError("authenticated JSON path is missing or unsafe")
-        encoded = candidate.read_bytes()
+        if max_bytes is not None and final_stat.st_size > max_bytes:
+            raise FreezeError("authenticated JSON path exceeds byte limit")
+        open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, open_flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            encoded = handle.read()
     except FreezeError:
         raise
     except (OSError, ValueError) as exc:
@@ -2857,7 +2866,7 @@ def _native_authenticated_read(
         or hashlib.sha256(encoded).hexdigest() != expected_sha256
     ):
         raise FreezeError("authenticated JSON path byte hash mismatch")
-    return candidate, encoded
+    return candidate.absolute(), encoded
 
 
 def _declared_partition_paths(
@@ -2876,10 +2885,12 @@ def _declared_partition_paths(
     ):
         raise ValueError("unsafe manifest path")
     try:
-        _reject_symlink_components(root, relative_manifest)
+        relative_manifest_parent = PurePosixPath(*relative_manifest.parts[:-1])
+        _reject_native_authenticated_components(
+            root, relative_manifest_parent, anchor_is_directory=True
+        )
     except OSError as exc:
         raise ValueError("unsafe manifest path") from exc
-    root_resolved = root.resolve(strict=True)
     references_value: object = manifest["parts"]
     total_rows_value: object = manifest["row_count"]
     if (
@@ -2924,16 +2935,11 @@ def _declared_partition_paths(
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError("unsafe compact part path")
         try:
-            _reject_native_authenticated_components(
-                root.joinpath(*relative_manifest.parts), relative_path
-            )
-        except OSError as exc:
+            _reject_native_authenticated_components(root, relative_path, anchor_is_directory=True)
+        except (OSError, ValueError) as exc:
             raise ValueError("unsafe compact part path") from exc
-        candidate = root.joinpath(*relative_path.parts)
-        if not candidate.resolve(strict=False).is_relative_to(root_resolved):
-            raise ValueError("compact part escapes root")
-        if candidate.stat().st_size > _MAX_PART_BYTES:
-            raise ValueError(f"compact part exceeds the 64 MiB limit: {relative}")
+        if not relative_path.parts:
+            raise ValueError("compact part path is empty")
         declared.append(relative)
         expected_rows += row_count
     if expected_rows != total_rows:
@@ -2945,14 +2951,19 @@ def _declared_partition_paths(
     if manifest.get("identity_field") != identity_field:
         raise ValueError("compact manifest identity field mismatch")
     part_root = root.joinpath(*PurePosixPath(part_prefix).parts)
-    if part_root.is_symlink():
-        raise ValueError("compact part directory is unsafe")
-    if not part_root.is_dir():
+    try:
+        part_root_stat = os.lstat(part_root)
+    except OSError as exc:
+        if declared:
+            raise ValueError("compact part directory is missing or unsafe") from exc
+        return declared
+    if stat.S_ISLNK(part_root_stat.st_mode) or not stat.S_ISDIR(part_root_stat.st_mode):
         if declared:
             raise ValueError("compact part directory is missing or unsafe")
         return declared
     for entry in part_root.rglob("*"):
-        if entry.is_symlink() or not entry.is_file():
+        entry_stat = os.lstat(entry)
+        if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
             raise ValueError("compact part tree contains an unsafe entry")
         if entry.relative_to(root).as_posix() not in declared:
             raise ValueError("compact part tree contains an undeclared file")
@@ -3106,6 +3117,7 @@ def _open_partitioned_json_document(
                     PurePosixPath(relative),
                     expected_sha256=reference["sha256"],
                     anchor_is_directory=True,
+                    max_bytes=_MAX_PART_BYTES,
                 )
             except FreezeError as exc:
                 raise FreezeError("retained compact part is missing or unsafe") from exc
@@ -3295,9 +3307,18 @@ def _open_json_document(
                 raise FreezeError("retained part locator must be safely relative")
             resolved_part = path.parent / part_path
             try:
-                part_bytes = resolved_part.read_bytes()
-            except OSError as exc:
+                _part_path, part_bytes = _native_authenticated_read(
+                    path,
+                    PurePosixPath(part_path),
+                    expected_sha256=descriptor["sha256"],
+                    max_bytes=int(limits["max_source_bytes"]),
+                )
+            except FreezeError as exc:
+                if "byte hash" in str(exc):
+                    raise FreezeError("retained part byte hash mismatch") from exc
                 raise FreezeError("retained part locator does not exist") from exc
+            if _part_path != resolved_part.absolute():
+                raise FreezeError("retained part path differs from authenticated path")
             actual_hash = hashlib.sha256(part_bytes).hexdigest()
             if actual_hash != descriptor["sha256"]:
                 raise FreezeError("retained part byte hash mismatch")
@@ -3464,9 +3485,10 @@ def _native_source_references(
         if inspect_files:
             try:
                 _reject_native_authenticated_components(manifest_path, relative)
+                part_stat = os.lstat(part_path)
             except (OSError, ValueError) as exc:
                 raise FreezeError(f"native target-source {field} path is unsafe") from exc
-            if not part_path.is_file():
+            if not stat.S_ISREG(part_stat.st_mode):
                 raise FreezeError(f"native target-source {field} part is unavailable")
         result.append((path_value, digest, row_count))
     return result
@@ -3478,7 +3500,9 @@ def _validate_native_authorised_root(
     """Require exactly the authorised target/opportunity families at the parts root."""
     relative_root = PurePosixPath(f"{manifest_path.name}.parts")
     try:
-        _reject_symlink_components(manifest_path.parent, relative_root)
+        _reject_native_authenticated_components(
+            manifest_path.parent, relative_root, anchor_is_directory=True
+        )
         root = manifest_path.parent / relative_root
         entries = tuple(root.iterdir())
     except (OSError, ValueError) as exc:
@@ -3489,7 +3513,8 @@ def _validate_native_authorised_root(
         # includes the forbidden pre-holdout family and preserves its no-touch boundary.
         if entry.name not in allowed:
             raise FreezeError("native target-source parts root contains an undeclared entry")
-        if entry.is_symlink() or not entry.is_dir():
+        entry_stat = os.lstat(entry)
+        if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
             raise FreezeError("native target-source parts root family is unsafe")
     if {entry.name for entry in entries} != allowed:
         raise FreezeError("native target-source parts root families are incomplete")
@@ -3504,8 +3529,10 @@ def _validate_native_authorised_tree(
     """Reject undeclared entries in an authorised bounded-source family tree."""
     family = manifest_path.parent / f"{manifest_path.name}.parts" / kind
     try:
-        _reject_symlink_components(
-            manifest_path.parent, PurePosixPath(f"{manifest_path.name}.parts/{kind}")
+        _reject_native_authenticated_components(
+            manifest_path.parent,
+            PurePosixPath(f"{manifest_path.name}.parts/{kind}"),
+            anchor_is_directory=True,
         )
     except (OSError, ValueError) as exc:
         raise FreezeError(f"native target-source {kind} family is unavailable") from exc
@@ -3515,7 +3542,12 @@ def _validate_native_authorised_tree(
     except OSError as exc:
         raise FreezeError(f"native target-source {kind} family is unavailable") from exc
     for entry in entries:
-        if entry.name not in declared or entry.is_symlink() or not entry.is_file():
+        entry_stat = os.lstat(entry)
+        if (
+            entry.name not in declared
+            or stat.S_ISLNK(entry_stat.st_mode)
+            or not stat.S_ISREG(entry_stat.st_mode)
+        ):
             raise FreezeError(
                 f"native target-source {kind} family contains an orphan or unsafe entry"
             )
@@ -3561,7 +3593,8 @@ def _validate_native_outcome_parts_tree(
     for entry in entries:
         if entry.name not in declared:
             raise FreezeError("native outcome parts root contains an undeclared entry")
-        if entry.is_symlink() or not entry.is_file():
+        entry_stat = os.lstat(entry)
+        if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
             raise FreezeError("native outcome parts root contains an unsafe entry")
     if {entry.name for entry in entries} != declared:
         raise FreezeError("native outcome parts root does not match declarations")

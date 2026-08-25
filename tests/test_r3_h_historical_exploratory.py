@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
+import os
 import runpy
 import sys
 from collections.abc import Callable, Mapping
@@ -658,25 +661,18 @@ def test_compact_fixture_contract_mutations_fail_closed(
             manifest_path = Path(actual_locators["local_forecast"])
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             part_path = Path(actual_locators["selection"]).parent / manifest["parts"][0]["path"]
-            original_stat = Path.stat
-            original_read_bytes = Path.read_bytes
+            original_lstat = os.lstat
 
-            def oversized_stat(path: Path, *, follow_symlinks: bool = True) -> Any:
-                if path == part_path:
-                    actual_stat = original_stat(path, follow_symlinks=follow_symlinks)
+            def oversized_lstat(path: Any, *args: Any, **kwargs: Any) -> Any:
+                actual_stat = original_lstat(path, *args, **kwargs)
+                if not args and not kwargs and Path(path) == part_path:
                     return SimpleNamespace(
                         st_mode=actual_stat.st_mode,
                         st_size=runtime_max_part_bytes + 1,
                     )
-                return original_stat(path, follow_symlinks=follow_symlinks)
+                return actual_stat
 
-            def reject_oversized_read(path: Path) -> bytes:
-                if path == part_path:
-                    raise AssertionError("oversized compact part was read")
-                return original_read_bytes(path)
-
-            monkeypatch.setattr(Path, "stat", oversized_stat)
-            monkeypatch.setattr(Path, "read_bytes", reject_oversized_read)
+            monkeypatch.setattr(os, "lstat", oversized_lstat)
         else:
             name = "outcome_evidence" if mutation == "outcome_tag" else "local_forecast"
             manifest_path = Path(actual_locators[name])
@@ -1436,6 +1432,7 @@ def test_native_physical_parts_shape_and_pre_holdout_guard(
     import qtrad.application.r3_historical_exploratory as implementation
 
     wrapper = tmp_path / "target-source.json"
+    wrapper.write_bytes(b"{}")
     parts_root = wrapper.with_name("target-source.json.parts")
     targets = parts_root / "targets"
     targets.mkdir(parents=True)
@@ -1713,6 +1710,7 @@ def test_native_outcome_parts_tree_accepts_normal_physical_tree(tmp_path: Path) 
     parent = tmp_path / "normal"
     parent.mkdir()
     manifest_path = parent / "outcome-evidence.json"
+    manifest_path.write_bytes(b"{}")
     root = parent / "outcome-evidence.json.parts"
     root.mkdir()
     part = root / "part-000000.json"
@@ -1797,3 +1795,43 @@ def test_native_authenticated_open_surface_guard(tmp_path: Path, mutation: str) 
             part_relative if mutation == "declared_part_symlink" else PurePosixPath(wrapper.name)
         )
         implementation._native_authenticated_read(wrapper, relative, expected_sha256=expected)
+
+
+def test_native_json_open_surface_has_one_authenticated_read_boundary() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    tree = ast.parse(inspect.getsource(implementation))
+    loader_names = {
+        "_declared_partition_paths",
+        "_open_partitioned_json_document",
+        "_open_json_document",
+        "_iter_native_source_parts",
+        "_load_native_target_source",
+        "_load_native_outcome_values",
+        "_load_native_retained_rows",
+        "_validate_native_outcome_parts_tree",
+    }
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in loader_names:
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            target = call.func
+            if isinstance(target, ast.Name) and target.id == "open":
+                violations.append(f"{node.name}:open")
+            elif isinstance(target, ast.Attribute) and target.attr in {
+                "open",
+                "read_bytes",
+                "read_text",
+                "resolve",
+                "stat",
+                "is_file",
+                "is_dir",
+                "is_symlink",
+            }:
+                violations.append(f"{node.name}:{target.attr}")
+    assert violations == []
