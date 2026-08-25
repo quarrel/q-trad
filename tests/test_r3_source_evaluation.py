@@ -13,11 +13,10 @@ from qtrad.application.r3_source_evaluation import (
     build_r3i_readiness_input,
     evaluate_fixture,
 )
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.r3_evaluation import identity
 from qtrad.domain.r3_source_evaluation import (
     SourceAlignedOutcome,
-    SourceEvaluationClassification,
     SourceOutcomeDisposition,
     SourceQuote,
     SourceResultKind,
@@ -28,12 +27,18 @@ from qtrad.domain.r3_source_evaluation import (
 def test_fixture_is_source_aligned_and_decimal_reconciled() -> None:
     report = evaluate_fixture()
 
-    assert report.authority.classification is SourceEvaluationClassification.FIXTURE_IMPLEMENTATION
-    assert report.result_kind is SourceResultKind.EXECUTABLE
+    assert report.authority.classification is EvidencePurpose.FIXTURE_IMPLEMENTATION
+    assert report.result_kind is SourceResultKind.INCOMPLETE
     assert report.gross_total == Decimal("0.0100")
     assert report.cost_total == Decimal("0.0015")
     assert report.net_total == Decimal("0.0085")
     assert report.outcomes[1].disposition is SourceOutcomeDisposition.UNAVAILABLE
+
+
+def test_classification_requires_shared_evidence_purpose_type() -> None:
+    inputs = build_fixture_inputs()
+    with pytest.raises(ValueError, match="declared classification"):
+        replace(inputs.authority, classification="FIXTURE_IMPLEMENTATION")
 
 
 def test_fixture_identity_is_deterministic() -> None:
@@ -102,6 +107,12 @@ def test_receive_time_and_executable_evidence_are_causal() -> None:
             exit=replace(entry, received_time=inputs.outcomes[0].target_time),
         )
 
+    with pytest.raises(ValueError, match="precede target"):
+        replace(
+            inputs.outcomes[0],
+            entry=replace(entry, received_time=inputs.outcomes[0].target_time),
+        )
+
 
 def test_historical_midpoint_cannot_emit_executable() -> None:
     with pytest.raises(ValueError, match="historical"):
@@ -133,6 +144,9 @@ def test_unavailable_stale_and_late_quotes_are_recordable() -> None:
         reason_codes=("STALE_ENTRY_QUOTE",),
     )
     assert unavailable.executable is False
+
+    with pytest.raises(ValueError, match="cannot carry economics"):
+        replace(unavailable, gross_return=Decimal("0.01"))
 
 
 def test_missing_unavailable_outcome_requires_reason() -> None:
@@ -166,7 +180,7 @@ def test_receipt_binds_report_identity() -> None:
 def test_readiness_is_future_native_and_never_execution_authority() -> None:
     readiness = build_r3i_readiness_input()
 
-    assert readiness.classification is SourceEvaluationClassification.FUTURE_NATIVE_DECISION_GRADE
+    assert readiness.classification is EvidencePurpose.FUTURE_NATIVE_DECISION_GRADE
     assert readiness.native_execution_authority is False
     with pytest.raises(ValueError, match="cannot grant"):
         replace(readiness, native_execution_authority=True)
@@ -175,7 +189,7 @@ def test_readiness_is_future_native_and_never_execution_authority() -> None:
 def test_readiness_classification_and_source_are_bound() -> None:
     readiness = build_r3i_readiness_input()
     with pytest.raises(ValueError, match="classification"):
-        replace(readiness, classification=SourceEvaluationClassification.FIXTURE_IMPLEMENTATION)
+        replace(readiness, classification=EvidencePurpose.FIXTURE_IMPLEMENTATION)
     with pytest.raises(ValueError, match="native source"):
         replace(
             readiness,
@@ -189,12 +203,12 @@ def test_authority_classification_confusion_is_rejected() -> None:
         replace(
             inputs.authority,
             source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
-            classification=SourceEvaluationClassification.HISTORICAL_EXPLORATORY,
+            classification=EvidencePurpose.HISTORICAL_EXPLORATORY,
         )
     with pytest.raises(ValueError, match="future native"):
         replace(
             inputs.authority,
-            classification=SourceEvaluationClassification.FUTURE_NATIVE_DECISION_GRADE,
+            classification=EvidencePurpose.FUTURE_NATIVE_DECISION_GRADE,
             executable_quote_authority=False,
         )
 

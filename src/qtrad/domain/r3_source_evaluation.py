@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.r3_evaluation import canonical_bytes, identity
 from qtrad.domain.time import require_utc
 
@@ -39,17 +39,6 @@ def _decimal(value: Decimal, name: str) -> None:
         raise ValueError(f"{name} must be a finite Decimal")
 
 
-class SourceEvaluationClassification(StrEnum):
-    FIXTURE_IMPLEMENTATION = "FIXTURE_IMPLEMENTATION"
-    HISTORICAL_EXPLORATORY = "HISTORICAL_EXPLORATORY"
-    FUTURE_NATIVE_DECISION_GRADE = "FUTURE_NATIVE_DECISION_GRADE"
-
-
-# Short aliases make the machine-readable classes convenient at call sites.
-EvaluationClassification = SourceEvaluationClassification
-SourceClassification = SourceEvaluationClassification
-
-
 class SourceOutcomeDisposition(StrEnum):
     ACCEPTED = "ACCEPTED"
     UNAVAILABLE = "UNAVAILABLE"
@@ -59,6 +48,7 @@ class SourceOutcomeDisposition(StrEnum):
 class SourceResultKind(StrEnum):
     MIDPOINT_ONLY = "MIDPOINT_ONLY"
     EXECUTABLE = "EXECUTABLE"
+    INCOMPLETE = "INCOMPLETE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +56,7 @@ class SourceAuthority:
     """The exact source/product/economics/session authority for one evaluation."""
 
     source_class: MarketDataSourceClass
-    classification: SourceEvaluationClassification
+    classification: EvidencePurpose
     source_product_id: str
     product_economics_identity: str
     session_version: str
@@ -79,7 +69,7 @@ class SourceAuthority:
     def __post_init__(self) -> None:
         if type(self.source_class) is not MarketDataSourceClass:
             raise ValueError("source authority requires a declared source class")
-        if type(self.classification) is not SourceEvaluationClassification:
+        if type(self.classification) is not EvidencePurpose:
             raise ValueError("source authority requires a declared classification")
         if (
             not self.source_product_id
@@ -97,12 +87,12 @@ class SourceAuthority:
         require_utc(self.receive_time, "source receive time")
         if self.receive_time > self.decision_time:
             raise ValueError("source receive time cannot follow decision time")
-        if self.classification is SourceEvaluationClassification.HISTORICAL_EXPLORATORY:
+        if self.classification is EvidencePurpose.HISTORICAL_EXPLORATORY:
             if self.source_class is not MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
                 raise ValueError("historical exploratory authority requires IBKR historical source")
             if self.executable_quote_authority:
                 raise ValueError("historical midpoint authority cannot be executable")
-        if self.classification is SourceEvaluationClassification.FUTURE_NATIVE_DECISION_GRADE:
+        if self.classification is EvidencePurpose.FUTURE_NATIVE_DECISION_GRADE:
             if self.source_class not in {
                 MarketDataSourceClass.IG_NATIVE_CAPTURE,
                 MarketDataSourceClass.IBKR_NATIVE_CAPTURE,
@@ -256,6 +246,16 @@ class SourceAlignedOutcome:
             raise ValueError("outcome latency cannot be negative")
         if not self.reason_codes and self.disposition is not SourceOutcomeDisposition.ACCEPTED:
             raise ValueError("unavailable or blocked outcome requires a reason")
+        if self.disposition is not SourceOutcomeDisposition.ACCEPTED and any(
+            value != Decimal("0")
+            for value in (
+                self.gross_return,
+                self.spread_cost,
+                self.latency_stress,
+                self.slippage_stress,
+            )
+        ):
+            raise ValueError("non-accepted outcome cannot carry economics")
         for quote in (self.entry, self.exit):
             if quote is None:
                 continue
@@ -272,6 +272,8 @@ class SourceAlignedOutcome:
             ):
                 raise ValueError("unhealthy or closed quote cannot be executable evidence")
         if self.disposition is SourceOutcomeDisposition.ACCEPTED:
+            if self.entry is not None and self.entry.received_time >= self.target_time:
+                raise ValueError("entry quote must precede target")
             if self.entry is not None and self.entry.received_time < (
                 self.authority.decision_time + self.latency
             ):
@@ -294,9 +296,8 @@ class SourceAlignedOutcome:
                 self.entry.executable or self.exit.executable
             ):
                 raise ValueError("executable quote cannot bypass executable authority")
-        if (
-            self.authority.classification is SourceEvaluationClassification.HISTORICAL_EXPLORATORY
-            and any(quote is not None and quote.executable for quote in (self.entry, self.exit))
+        if self.authority.classification is EvidencePurpose.HISTORICAL_EXPLORATORY and any(
+            quote is not None and quote.executable for quote in (self.entry, self.exit)
         ):
             raise ValueError("historical midpoint outcome cannot be executable")
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
@@ -365,17 +366,21 @@ class SourceAlignedEvaluation:
         if tuple(sorted(assets)) != assets:
             raise ValueError("source evaluation assets must be canonical")
         if self.result_kind is SourceResultKind.EXECUTABLE and (
-            self.authority.classification is SourceEvaluationClassification.HISTORICAL_EXPLORATORY
+            self.authority.classification is EvidencePurpose.HISTORICAL_EXPLORATORY
         ):
             raise ValueError("historical report cannot emit executable result")
 
     @property
     def result_kind(self) -> SourceResultKind:
-        return (
-            SourceResultKind.EXECUTABLE
-            if any(item.executable for item in self.outcomes)
-            else SourceResultKind.MIDPOINT_ONLY
-        )
+        if any(
+            item.disposition is not SourceOutcomeDisposition.ACCEPTED
+            and item.physical_delta != Decimal("0")
+            for item in self.outcomes
+        ):
+            return SourceResultKind.INCOMPLETE
+        if any(item.executable for item in self.outcomes):
+            return SourceResultKind.EXECUTABLE
+        return SourceResultKind.MIDPOINT_ONLY
 
     @property
     def gross_total(self) -> Decimal:
@@ -422,7 +427,7 @@ class SourceVerificationReceipt:
     semantic_identity: str
     closure_identity: str
     parent_verification_identity: str
-    classification: SourceEvaluationClassification
+    classification: EvidencePurpose
     checks: tuple[str, ...]
     receipt_identity: str = ""
 
@@ -430,7 +435,7 @@ class SourceVerificationReceipt:
         _digest(self.semantic_identity, "receipt semantic identity")
         _digest(self.closure_identity, "receipt closure identity")
         _digest(self.parent_verification_identity, "receipt parent identity")
-        if type(self.classification) is not SourceEvaluationClassification or not self.checks:
+        if type(self.classification) is not EvidencePurpose or not self.checks:
             raise ValueError("receipt classification and checks are required")
         object.__setattr__(self, "checks", tuple(self.checks))
         expected = identity(self.canonical_payload)
@@ -472,9 +477,7 @@ class R3IReadinessInput:
     receive_time: datetime
     executable_quote_identities: tuple[str, ...]
     source_evidence_identity: str
-    classification: SourceEvaluationClassification = (
-        SourceEvaluationClassification.FUTURE_NATIVE_DECISION_GRADE
-    )
+    classification: EvidencePurpose = EvidencePurpose.FUTURE_NATIVE_DECISION_GRADE
     native_execution_authority: bool = False
 
     def __post_init__(self) -> None:
@@ -483,7 +486,7 @@ class R3IReadinessInput:
             MarketDataSourceClass.IBKR_NATIVE_CAPTURE,
         }:
             raise ValueError("R3.I readiness requires a native source")
-        if self.classification is not SourceEvaluationClassification.FUTURE_NATIVE_DECISION_GRADE:
+        if self.classification is not EvidencePurpose.FUTURE_NATIVE_DECISION_GRADE:
             raise ValueError("R3.I readiness classification must be future native decision grade")
         if self.native_execution_authority:
             raise ValueError("R3.I readiness cannot grant native execution authority")

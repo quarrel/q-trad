@@ -13,14 +13,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.market_data import EvidencePurpose, MarketDataSourceClass
 from qtrad.domain.r3_evaluation import identity
 from qtrad.domain.r3_source_evaluation import (
     R3IReadinessInput,
     SourceAlignedEvaluation,
     SourceAlignedOutcome,
     SourceAuthority,
-    SourceEvaluationClassification,
     SourceOutcomeDisposition,
     SourceQuote,
     SourceVerificationReceipt,
@@ -61,7 +60,7 @@ def build_fixture_inputs() -> SourceFixtureInputs:
 
     authority = SourceAuthority(
         source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
-        classification=SourceEvaluationClassification.FIXTURE_IMPLEMENTATION,
+        classification=EvidencePurpose.FIXTURE_IMPLEMENTATION,
         source_product_id=FIXTURE_PRODUCT_ID,
         product_economics_identity=FIXTURE_ECONOMICS_IDENTITY,
         session_version=FIXTURE_SESSION_VERSION,
