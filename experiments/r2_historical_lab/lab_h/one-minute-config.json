@@ -1,0 +1,10 @@
+{
+  "job_id": "LAB-H-1M",
+  "repository_sha": "31300bbdde6cd014475de4cc6ccd18e58fa60030",
+  "evidence_label": "EXPLORATORY_POST_HOC_ONLY",
+  "source_class": "IBKR_HISTORICAL_RESEARCH",
+  "manifest_path": "/workspace/tmp/qtrad-r2-lab/LAB-0/lab-manifest.json",
+  "manifest_sha256": "462e40fa84038156b16c68bde4b68d574ab7862c680657ebd1a0035b39bf0072",
+  "horizon_minutes": 1,
+  "output_root": "/workspace/tmp/qtrad-r2-lab/LAB-H-1M"
+}
