@@ -643,14 +643,32 @@ def test_persisted_lifecycle_report_seeds_nonzero_authoritative_position(monkeyp
     assert persisted["lifecycle_events"][0]["physical_delta"] == [["ASSET_A", "0.250"]]
 
 
-def test_terminal_event_uses_zero_holding_interval_for_cost_authority(tmp_path):
+def test_terminal_intents_and_closure_use_zero_duration_authority(monkeypatch, tmp_path):
+    captured = []
+    original = evaluation_app.construct_horizon_intent
+
+    def capture(**kwargs):
+        intent = original(**kwargs)
+        captured.append(intent)
+        return intent
+
+    monkeypatch.setattr(evaluation_app, "construct_horizon_intent", capture)
     report = run_fixture(tmp_path, (5, 15, 30, 60))
     events = report.lifecycle_events
     assert events is not None
     terminal = events[-1]
     decision = object.__getattribute__(terminal, "_decision_component")
     event_report = object.__getattribute__(terminal, "_report_component")
+    terminal_intents = [item for item in captured if item.decision_time == terminal.event_time]
+    assert terminal_intents
+    assert all(item.expiry_time == terminal.event_time for item in terminal_intents)
     assert decision.terminal_disposition is True
-    assert decision.holding_interval == timedelta(0)
     assert decision.expiry_time == decision.decision_time
+    assert decision.holding_interval == timedelta(0)
     assert event_report.expected_cost_components["ASSET_A"]["FINANCING"] == Decimal("0")
+
+
+def test_compatibility_projection_rejects_non_15m_without_artifacts(tmp_path):
+    with pytest.raises(ValueError, match="fixed to the 15m"):
+        run_fixture(tmp_path, (5,), compatibility_projection=True)
+    assert tuple(tmp_path.iterdir()) == ()

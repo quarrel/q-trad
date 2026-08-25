@@ -310,7 +310,8 @@ class HorizonIntent:
         _nonnegative(self.gross_sleeve_value, "gross sleeve value")
         require_utc(self.decision_time, "intent decision time")
         require_utc(self.expiry_time, "intent expiry time")
-        if self.expiry_time <= self.decision_time:
+        terminal = self.expiry_time == self.decision_time and "TERMINAL_EVENT" in self.reason_codes
+        if self.expiry_time <= self.decision_time and not terminal:
             raise ValueError("intent expiry must follow decision time")
         if self.gross_forecast.horizon != self.key.horizon:
             raise ValueError("intent forecast horizon must match sleeve horizon")

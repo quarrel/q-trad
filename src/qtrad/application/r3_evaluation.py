@@ -533,6 +533,7 @@ def _build_lifecycle_events(
     for index, event_time in enumerate(boundaries):
         next_time = boundaries[index + 1] if index + 1 < len(boundaries) else event_time
         intents: list[HorizonIntent] = []
+        terminal_event = next_time == event_time
         active: list[HorizonState] = []
         reviewed: list[HorizonState] = []
         expired: list[HorizonState] = []
@@ -562,7 +563,12 @@ def _build_lifecycle_events(
                     requested_quantity=requested,
                     gross_sleeve_value=Decimal("50"),
                     decision_time=event_time,
-                    expiry_time=max(state.expiry_time, event_time + timedelta(seconds=1)),
+                    expiry_time=(
+                        event_time
+                        if terminal_event
+                        else max(state.expiry_time, event_time + timedelta(seconds=1))
+                    ),
+                    reason_codes=("TERMINAL_EVENT",) if terminal_event else (),
                 )
             )
         netting = match_internal_opposing_changes(intents)
@@ -989,7 +995,10 @@ def run_fixture(
 ) -> EvaluationReport:
     """Run unified lifecycle artifacts and optionally write the opaque legacy projection."""
     configured_horizons = tuple(horizons)
-    unified_decision, quotes = build_fixture_inputs(configured_horizons)
+    normalised_horizons = _normalise_fixture_horizons(configured_horizons)
+    if compatibility_projection and normalised_horizons != (ONE_HORIZON,):
+        raise ValueError("compatibility projection is fixed to the 15m fixture")
+    unified_decision, quotes = build_fixture_inputs(normalised_horizons)
     lifecycle_events = _build_lifecycle_events(
         unified_decision,
         unified_decision.horizon_states,
@@ -1009,8 +1018,6 @@ def run_fixture(
     target_receipt = _target_receipt(target)
     _persist_lifecycle_events(output_dir, lifecycle_events)
     if compatibility_projection:
-        if _normalise_fixture_horizons(configured_horizons) != (ONE_HORIZON,):
-            raise ValueError("compatibility projection is fixed to the 15m fixture")
         _write_compatibility_projection(output_dir, lifecycle_events, report)
         return report
     _write_create_only(output_dir / "decision.json", decision.canonical_bytes)
