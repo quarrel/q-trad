@@ -139,9 +139,7 @@ def _best(records: list[dict[str, Any]], *, terminal: bool) -> dict[str, Any] | 
     return _metric_view(
         max(
             candidates,
-            key=lambda record: float(
-                cast(dict[str, Any], record["result"])["skill_versus_zero"]
-            ),
+            key=lambda record: float(cast(dict[str, Any], record["result"])["skill_versus_zero"]),
         )
     )
 
