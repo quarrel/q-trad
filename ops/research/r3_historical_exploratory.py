@@ -90,8 +90,9 @@ def main() -> int:
         }
         if any(value is None for value in locator_values.values()):
             parser.error("--retained requires all exact child locator arguments")
-        if args.target_source is not None:
-            locator_values["target_source"] = args.target_source
+        if args.target_source is None:
+            parser.error("--retained requires --target-source")
+        locator_values["target_source"] = args.target_source
         rows, retained_metadata = load_retained_rows(
             config, locators={key: str(value) for key, value in locator_values.items()}
         )

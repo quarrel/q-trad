@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
+import sys
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -836,6 +838,53 @@ def test_fixture_loader_scans_all_parts_before_earliest_selection() -> None:
     assert metadata["selected_bytes"] < metadata["consumed_bytes"]
     assert metadata["selected_bytes_kind"] == "logical_serialised_fixture_row_bytes"
     assert len(metadata["source_scan_wrapper_bytes"]) == 6
+
+
+def test_native_fixture_receipts_are_cumulative_and_outcome_values_do_not_select() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    fixture = synthetic_fixture()
+    selected, metadata = load_fixture_rows(fixture, config)
+    mutated = tuple(replace(row, realised_return=row.realised_return + 0.25) for row in fixture)
+    mutated_selected, mutated_metadata = load_fixture_rows(mutated, config)
+    assert tuple(row.decision_time for row in selected) == tuple(
+        row.decision_time for row in mutated_selected
+    )
+    assert (
+        metadata["selection"]["selected_decision_times"]
+        == mutated_metadata["selection"]["selected_decision_times"]
+    )
+    assert metadata["source_scan_parts"] > metadata["selected_groups"]
+    assert metadata["source_scan_read_operations"] >= metadata["source_scan_parts"]
+    assert metadata["source_scan_bytes"] == metadata["consumed_bytes"]
+    assert metadata["source_limits"]["max_part_bytes"] == 536_870_912
+
+
+def test_retained_cli_requires_target_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "r3_historical_exploratory.py",
+            "--retained",
+            "--selection",
+            "selection.json",
+            "--consumed",
+            "consumed.json",
+            "--local-forecast",
+            "local.json",
+            "--pooled-forecast",
+            "pooled.json",
+            "--zero-forecast",
+            "zero.json",
+            "--outcome-evidence",
+            "outcome.json",
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path("ops/research/r3_historical_exploratory.py", run_name="__main__")
+    assert error.value.code == 2
 
 
 def test_retained_source_inventory_requires_exact_declared_and_scanned_bounds() -> None:

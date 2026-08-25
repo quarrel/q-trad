@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import resource
+import sqlite3
 import sys
 import tempfile
 import time
@@ -3334,21 +3335,45 @@ def _native_source_references(
     return result
 
 
-def _native_source_parts(
+def _validate_native_authorised_tree(
+    manifest_path: Path,
+    references: Sequence[tuple[str, str, int]],
+    *,
+    kind: str,
+) -> None:
+    """Reject undeclared entries in an authorised bounded-source family tree."""
+    family = manifest_path.parent / f"{manifest_path.name}.parts" / kind
+    declared = {PurePosixPath(relative).name for relative, _digest, _count in references}
+    try:
+        entries = tuple(family.iterdir())
+    except OSError as exc:
+        raise FreezeError(f"native target-source {kind} family is unavailable") from exc
+    for entry in entries:
+        if entry.name not in declared or entry.is_symlink() or not entry.is_file():
+            raise FreezeError(
+                f"native target-source {kind} family contains an orphan or unsafe entry"
+            )
+    if {entry.name for entry in entries} != declared:
+        raise FreezeError(f"native target-source {kind} family does not match declarations")
+
+
+def _iter_native_source_parts(
     manifest_path: Path,
     references: Sequence[tuple[str, str, int]],
     *,
     kind: str,
     source_id: str,
-) -> list[Mapping[str, Any]]:
-    rows: list[Mapping[str, Any]] = []
+    receipt: dict[str, Any],
+) -> Iterator[Mapping[str, Any]]:
+    """Stream one authorised target-source part at a time with truthful receipts."""
     for index, (relative, expected_hash, expected_count) in enumerate(references):
         part_path = manifest_path.parent / PurePosixPath(relative)
         try:
             encoded = part_path.read_bytes()
         except OSError as exc:
             raise FreezeError(f"native target-source {kind} part cannot be read") from exc
-        if hashlib.sha256(encoded).hexdigest() != expected_hash:
+        actual_hash = hashlib.sha256(encoded).hexdigest()
+        if actual_hash != expected_hash:
             raise FreezeError(f"native target-source {kind} part byte hash differs")
         try:
             payload = json.loads(encoded)
@@ -3366,21 +3391,28 @@ def _native_source_parts(
             "rows",
         }:
             raise FreezeError(f"native target-source {kind} part envelope is malformed")
+        physical_rows = envelope["rows"]
         if (
             envelope["contract"] != _TARGET_SOURCE_PART_CONTRACT
             or envelope["schema_version"] != 1
             or envelope["source_id"] != source_id
             or envelope["kind"] != kind
             or envelope["part_index"] != index
-            or not isinstance(envelope["rows"], list)
-            or len(cast(list[Any], envelope["rows"])) != expected_count
+            or not isinstance(physical_rows, list)
+            or len(cast(list[Any], physical_rows)) != expected_count
         ):
             raise FreezeError(f"native target-source {kind} part lineage/count differs")
-        for row in cast(list[Any], envelope["rows"]):
+        receipt["parts"] = int(receipt.get("parts", 0)) + 1
+        receipt["rows"] = int(receipt.get("rows", 0)) + expected_count
+        receipt["bytes"] = int(receipt.get("bytes", 0)) + len(encoded)
+        receipt["largest_part_bytes"] = max(int(receipt.get("largest_part_bytes", 0)), len(encoded))
+        receipt.setdefault("part_hashes", []).append(actual_hash)
+        if len(encoded) > int(receipt.get("max_part_bytes", _MAX_PART_BYTES)):
+            raise FreezeError(f"native target-source {kind} part exceeds size bound")
+        for row in cast(list[Any], physical_rows):
             if not isinstance(row, Mapping):
                 raise FreezeError(f"native target-source {kind} row is malformed")
-            rows.append(dict(cast(Mapping[str, Any], row)))
-    return rows
+            yield cast(Mapping[str, Any], row)
 
 
 def _load_native_target_source(
@@ -3388,7 +3420,12 @@ def _load_native_target_source(
     expected: Mapping[str, Any],
     *,
     fixture: bool,
-) -> tuple[dict[str, Any], list[Mapping[str, Any]], list[Mapping[str, Any]], dict[str, Any]]:
+) -> tuple[
+    dict[str, Any],
+    Iterator[Mapping[str, Any]],
+    Iterator[Mapping[str, Any]],
+    dict[str, Any],
+]:
     """Load only target/opportunity bounded parts; pre-holdout refs are never touched."""
     if path.is_symlink() or not path.is_file():
         raise FreezeError("native target-source wrapper is missing or unsafe")
@@ -3437,6 +3474,17 @@ def _load_native_target_source(
         or manifest["source_id"] != expected["source_id"]
     ):
         raise FreezeError("native target-source wrapper contract or identity differs")
+    expected_lineage = {
+        "source_target_dataset_id": _SOURCE_TARGET_DATASET_ID,
+        "target_index_dataset_id": _SOURCE_TARGET_INDEX_ID,
+        "foundation_configuration_id": _SOURCE_FOUNDATION_ID,
+        "observation_dataset_id": _SOURCE_OBSERVATION_ID,
+        "availability_evidence_id": _SOURCE_AVAILABILITY_ID,
+        "causal_metadata_dataset_id": _SOURCE_CAUSAL_METADATA_ID,
+        "causal_panel_dataset_id": _SOURCE_CAUSAL_PANEL_ID,
+    }
+    if any(manifest[key] != value for key, value in expected_lineage.items()):
+        raise FreezeError("native target-source lineage differs from frozen authority")
     if not fixture and manifest["closure_id"] != expected["closure_id"]:
         raise FreezeError("native target-source closure differs from freeze")
     if _native_source_closure(manifest) != manifest["closure_id"]:
@@ -3445,52 +3493,70 @@ def _load_native_target_source(
     opportunity_refs = _native_source_references(
         path, manifest, "opportunity_parts", inspect_files=True
     )
+    _validate_native_authorised_tree(path, target_refs, kind="targets")
+    _validate_native_authorised_tree(path, opportunity_refs, kind="opportunities")
     # Validate every forbidden declaration's shape and canonical path, but deliberately do not
     # call stat/open/read/is_file on a pre-holdout path.
     _native_source_references(path, manifest, "pre_holdout_target_parts", inspect_files=False)
-    target_rows = _native_source_parts(
-        path, target_refs, kind="targets", source_id=str(manifest["source_id"])
-    )
-    opportunity_rows = _native_source_parts(
-        path, opportunity_refs, kind="opportunities", source_id=str(manifest["source_id"])
-    )
-    if not fixture:
-        from qtrad.domain.r2_holdout import HoldoutTargetOpportunity, R2HoldoutTargetIdentity
-
-        targets = [R2HoldoutTargetIdentity.from_json(row) for row in target_rows]
-        opportunities = [HoldoutTargetOpportunity.from_json(row) for row in opportunity_rows]
-        target_rows = [cast(Mapping[str, Any], item.as_json()) for item in targets]
-        opportunity_rows = [cast(Mapping[str, Any], item.as_json()) for item in opportunities]
-    target_by_id = {str(row["target_id"]): row for row in target_rows}
-    if len(target_by_id) != len(target_rows):
-        raise FreezeError("native target-source target IDs are duplicated")
-    opportunity_by_id = {str(row["target_id"]): row for row in opportunity_rows}
-    if len(opportunity_by_id) != len(opportunity_rows):
-        raise FreezeError("native target-source opportunity IDs are duplicated")
-    if set(target_by_id) != set(opportunity_by_id):
-        raise FreezeError("native target-source target/opportunity universes differ")
-    for target_id, target in target_by_id.items():
-        opportunity = opportunity_by_id[target_id]
-        for field in ("instrument_id", "decision_time", "target_horizon_seconds"):
-            if target[field] != opportunity[field]:
-                raise FreezeError(f"native target/opportunity {field} differs: {target_id}")
-    inventory = {
+    if (
+        sum(item[2] for item in target_refs) != manifest["target_count"]
+        or sum(item[2] for item in opportunity_refs) != manifest["opportunity_count"]
+    ):
+        raise FreezeError("native target-source reference counts differ from wrapper")
+    inventory: dict[str, Any] = {
         "wrapper_sha256": hashlib.sha256(encoded).hexdigest(),
-        "target_rows": len(target_rows),
-        "opportunity_rows": len(opportunity_rows),
-        "target_parts": len(target_refs),
-        "opportunity_parts": len(opportunity_refs),
+        "wrapper_bytes": len(encoded),
+        "target_rows": 0,
+        "opportunity_rows": 0,
+        "target_parts": 0,
+        "opportunity_parts": 0,
+        "target_bytes": 0,
+        "opportunity_bytes": 0,
+        "target_part_hashes": [],
+        "opportunity_part_hashes": [],
         "pre_holdout_parts_unopened": len(cast(list[Any], manifest["pre_holdout_target_parts"])),
+        "pre_holdout_read_operations": 0,
+        "max_part_bytes": _MAX_PART_BYTES,
     }
-    return manifest, list(target_rows), list(opportunity_rows), inventory
+    target_receipt: dict[str, Any] = {
+        "max_part_bytes": _MAX_PART_BYTES,
+        "part_hashes": inventory["target_part_hashes"],
+    }
+    opportunity_receipt: dict[str, Any] = {
+        "max_part_bytes": _MAX_PART_BYTES,
+        "part_hashes": inventory["opportunity_part_hashes"],
+    }
+    target_rows = _iter_native_source_parts(
+        path,
+        target_refs,
+        kind="targets",
+        source_id=str(manifest["source_id"]),
+        receipt=target_receipt,
+    )
+    opportunity_rows = _iter_native_source_parts(
+        path,
+        opportunity_refs,
+        kind="opportunities",
+        source_id=str(manifest["source_id"]),
+        receipt=opportunity_receipt,
+    )
+    inventory["target_receipt"] = target_receipt
+    inventory["opportunity_receipt"] = opportunity_receipt
+    return manifest, target_rows, opportunity_rows, inventory
 
 
 def _load_native_outcome_values(
-    path: Path, limits: Mapping[str, Any], *, fixture: bool
+    path: Path,
+    limits: Mapping[str, Any],
+    *,
+    fixture: bool,
+    receipt: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """Decode tagged native outcome arrays and reject tag/pair/coverage mutations."""
     del fixture
     encoded_wrapper = path.read_bytes()
+    if receipt is not None:
+        receipt["wrapper_bytes"] = len(encoded_wrapper)
     expected_wrapper_hash = limits.get("expected_wrapper_sha256")
     if (
         expected_wrapper_hash is not None
@@ -3546,6 +3612,14 @@ def _load_native_outcome_values(
         if part_path.is_symlink() or not part_path.is_file():
             raise FreezeError("native outcome part is unavailable")
         encoded = part_path.read_bytes()
+        if receipt is not None:
+            receipt["parts"] = int(receipt.get("parts", 0)) + 1
+            receipt["rows"] = int(receipt.get("rows", 0)) + int(reference_mapping["row_count"])
+            receipt["bytes"] = int(receipt.get("bytes", 0)) + len(encoded)
+            receipt["largest_part_bytes"] = max(
+                int(receipt.get("largest_part_bytes", 0)), len(encoded)
+            )
+            receipt.setdefault("part_hashes", []).append(hashlib.sha256(encoded).hexdigest())
         if hashlib.sha256(encoded).hexdigest() != reference_mapping["sha256"]:
             raise FreezeError("native outcome part byte hash mismatch")
         try:
@@ -3624,6 +3698,45 @@ def _load_native_outcome_values(
     return outcomes
 
 
+def _native_fixture_row(
+    target_id: str,
+    targets: Mapping[str, Mapping[str, Any]],
+    opportunities: Mapping[str, Mapping[str, Any]],
+    forecasts: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    outcomes: Mapping[str, float],
+    periods: Mapping[str, str],
+) -> FixtureRow:
+    target = targets[target_id]
+    opportunity = opportunities[target_id]
+    instrument = str(target["instrument_id"])
+    group = _TARGET_GROUP_MAP.get(instrument, _TARGET_GROUP_MAP.get(target_id, instrument))
+    local = forecasts["local_forecast"][target_id]
+    prediction_value = local.get("forecast", local.get("prediction"))
+    if not isinstance(prediction_value, (int, float)) or isinstance(prediction_value, bool):
+        raise FreezeError("native forecast value is malformed")
+    for role_name, role_records in forecasts.items():
+        role_row = role_records[target_id]
+        if "target_instrument_id" in role_row and role_row["target_instrument_id"] != instrument:
+            raise FreezeError(f"native {role_name} instrument differs from target source")
+    decision_time = str(target["decision_time"])
+    return FixtureRow(
+        timestamp=decision_time,
+        decision_time=decision_time,
+        target_id=str(target.get("fixture_target_id", target_id)),
+        asset=instrument,
+        group=group,
+        horizon_minutes=int(target["target_horizon_seconds"]) // 60,
+        period=periods[decision_time],
+        prediction=float(prediction_value),
+        realised_return=float(outcomes[target_id]),
+        available_at=str(opportunity["feature_data_asof"]),
+        target_available_at=str(target["target_available_at"]),
+        dependency_start=str(opportunity["dependency_start"]),
+        dependency_end=str(opportunity["dependency_end"]),
+        feature_value=float(prediction_value),
+    )
+
+
 def _validate_child_metadata(
     name: str,
     metadata: Mapping[str, Any],
@@ -3697,6 +3810,7 @@ def _load_native_retained_rows(
     wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
     decoder = cast(Mapping[str, Any], loader["decoder_limits"])
     streaming = cast(Mapping[str, Any], loader["streaming_policy"])
+    source_receipts: dict[str, dict[str, Any]] = {}
     source_manifest, target_rows, opportunity_rows, source_inventory = _load_native_target_source(
         Path(locators["target_source"]),
         cast(Mapping[str, Any], loader["target_source"]),
@@ -3717,8 +3831,17 @@ def _load_native_retained_rows(
             "expected_wrapper_identity": None if fixture else declaration["identity"],
             "required_record_keys": declaration["required_keys"],
         }
-        metadata, parts, _size, _digest = _open_json_document(Path(locators[name]), marker_limits)
+        metadata, parts, marker_size, _digest = _open_json_document(
+            Path(locators[name]), marker_limits
+        )
         _validate_child_metadata(name, metadata, loader, fixture=fixture)
+        source_receipts[name] = {
+            "wrapper_bytes": marker_size,
+            "parts": 0,
+            "rows": 0,
+            "bytes": 0,
+            "part_hashes": [],
+        }
         decoded = [row for _descriptor, rows, _part_size in parts for row in rows]
         if len(decoded) != 1:
             raise FreezeError(f"native {name} marker must contain one object")
@@ -3749,11 +3872,25 @@ def _load_native_retained_rows(
             "partition_fields": declaration["partition_fields"],
             "partition_mapping_fields": declaration["partition_mapping_fields"],
         }
-        metadata, parts, _size, _digest = _open_partitioned_json_document(
+        metadata, parts, wrapper_size, _digest = _open_partitioned_json_document(
             Path(locators[name]), limits
         )
         _validate_child_metadata(name, metadata, loader, fixture=fixture)
-        decoded = [row for _descriptor, rows, _part_size in parts for row in rows]
+        receipt: dict[str, Any] = {
+            "wrapper_bytes": wrapper_size,
+            "parts": 0,
+            "rows": 0,
+            "bytes": 0,
+            "part_hashes": [],
+        }
+        decoded: list[Mapping[str, Any]] = []
+        for descriptor, part_rows, part_size in parts:
+            receipt["parts"] += 1
+            receipt["rows"] += len(part_rows)
+            receipt["bytes"] += part_size
+            receipt["part_hashes"].append(descriptor["sha256"])
+            decoded.extend(part_rows)
+        source_receipts[name] = receipt
         required_native = {"target_id", "target_instrument_id", "forecast", "row_id"}
         if any(not required_native <= set(row) for row in decoded):
             raise FreezeError(f"native {name} logical row fields are incomplete")
@@ -3774,11 +3911,105 @@ def _load_native_retained_rows(
         "physical_required_keys": wrappers["outcome_evidence"]["physical_required_keys"],
         "manifest_relative_path": wrappers["outcome_evidence"]["manifest_relative_path"],
     }
+    outcome_receipt: dict[str, Any] = {"parts": 0, "rows": 0, "bytes": 0, "part_hashes": []}
     outcome_values = _load_native_outcome_values(
-        Path(locators["outcome_evidence"]), outcome_limits, fixture=fixture
+        Path(locators["outcome_evidence"]),
+        outcome_limits,
+        fixture=fixture,
+        receipt=outcome_receipt,
     )
-    target_by_id = {str(row["target_id"]): row for row in target_rows}
-    opportunity_by_id = {str(row["target_id"]): row for row in opportunity_rows}
+    source_receipts["outcome_evidence"] = outcome_receipt
+    db = sqlite3.connect(":memory:")
+    db.executescript(
+        """
+        CREATE TABLE targets (
+            target_id TEXT PRIMARY KEY, fixture_target_id TEXT, instrument_id TEXT NOT NULL,
+            decision_time TEXT NOT NULL, horizon INTEGER NOT NULL,
+            target_available_at TEXT NOT NULL,
+            target_json TEXT NOT NULL
+        );
+        CREATE TABLE opportunities (
+            target_id TEXT PRIMARY KEY, instrument_id TEXT NOT NULL, decision_time TEXT NOT NULL,
+            feature_data_asof TEXT NOT NULL, dependency_start TEXT NOT NULL,
+            dependency_end TEXT NOT NULL, opportunity_json TEXT NOT NULL
+        );
+        """
+    )
+    from qtrad.domain.r2_holdout import HoldoutTargetOpportunity, R2HoldoutTargetIdentity
+
+    for target in target_rows:
+        if not fixture:
+            R2HoldoutTargetIdentity.from_json(target)
+        try:
+            db.execute(
+                "INSERT INTO targets VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(target["target_id"]),
+                    target.get("fixture_target_id"),
+                    str(target["instrument_id"]),
+                    str(target["decision_time"]),
+                    int(target["target_horizon_seconds"]),
+                    str(target["target_available_at"]),
+                    json.dumps(dict(target), sort_keys=True, separators=(",", ":")),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise FreezeError("native target-source target IDs are duplicated") from exc
+    for opportunity in opportunity_rows:
+        if not fixture:
+            HoldoutTargetOpportunity.from_json(opportunity)
+        try:
+            db.execute(
+                "INSERT INTO opportunities VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(opportunity["target_id"]),
+                    str(opportunity["instrument_id"]),
+                    str(opportunity["decision_time"]),
+                    str(opportunity["feature_data_asof"]),
+                    str(opportunity["dependency_start"]),
+                    str(opportunity["dependency_end"]),
+                    json.dumps(dict(opportunity), sort_keys=True, separators=(",", ":")),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise FreezeError("native target-source opportunity IDs are duplicated") from exc
+    db.commit()
+    target_count = int(db.execute("SELECT COUNT(*) FROM targets").fetchone()[0])
+    opportunity_count = int(db.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0])
+    if (
+        target_count != opportunity_count
+        or db.execute(
+            "SELECT 1 FROM targets LEFT JOIN opportunities USING(target_id) "
+            "WHERE opportunities.target_id IS NULL LIMIT 1"
+        ).fetchone()
+    ):
+        raise FreezeError("native target-source target/opportunity universes differ")
+    target_receipt = cast(Mapping[str, Any], source_inventory["target_receipt"])
+    opportunity_receipt = cast(Mapping[str, Any], source_inventory["opportunity_receipt"])
+    source_inventory.update(
+        {
+            "target_rows": target_receipt["rows"],
+            "target_parts": target_receipt["parts"],
+            "target_bytes": target_receipt["bytes"],
+            "opportunity_rows": opportunity_receipt["rows"],
+            "opportunity_parts": opportunity_receipt["parts"],
+            "opportunity_bytes": opportunity_receipt["bytes"],
+        }
+    )
+    source_inventory["combined_rows"] = int(source_inventory["target_rows"]) + int(
+        source_inventory["opportunity_rows"]
+    )
+    source_inventory["combined_bytes"] = int(source_inventory["target_bytes"]) + int(
+        source_inventory["opportunity_bytes"]
+    )
+    source_inventory["max_part_bytes_observed"] = max(
+        int(target_receipt.get("largest_part_bytes", 0)),
+        int(opportunity_receipt.get("largest_part_bytes", 0)),
+    )
+    if source_inventory["combined_rows"] > int(streaming["max_source_rows"]):
+        raise FreezeError("native target-source exceeds frozen row bound")
+    if source_inventory["combined_bytes"] > int(streaming["max_source_bytes"]):
+        raise FreezeError("native target-source exceeds frozen byte bound")
     forecast_by_role: dict[str, dict[str, Mapping[str, Any]]] = {}
     for name, records in forecast_rows.items():
         role: dict[str, Mapping[str, Any]] = {}
@@ -3788,95 +4019,171 @@ def _load_native_retained_rows(
                 raise FreezeError(f"native {name} target universe contains duplicate/malformed IDs")
             role[target_id] = row
         forecast_by_role[name] = role
-    if not (
-        set(forecast_by_role["local_forecast"])
-        == set(forecast_by_role["pooled_forecast"])
-        == set(forecast_by_role["zero_forecast"])
-        == set(target_by_id)
-        == set(opportunity_by_id)
-        == set(outcome_values)
-    ):
+    forecast_counts = {name: len(records) for name, records in forecast_by_role.items()}
+    if any(count != target_count for count in forecast_counts.values()):
         raise FreezeError(
-            "native forecast/outcome universe differs from target source "
+            "native forecast universe differs from target source "
             f"({len(forecast_by_role['local_forecast'])},{len(forecast_by_role['pooled_forecast'])},"
-            f"{len(forecast_by_role['zero_forecast'])},{len(target_rows)},{len(target_by_id)},"
-            f"{len(opportunity_by_id)},{len(outcome_values)})"
+            f"{len(forecast_by_role['zero_forecast'])},{target_count},{opportunity_count})"
         )
-    ordered_decisions = sorted({str(row["decision_time"]) for row in target_rows})
+    ordered_decisions = [
+        str(row[0])
+        for row in db.execute("SELECT DISTINCT decision_time FROM targets ORDER BY decision_time")
+    ]
     period_by_decision = {
         decision: f"period-{index}" for index, decision in enumerate(ordered_decisions)
     }
-    rows: list[FixtureRow] = []
-    for target_id, target in target_by_id.items():
-        opportunity = opportunity_by_id[target_id]
-        instrument = str(target["instrument_id"])
-        group = _TARGET_GROUP_MAP.get(instrument, _TARGET_GROUP_MAP.get(target_id, instrument))
-        local = forecast_by_role["local_forecast"][target_id]
-        prediction_value = local.get("forecast", local.get("prediction"))
-        if not isinstance(prediction_value, (int, float)) or isinstance(prediction_value, bool):
-            raise FreezeError("native forecast value is malformed")
-        for role_name, role_records in forecast_by_role.items():
-            role_row = role_records[target_id]
-            if (
-                "target_instrument_id" in role_row
-                and role_row["target_instrument_id"] != instrument
-            ):
-                raise FreezeError(f"native {role_name} instrument differs from target source")
-        decision_time = str(target["decision_time"])
-        feature_asof = str(opportunity["feature_data_asof"])
-        dependency_start = str(opportunity["dependency_start"])
-        dependency_end = str(opportunity["dependency_end"])
-        rows.append(
-            FixtureRow(
-                timestamp=decision_time,
-                decision_time=decision_time,
-                target_id=str(target.get("fixture_target_id", target_id)),
-                asset=instrument,
-                group=group,
-                horizon_minutes=int(target["target_horizon_seconds"]) // 60,
-                period=period_by_decision[decision_time],
-                prediction=float(prediction_value),
-                realised_return=float(outcome_values[target_id]),
-                available_at=feature_asof,
-                target_available_at=str(target["target_available_at"]),
-                dependency_start=dependency_start,
-                dependency_end=dependency_end,
-                feature_value=float(prediction_value),
-            )
-        )
-    by_decision: dict[str, list[FixtureRow]] = defaultdict(list)
-    for row in rows:
-        by_decision[row.decision_time].append(row)
     required_groups = int(
         cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
     )
-    complete: list[list[FixtureRow]] = []
+    complete: list[tuple[str, list[str]]] = []
     incomplete: list[dict[str, Any]] = []
-    first_decision = min(by_decision) if by_decision else ""
-    expected_instruments = {row.asset for row in by_decision.get(first_decision, ())}
+    first_decision = ordered_decisions[0] if ordered_decisions else ""
+    expected_instruments = {
+        str(row[0])
+        for row in db.execute(
+            "SELECT DISTINCT instrument_id FROM targets WHERE decision_time = ?",
+            (first_decision,),
+        )
+    }
     if len(expected_instruments) != 6:
         raise FreezeError("native target source does not establish six-instrument universe")
-    for decision_time in sorted(by_decision):
-        group_rows = by_decision[decision_time]
+    for decision_time, row_count, instrument_values in db.execute(
+        "SELECT decision_time, COUNT(*), GROUP_CONCAT(DISTINCT instrument_id) "
+        "FROM targets GROUP BY decision_time ORDER BY decision_time"
+    ):
+        group_instruments = set(str(instrument_values).split(","))
+        group_ids = (
+            [
+                str(row[0])
+                for row in db.execute(
+                    "SELECT target_id FROM targets WHERE decision_time = ? ORDER BY target_id",
+                    (decision_time,),
+                )
+            ]
+            if int(row_count) == 6
+            else []
+        )
+        forecast_complete = all(
+            target_id in forecast_by_role[role]
+            for target_id in group_ids
+            for role in forecast_by_role
+        )
         if (
-            len(group_rows) != len(expected_instruments)
-            or {row.asset for row in group_rows} != expected_instruments
+            int(row_count) != len(expected_instruments)
+            or group_instruments != expected_instruments
+            or not forecast_complete
         ):
             incomplete.append(
                 {
                     "decision_time": decision_time,
                     "disposition": "INCOMPLETE_NOT_SELECTED",
-                    "row_count": len(group_rows),
+                    "row_count": len(group_ids),
                 }
             )
         else:
-            complete.append(sorted(group_rows, key=lambda item: item.target_id))
+            complete.append((str(decision_time), sorted(group_ids)))
     if len(complete) < required_groups:
         raise FreezeError("native target source contains fewer than three complete groups")
+    selected_target_ids = tuple(
+        target_id
+        for _decision_time, group in sorted(complete, key=lambda item: item[0])[:required_groups]
+        for target_id in group
+    )
+    selected_set = set(selected_target_ids)
+    target_by_id = {
+        target_id: cast(dict[str, Any], json.loads(target_json))
+        for target_id, target_json in db.execute(
+            f"SELECT target_id, target_json FROM targets WHERE target_id IN "
+            f"({','.join('?' for _ in selected_set)})",
+            tuple(selected_set),
+        )
+    }
+    opportunity_by_id = {
+        target_id: cast(dict[str, Any], json.loads(opportunity_json))
+        for target_id, opportunity_json in db.execute(
+            f"SELECT target_id, opportunity_json FROM opportunities WHERE target_id IN "
+            f"({','.join('?' for _ in selected_set)})",
+            tuple(selected_set),
+        )
+    }
+    forecast_by_role = {
+        name: {target_id: row for target_id, row in records.items() if target_id in selected_set}
+        for name, records in forecast_by_role.items()
+    }
     selected = tuple(
-        row
-        for group in sorted(complete, key=lambda item: item[0].decision_time)[:required_groups]
-        for row in group
+        _native_fixture_row(
+            target_id,
+            target_by_id,
+            opportunity_by_id,
+            forecast_by_role,
+            outcome_values,
+            period_by_decision,
+        )
+        for target_id in selected_target_ids
+        if target_id in outcome_values
+    )
+    if len(selected) != len(selected_target_ids):
+        missing_outcomes = set(selected_target_ids) - set(outcome_values)
+        incomplete.extend(
+            {
+                "decision_time": str(target_by_id[target_id]["decision_time"]),
+                "disposition": "INCOMPLETE_NOT_SELECTED",
+                "row_count": 1,
+                "reason": "missing_outcome",
+            }
+            for target_id in sorted(missing_outcomes)
+        )
+        raise FreezeError("native selected groups have incomplete outcome coverage")
+    for _name, receipt in source_receipts.items():
+        receipt["read_operations"] = int(receipt.get("parts", 0)) + 1
+    source_inventory["read_operations"] = (
+        1
+        + int(source_inventory["target_receipt"].get("parts", 0))
+        + int(source_inventory["opportunity_receipt"].get("parts", 0))
+    )
+    source_inventory["read_operations"] += sum(
+        int(receipt["read_operations"]) for receipt in source_receipts.values()
+    )
+    all_receipts = {
+        "target_source": source_inventory,
+        **source_receipts,
+    }
+    source_scan_rows = int(source_inventory["combined_rows"]) + sum(
+        int(receipt.get("rows", 0)) for receipt in source_receipts.values()
+    )
+    source_scan_bytes = (
+        int(source_inventory["combined_bytes"])
+        + sum(
+            int(receipt.get("bytes", 0)) + int(receipt.get("wrapper_bytes", 0))
+            for receipt in source_receipts.values()
+        )
+        + int(source_inventory.get("wrapper_bytes", 0))
+    )
+    source_scan_parts = (
+        int(source_inventory["target_parts"])
+        + int(source_inventory["opportunity_parts"])
+        + sum(int(receipt.get("parts", 0)) for receipt in source_receipts.values())
+    )
+    source_scan_largest_part = max(
+        int(source_inventory.get("max_part_bytes_observed", 0)),
+        *(int(receipt.get("largest_part_bytes", 0)) for receipt in source_receipts.values()),
+    )
+    if source_scan_rows > int(streaming["max_source_rows"]):
+        raise FreezeError("native cumulative source rows exceed frozen bound")
+    if source_scan_bytes > int(streaming["max_source_bytes"]):
+        raise FreezeError("native cumulative source bytes exceed frozen bound")
+    target_source_limits = cast(Mapping[str, Any], loader["target_source"])["hard_limits"]
+    if source_scan_largest_part > int(target_source_limits["max_part_bytes"]):
+        raise FreezeError("native cumulative largest part exceeds frozen bound")
+    selected_bytes = sum(
+        len(
+            json.dumps(
+                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
+                separators=(",", ":"),
+            ).encode()
+        )
+        for row in selected
     )
     metadata = {
         "authority": {
@@ -3899,20 +4206,12 @@ def _load_native_retained_rows(
         "consumed_rows": source_inventory["target_rows"]
         + source_inventory["opportunity_rows"]
         + (24 if fixture else 0),
-        "selected_bytes": len(selected) * 100,
-        "consumed_bytes": (len(selected) + 6) * 100,
+        "selected_bytes": selected_bytes,
+        "consumed_bytes": source_scan_bytes,
         "selected_bytes_kind": "logical_serialised_fixture_row_bytes",
         "consumed_bytes_kind": "physical_part_bytes",
         "source_scan_wrapper_bytes": {
-            name: 0
-            for name in (
-                "selection",
-                "consumed",
-                "local_forecast",
-                "pooled_forecast",
-                "zero_forecast",
-                "outcome_evidence",
-            )
+            name: int(receipt.get("wrapper_bytes", 0)) for name, receipt in source_receipts.items()
         },
         "role_bindings": {
             "LOCAL_RIDGE": {
@@ -3981,30 +4280,39 @@ def _load_native_retained_rows(
                 ]
             ],
         },
-        "source_scan_rows": source_inventory["target_rows"] + source_inventory["opportunity_rows"],
-        "source_scan_parts": source_inventory["target_parts"]
-        + source_inventory["opportunity_parts"],
+        "source_scan_rows": source_scan_rows,
+        "source_scan_parts": source_scan_parts,
+        "source_scan_bytes": source_scan_bytes,
+        "source_scan_read_operations": int(source_inventory["read_operations"]),
+        "source_scan_largest_part_bytes": source_scan_largest_part,
+        "source_limits": {
+            "max_rows": int(streaming["max_source_rows"]),
+            "max_bytes": int(streaming["max_source_bytes"]),
+            "max_part_bytes": int(target_source_limits["max_part_bytes"]),
+        },
+        "source_scan_unique_rows": {
+            "target_source_targets": len(target_by_id),
+            "target_source_opportunities": len(opportunity_by_id),
+            **{name: len(records) for name, records in forecast_rows.items()},
+            "outcome_evidence": len(outcome_values),
+        },
+        "source_scan_receipts": all_receipts,
         "unopened_parts": {
             "targets": "EXHAUSTED",
             "opportunities": "EXHAUSTED",
             "pre_holdout_target_parts": "EXHAUSTED",
         },
         "unopened_part_count": source_inventory["pre_holdout_parts_unopened"],
-        "consumed_parts_count": 13
-        if fixture
-        else source_inventory["target_parts"] + source_inventory["opportunity_parts"],
+        # Legacy report field retained for renderer compatibility; the truthful cumulative
+        # count is `source_scan_parts` and includes every target/forecast/outcome part.
+        "consumed_parts_count": 13 if fixture else source_scan_parts,
         "source_scan_part_hashes": {
-            "local_forecast": ["fixture-local-0", "fixture-local-1", "fixture-local-2"],
-            "pooled_forecast": ["fixture-pooled-0", "fixture-pooled-1", "fixture-pooled-2"],
-            "zero_forecast": ["fixture-zero-0", "fixture-zero-1", "fixture-zero-2"],
-            "outcome_evidence": [
-                "fixture-outcome-0",
-                "fixture-outcome-1",
-                "fixture-outcome-2",
-                "fixture-outcome-3",
-            ],
+            name: receipt.get("part_hashes", [])
+            for name, receipt in source_receipts.items()
+            if name not in {"selection", "consumed"}
         },
     }
+    db.close()
     return selected, metadata
 
 
@@ -4025,6 +4333,10 @@ def load_retained_rows(
     loader = cast(Mapping[str, Any], config.document["retained_loader"])
     expected_locators = cast(Mapping[str, str], loader["locators"])
     actual_locators = expected_locators if locators is None else locators
+    if not _fixture and "target_source" not in actual_locators:
+        raise FreezeError(
+            "retained loader locator set requires the authorised target-source manifest"
+        )
     if "target_source" in actual_locators:
         return _load_native_retained_rows(config, actual_locators, fixture=_fixture)
     if not _fixture and dict(actual_locators) != dict(expected_locators):
