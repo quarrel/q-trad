@@ -590,6 +590,9 @@ def test_forecast_wrapper_schema_matches_producer_and_fixture_loader(
         "manifest_root",
         "role_swap",
         "oversized_part",
+        "target_source_wrapper_symlink",
+        "target_source_family_symlink",
+        "target_source_part_symlink",
     ),
 )
 def test_compact_fixture_contract_mutations_fail_closed(
@@ -625,6 +628,25 @@ def test_compact_fixture_contract_mutations_fail_closed(
         assert _fixture
         assert locators is not None
         actual_locators = dict(locators)
+        if mutation.startswith("target_source_"):
+            native_manifest = Path(actual_locators["target_source"])
+            if mutation == "target_source_wrapper_symlink":
+                real_manifest = native_manifest.with_name(native_manifest.name + ".real")
+                native_manifest.rename(real_manifest)
+                native_manifest.symlink_to(real_manifest.name)
+            else:
+                family_name = "targets"
+                family = native_manifest.parent / f"{native_manifest.name}.parts" / family_name
+                if mutation == "target_source_part_symlink":
+                    part = family / "part-000000.json"
+                    real_part = part.with_name(part.name + ".real")
+                    part.rename(real_part)
+                    part.symlink_to(real_part.name)
+                else:
+                    real_family = family.with_name(family.name + ".real")
+                    family.rename(real_family)
+                    family.symlink_to(real_family.name, target_is_directory=True)
+            return original_loader(fixture_config, locators=actual_locators, _fixture=True)
         if mutation == "manifest_root":
             actual_locators["local_forecast"] = str(
                 Path(actual_locators["local_forecast"]).with_name("outside.json")
@@ -859,6 +881,12 @@ def test_native_fixture_receipts_are_cumulative_and_outcome_values_do_not_select
     assert metadata["source_scan_read_operations"] >= metadata["source_scan_parts"]
     assert metadata["source_scan_bytes"] == metadata["consumed_bytes"]
     assert metadata["source_limits"]["max_part_bytes"] == 536_870_912
+    assert metadata["selection_state"]["full_payload_materialisation"] is False
+    assert (
+        metadata["selection_state"]["bounded_id_state_peak"]
+        <= metadata["source_limits"]["max_rows"]
+    )
+    assert metadata["native_target_source"]["pre_holdout_parts_unopened"] == 1
 
 
 def test_retained_cli_requires_target_source(monkeypatch: pytest.MonkeyPatch) -> None:
