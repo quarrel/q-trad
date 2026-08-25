@@ -2136,27 +2136,53 @@ def _mutate_fixture_native_source(
         actual_locators = dict(locators)
         manifest_path = Path(actual_locators["target_source"])
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        target_reference = manifest["target_parts"][0]
-        opportunity_reference = manifest["opportunity_parts"][0]
-        target_path = manifest_path.parent / target_reference["path"]
-        opportunity_path = manifest_path.parent / opportunity_reference["path"]
-        target_document = json.loads(target_path.read_text(encoding="utf-8"))
+        target_references = cast(list[dict[str, Any]], manifest["target_parts"])
+        opportunity_reference = cast(dict[str, Any], manifest["opportunity_parts"][0])
+
+        def read_part_rows(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for reference in references:
+                part_path = manifest_path.parent / str(reference["path"])
+                document = json.loads(part_path.read_text(encoding="utf-8"))
+                rows.extend(cast(list[dict[str, Any]], document["rows"]))
+            return rows
+
+        target_rows = read_part_rows(target_references)
+        opportunity_path = manifest_path.parent / str(opportunity_reference["path"])
         opportunity_document = json.loads(opportunity_path.read_text(encoding="utf-8"))
-        target_rows = cast(list[dict[str, Any]], target_document["rows"])
         opportunity_rows = cast(list[dict[str, Any]], opportunity_document["rows"])
         mutation(target_rows, opportunity_rows)
         if not preserve_target_order:
             target_rows.sort(key=lambda row: str(row["target_id"]))
-        target_document["rows"] = target_rows
-        opportunity_document["rows"] = opportunity_rows
-        for path, reference, document in (
-            (target_path, target_reference, target_document),
-            (opportunity_path, opportunity_reference, opportunity_document),
-        ):
+
+        target_template_path = manifest_path.parent / str(target_references[0]["path"])
+        target_template = json.loads(target_template_path.read_text(encoding="utf-8"))
+        target_boundary = max(1, len(target_rows) // 2)
+        target_chunks = (target_rows[:target_boundary], target_rows[target_boundary:])
+        target_references_rewritten: list[dict[str, Any]] = []
+        for part_index, part_rows in enumerate(target_chunks):
+            document = dict(target_template)
+            document["part_index"] = part_index
+            document["rows"] = part_rows
+            relative = f"{manifest_path.name}.parts/targets/part-{part_index:06d}.json"
+            part_path = manifest_path.parent / relative
             encoded = implementation._canonical_bytes(document)
-            path.write_bytes(encoded)
-            reference["sha256"] = hashlib.sha256(encoded).hexdigest()
-            reference["row_count"] = len(document["rows"])
+            part_path.write_bytes(encoded)
+            target_references_rewritten.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                    "row_count": len(part_rows),
+                }
+            )
+
+        opportunity_document["rows"] = opportunity_rows
+        encoded_opportunity = implementation._canonical_bytes(opportunity_document)
+        opportunity_path.write_bytes(encoded_opportunity)
+        opportunity_reference["sha256"] = hashlib.sha256(encoded_opportunity).hexdigest()
+        opportunity_reference["row_count"] = len(opportunity_rows)
+
+        manifest["target_parts"] = target_references_rewritten
         manifest["target_count"] = len(target_rows)
         manifest["opportunity_count"] = len(opportunity_rows)
         manifest["closure_id"] = implementation._native_source_closure(manifest)
@@ -2204,6 +2230,7 @@ def test_native_non_primary_target_is_validated_but_not_retained(
     assert len(rows) == len(synthetic_fixture())
     assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
     assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+    assert metadata["native_target_source"]["target_parts"] == 2
 
 
 def test_native_out_of_range_target_is_validated_but_not_retained(
@@ -2224,6 +2251,7 @@ def test_native_out_of_range_target_is_validated_but_not_retained(
     assert len(rows) == len(synthetic_fixture())
     assert metadata["native_target_source"]["target_unique_ids"] == len(rows)
     assert metadata["native_target_source"]["target_rows"] == len(rows) + 1
+    assert metadata["native_target_source"]["target_parts"] == 2
 
 
 def test_native_missing_eligible_opportunity_fails_closed(
@@ -2311,7 +2339,9 @@ def test_native_extra_target_domain_identity_is_still_validated(
         _mutate_fixture_native_source(monkeypatch, config, mutate)
 
 
-@pytest.mark.parametrize("mutation", ("unordered", "duplicate"))
+@pytest.mark.parametrize(
+    "mutation", ("unordered", "duplicate", "unordered_cross_part", "duplicate_cross_part")
+)
 def test_native_target_source_requires_strict_target_id_order(
     monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
@@ -2320,8 +2350,12 @@ def test_native_target_source_requires_strict_target_id_order(
     def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
         if mutation == "unordered":
             target_rows[0], target_rows[1] = target_rows[1], target_rows[0]
-        else:
+        elif mutation == "duplicate":
             target_rows.append(deepcopy(target_rows[-1]))
+        elif mutation == "unordered_cross_part":
+            target_rows[8], target_rows[9] = target_rows[9], target_rows[8]
+        else:
+            target_rows[9] = deepcopy(target_rows[8])
 
     with pytest.raises(FreezeError, match="strictly increasing"):
         _mutate_fixture_native_source(monkeypatch, config, mutate, preserve_target_order=True)
@@ -2374,3 +2408,60 @@ def test_native_loader_uses_exact_frozen_compute_limits(
 
     with pytest.raises(FreezeError, match=match):
         implementation.load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    ("limit_field", "match"),
+    (
+        ("max_elapsed_seconds", "elapsed-time bound"),
+        ("max_memory_mb", "memory bound"),
+    ),
+)
+def test_native_scan_bound_is_checked_at_8192_rows_before_child_completion(
+    monkeypatch: pytest.MonkeyPatch, limit_field: str, match: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    base_config = FreezeConfig.from_path(CONFIG)
+    document = json.loads(CONFIG.read_text(encoding="utf-8"))
+    cast(dict[str, Any], document["compute_limits"])[limit_field] = 1
+    config = FreezeConfig(document=document, semantic_identity=base_config.semantic_identity)
+    scanned_kinds: list[str] = []
+    original_iter = implementation._iter_native_source_parts
+
+    def tracking_iter(*args: Any, **kwargs: Any) -> Any:
+        kind = cast(str, kwargs["kind"])
+        for row in original_iter(*args, **kwargs):
+            scanned_kinds.append(kind)
+            yield row
+
+    monkeypatch.setattr(implementation, "_iter_native_source_parts", tracking_iter)
+    if limit_field == "max_elapsed_seconds":
+        clock = [0]
+
+        def fake_monotonic() -> float:
+            clock[0] += 1
+            return 0.0 if clock[0] == 1 else 2.0
+
+        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+    else:
+        monkeypatch.setattr(
+            implementation.resource,
+            "getrusage",
+            lambda _resource: SimpleNamespace(ru_maxrss=2048),
+        )
+
+    def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
+        base = deepcopy(target_rows[0])
+        for index in range(8200):
+            extra = deepcopy(base)
+            extra["target_id"] = f"{(1 << 256) - 10000 + index:064x}"
+            extra["fixture_target_id"] = f"extra-{index}"
+            extra["target_horizon_seconds"] = 1
+            target_rows.append(extra)
+
+    with pytest.raises(FreezeError, match=match):
+        _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+    assert len(scanned_kinds) == 8192
+    assert set(scanned_kinds) == {"targets"}
