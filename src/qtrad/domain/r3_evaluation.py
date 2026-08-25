@@ -1743,7 +1743,16 @@ class EvaluationReport:
                 raise ValueError("report lifecycle events must be time ordered")
             if len({item.event_time for item in lifecycle_events}) != len(lifecycle_events):
                 raise ValueError("report lifecycle events must use unique event times")
-            previous_position: dict[str, Decimal] = {}
+            first_decision = object.__getattribute__(lifecycle_events[0], "_decision_component")
+            if first_decision is None:
+                raise ValueError("report lifecycle sequence requires authoritative decision")
+            previous_position = dict(
+                zip(
+                    first_decision.asset_order,
+                    first_decision.current_position,
+                    strict=True,
+                )
+            )
             for index, event in enumerate(lifecycle_events):
                 if (
                     not event.outcome_identities

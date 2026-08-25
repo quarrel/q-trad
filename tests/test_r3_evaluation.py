@@ -618,3 +618,19 @@ def test_lifecycle_seeds_nonzero_authoritative_physical_position():
     )
     assert events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
     assert events[-1].physical_position == (("ASSET_A", Decimal("0.00")),)
+
+
+def test_persisted_lifecycle_report_seeds_nonzero_authoritative_position(monkeypatch, tmp_path):
+    original_inputs = evaluation_app.build_fixture_inputs
+
+    def nonzero_inputs(horizons=(15,)):
+        decision, quotes = original_inputs(horizons)
+        object.__setattr__(decision, "current_position", (Decimal("0.25"),))
+        return decision, quotes
+
+    monkeypatch.setattr(evaluation_app, "build_fixture_inputs", nonzero_inputs)
+    report = run_fixture(tmp_path, (5, 15, 30, 60))
+    assert report.lifecycle_events is not None
+    assert report.lifecycle_events[0].physical_delta == (("ASSET_A", Decimal("0.25")),)
+    persisted = json.loads((tmp_path / "report.json").read_bytes())
+    assert persisted["lifecycle_events"][0]["physical_delta"] == [["ASSET_A", "0.250"]]
