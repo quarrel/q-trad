@@ -81,21 +81,30 @@ simplicity and scope. Retain one compact comparison record; loser code is not me
 findings/tests may inform remediation.
 
 Classify the best result:
-- STRONG: credible and complete; proceed to exact-identity review.
+- STRONG: credible and complete; proceed through the applicable exact-identity review policy.
 - REFINABLE: approach is sound but bounded findings remain; use generation 2 on the same lineage.
 - INCONCLUSIVE: contract is clear but no approach is credible; use generation 2 from the original
   base with the consolidated diagnosis.
 
+A generation-1 exact-candidate review that returns CHANGES_REQUESTED reclassifies the result before
+more implementation: approach-preserving findings make it REFINABLE and consume generation 2 from
+the selected candidate; findings showing the approach is fundamentally unsound make it INCONCLUSIVE
+and consume generation 2 from the original base. Reviewer/fix traffic cannot create an extra generation.
+
 Reuse the selected implementer context for approach-preserving refinement. Create a fresh implementer
 only for a genuinely independent alternative or regeneration.
 
-After generation 2, stop the logical lineage. Return DECOMPOSE_REQUIRED only when evidence shows the
-unit is composite, its acceptance evidence is non-discriminating, or separable failure clusters require
-smaller units. If the contract remains CLEAR and the unit remains genuinely SIMPLE and indivisible,
-return ESCALATE with the exact failed approaches, discriminating evidence, look-ahead gates and why no
-valid split exists. Neither outcome permits generation 3 or a reset under a new name. One final
-mechanical repair is allowed only for formatting, a typo, a straightforward assertion or equivalent
-local correction; it requires a new exact identity, affected checks and fresh applicable review.
+After generation 2, mechanically qualify and select again. A credible candidate proceeds through the
+applicable exact-identity review policy and, when that review and every delivery gate are satisfied,
+returns READY_FOR_ACCEPTANCE. If no candidate remains credibly acceptable or substantive findings
+remain after applicable review, stop the logical lineage. Return DECOMPOSE_REQUIRED only when evidence
+shows the unit is composite, its acceptance evidence is non-discriminating, or separable failure
+clusters require smaller units. If the contract remains CLEAR and the unit remains genuinely SIMPLE
+and indivisible, return ESCALATE with the exact failed approaches, discriminating evidence, look-ahead
+gates and why no valid split exists. Neither outcome permits generation 3 or a reset under a new name.
+One final mechanical repair is allowed only for formatting, a typo, a straightforward assertion or
+equivalent local correction; it requires a new exact identity, affected checks and fresh applicable
+review.
 
 REVIEW
 
