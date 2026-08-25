@@ -355,6 +355,7 @@ def test_legacy_fixture_identity_and_canonical_replay(tmp_path):
     assert first.semantic_identity == (
         "6368344e3a73de55a022da25ed22ee5ba527cbf26597b67a066b935b139ceefb"
     )
+    assert len(first.canonical_bytes) == 5176
     assert first.canonical_bytes == second.canonical_bytes
     assert first.semantic_identity == second.semantic_identity
 
