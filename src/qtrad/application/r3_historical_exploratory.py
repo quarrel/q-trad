@@ -4644,7 +4644,12 @@ def _load_native_retained_rows(
     if first_inventory["combined_rows"] > max_rows or first_inventory["combined_bytes"] > max_bytes:
         raise FreezeError("native target-source exceeds frozen resource bound")
 
-    forecast_role_masks: dict[bytes, int] = {}
+    forecast_role_masks: dict[bytes, int] = {
+        target_id: 0
+        for instrument_slots in first_target_groups.values()
+        for target_id in instrument_slots
+        if target_id is not None
+    }
 
     def forecast_pass(
         name: str,
