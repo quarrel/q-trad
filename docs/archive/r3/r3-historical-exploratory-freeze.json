@@ -274,7 +274,7 @@
         "projected_peak_memory_mb": 512,
         "projected_elapsed_seconds": 60,
         "resource_envelope_rationale": {
-            "first_pass_observation": {"maximum_rss_kib": 513296, "elapsed_seconds": 31},
+            "first_pass_observation": {"maximum_rss_kib": 519188, "elapsed_seconds": 49.23},
             "projected_first_pass": {"max_memory_mb": 512, "max_elapsed_seconds": 60},
             "additional_authorized_work": [
                 "selected target/opportunity/forecast replays",
@@ -383,4 +383,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "003c257dfda7597e0b76b8a0beb9227ea7946666fa7c2a11512f285871bcd3a8"}
+    "semantic_identity": "eb69a3b1e7fb2e4dd1585169856c71f6a5b3e833f503b250704a6e32e8d950b1"}

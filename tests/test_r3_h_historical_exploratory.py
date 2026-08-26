@@ -3522,3 +3522,166 @@ def test_create_only_writer_classifies_post_link_directory_fsync_ambiguity(
     assert error.value.durability_confirmed is False
     assert destination.read_text(encoding="utf-8") == "report"
     assert not list(tmp_path.glob(".ambiguous.md.*.tmp"))
+
+
+def test_temporal_selection_is_lexicographic_permutation_and_payload_blind() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows = synthetic_fixture()
+    _, baseline = implementation.select_synchronised_rows(rows, config)
+    mutated = tuple(
+        replace(
+            row,
+            prediction=row.prediction + 101.0,
+            realised_return=row.realised_return - 77.0,
+            feature_value=row.feature_value * 3.0,
+        )
+        for row in reversed(rows)
+    )
+    _, permuted = implementation.select_synchronised_rows(mutated, config)
+    fields = (
+        "algorithm",
+        "causal_predicate",
+        "selected_decision_times",
+        "first_admissible_evaluation_time",
+        "causal_training_count",
+    )
+    assert {field: baseline[field] for field in fields} == {
+        field: permuted[field] for field in fields
+    }
+
+
+def test_temporal_selection_enforces_strict_purge_and_embargo_edges() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    evaluation = "2026-01-01T00:05:00Z"
+    assert implementation._causal_temporal_predicate(
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:04:59Z",
+        evaluation,
+        evaluation,
+    )
+    assert not implementation._causal_temporal_predicate(
+        "2026-01-01T00:00:00Z",
+        evaluation,
+        "2026-01-01T00:04:59Z",
+        evaluation,
+    )
+    assert not implementation._causal_temporal_predicate(
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:04:59Z",
+        "2026-01-01T00:05:01Z",
+        evaluation,
+    )
+
+
+def test_temporal_selection_fails_closed_without_mature_rows() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    immature = tuple(
+        replace(
+            row,
+            target_available_at="2030-01-01T00:00:00Z",
+            dependency_end="2030-01-01T00:00:00Z",
+        )
+        for row in synthetic_fixture()
+    )
+    with pytest.raises(FreezeError, match="causal selection predicate"):
+        implementation.select_synchronised_rows(immature, config)
+
+
+def test_selection_receipt_agrees_with_oof_and_statistical_masks() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    result = analyse_fixture(synthetic_fixture(), config)
+    selection = result.report["selection"]
+    oof = result.report["statistical"]["oof"]
+    assert selection["first_admissible_evaluation_time"] == oof["first_fit_evaluation_time"]
+    assert selection["causal_training_count"] == oof["folds"][0]["training_rows"]
+    first_decision = min(selection["selected_decision_times"])
+    assert oof["first_fit_prediction_mask"] == [
+        row.decision_time > first_decision
+        for row in sorted(
+            synthetic_fixture(), key=lambda item: implementation._decision_identity(item)
+        )
+    ]
+    assert result.report["work"]["rows"] == selection["selected_rows"] == 18
+
+
+def test_maturity_spaced_native_selection_keeps_roles_distinguishable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+
+    def mutate(target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
+        del opportunity_rows
+        for row in target_rows:
+            if (
+                row["decision_time"] == "2026-01-01T00:00:00Z"
+                and row["instrument_id"] == implementation._TARGET_IDS[1]
+            ):
+                row["target_available_at"] = "2026-01-01T00:11:00Z"
+                row["target_end_time"] = row["target_available_at"]
+                row["target_freeze_at"] = row["target_available_at"]
+
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    result = implementation.analyse_fixture(rows, config, retained_metadata=metadata)
+    rendered = implementation.render_markdown(result, config)
+    selection = result.report["selection"]
+    assert selection["selected_decision_times"] == [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:05:00Z",
+        "2026-01-01T00:10:00Z",
+    ]
+    assert selection["causal_training_count"] == 4
+    assert rendered
+    configurations = result.report["economic"]["configurations"]
+    assert configurations["linear_ridge"] != configurations["linear_zero_return"]
+
+
+def test_temporal_selection_chooses_earliest_admissible_tuple_without_combinations() -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    groups = {
+        "2026-01-01T00:00:00Z": [
+            (
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:09:00Z",
+                "2026-01-01T00:09:00Z",
+            )
+        ],
+        "2026-01-01T00:05:00Z": [
+            (
+                "2026-01-01T00:05:00Z",
+                "2026-01-01T00:06:00Z",
+                "2026-01-01T00:06:00Z",
+            )
+        ],
+        "2026-01-01T00:10:00Z": [
+            (
+                "2026-01-01T00:10:00Z",
+                "2026-01-01T00:11:00Z",
+                "2026-01-01T00:11:00Z",
+            )
+        ],
+        "2026-01-01T00:15:00Z": [
+            (
+                "2026-01-01T00:15:00Z",
+                "2026-01-01T00:16:00Z",
+                "2026-01-01T00:16:00Z",
+            )
+        ],
+    }
+    selected, evaluation, count = implementation._select_temporal_group_times(groups, 3)
+    assert selected == [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:10:00Z",
+        "2026-01-01T00:15:00Z",
+    ]
+    assert evaluation == "2026-01-01T00:10:00Z"
+    assert count == 1

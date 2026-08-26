@@ -30,7 +30,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "003c257dfda7597e0b76b8a0beb9227ea7946666fa7c2a11512f285871bcd3a8"
+    "eb69a3b1e7fb2e4dd1585169856c71f6a5b3e833f503b250704a6e32e8d950b1"
 )
 _PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
 _PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
@@ -2466,7 +2466,7 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
             raise FreezeError(f"{name} is incomplete")
     resource_envelope_rationale = raw["scale_projection"]["resource_envelope_rationale"]
     if resource_envelope_rationale != {
-        "first_pass_observation": {"maximum_rss_kib": 513_296, "elapsed_seconds": 31},
+        "first_pass_observation": {"maximum_rss_kib": 519_188, "elapsed_seconds": 49.23},
         "projected_first_pass": {"max_memory_mb": 512, "max_elapsed_seconds": 60},
         "additional_authorized_work": [
             "selected target/opportunity/forecast replays",
@@ -2916,17 +2916,29 @@ def _select_temporal_group_times(
         second_limit = len(ordered) if required_groups == 2 else len(ordered) - 1
         for second_index in range(first_index + 1, second_limit):
             second_time = ordered[second_index]
-            causal_count = sum(
-                _causal_temporal_predicate(
+            second_training_count = sum(
+                1
+                for decision, dependency_end, target_available_at in first_rows
+                if _causal_temporal_predicate(
                     decision, dependency_end, target_available_at, second_time
                 )
-                for decision, dependency_end, target_available_at in first_rows
             )
-            if causal_count == 0:
+            if second_training_count == 0:
                 continue
             if required_groups == 2:
-                return [first_time, second_time], second_time, causal_count
-            return [first_time, second_time, ordered[second_index + 1]], second_time, causal_count
+                return [first_time, second_time], second_time, second_training_count
+            third_time = ordered[second_index + 1]
+            third_training_count = sum(
+                1
+                for group_time in (first_time, second_time)
+                for decision, dependency_end, target_available_at in groups[group_time]
+                if _causal_temporal_predicate(
+                    decision, dependency_end, target_available_at, third_time
+                )
+            )
+            if third_training_count == 0:
+                continue
+            return [first_time, second_time, third_time], second_time, second_training_count
     raise FreezeError("no complete decision tuple satisfies the frozen causal selection predicate")
 
 
