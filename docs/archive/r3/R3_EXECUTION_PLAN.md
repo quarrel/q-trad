@@ -1,6 +1,6 @@
 # R3 execution plan — cost and portfolio baseline
 
-- Status: ACTIVE execution authority for R3 after merge
+- Status: COMPLETED execution record — archived 2026-08-26
 - Planning job: R3-P0
 - Scope: offline paper research only
 - Implementation status at plan creation: NOT STARTED
@@ -755,3 +755,11 @@ run. Failure to complete R3.H or freeze R3.I blocks R3 milestone completion. Lac
 inputs does not block fixture implementation, historical exploration or the protocol freeze, but it
 blocks protocol instantiation and every native executable or decision-grade conclusion. No item above
 grants provider access, reacquisition, holdout access, promotion or external trading authority.
+
+## 12. Completion record
+
+R3 completed on 2026-08-26. R3.A–R3.G, the mandatory R3.H historical-exploratory report and the R3.I frozen future native protocol were merged. The final R3.H delivery was PR #185 at merge `e53541a9c38561b0c9acb4e526a811d6698c2380`; the report SHA-256 is `74a371a5f4481893be1608072a3ee641b2d347b13f447156bab75e8ca5034b4d` and its semantic identity is `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`.
+
+The historical exploration remained `HISTORICAL_EXPLORATORY` and MIDPOINT-only. It introduced no new holdout, lifecycle, promotion, claim-scoped verifier, provider access, native execution, order path or irreversible protocol. Aggregate break-even was about 0.584 bps and the aggregate was negative at the first tested 5-bps cost. Pooled-local was the best quick diagnostic but inconclusive; nonlinear Huber failed; fixed and tiny learned graph results were negative. R3.I remains frozen, uninstantiated and unauthorised to run.
+
+The exact implementation and controlled-operation history is retained in MAP run `20260824-r3-execution-v1`. Active programme intent and current state live in `PLAN.md`, `docs/TRADING_RESEARCH.md` and `docs/STATUS.md`.

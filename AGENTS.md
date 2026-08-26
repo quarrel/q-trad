@@ -103,6 +103,12 @@ qualification, backup or restore use the documented `ops/ibkr/` orchestration. S
 operator command and use its terminal evidence; do not decompose supported orchestration into ad-hoc
 remote steps.
 
+At accepted PR or programme completion, close the disposable Git lifecycle in the same task. Enumerate
+worktrees, branches and live owners; remove known-clean completed worktrees without force; prune stale
+registrations; and report anything retained. A clean superseded candidate worktree may be removed once its
+owner is inactive and its branch/commit remains recoverable. Never remove a dirty, in-use or ambiguously
+owned worktree, and never treat worktree removal as authority to delete its branch.
+
 ## Contradictions
 
 Merged ADRs, scientific invariants, immutable evidence, holdout boundaries and explicitly retained
