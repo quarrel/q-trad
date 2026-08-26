@@ -2847,3 +2847,67 @@ def test_native_nonselected_malformed_target_is_rejected_during_first_exhaustive
 
     with pytest.raises(FreezeError, match="target row domain identity"):
         _mutate_fixture_native_source(monkeypatch, config, mutate)
+
+
+def test_native_first_forecast_pass_reuses_target_id_keys_and_projects_memory_saving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    equality_roles: list[tuple[str, str]] = []
+    target_calls: dict[str, int] = {}
+    forecast_calls: dict[str, int] = {}
+
+    class TrackingBytes(bytes):
+        __hash__ = bytes.__hash__
+        role: str
+
+        def __new__(cls, value: bytes, role: str) -> TrackingBytes:
+            instance = super().__new__(cls, value)
+            instance.role = role
+            return instance
+
+        def __eq__(self, other: object) -> bool:
+            other_role = getattr(other, "role", "")
+            if "forecast target ID" in self.role or "forecast target ID" in other_role:
+                equality_roles.append((self.role, str(other_role)))
+            return bytes.__eq__(self, other)
+
+    original_canonical = implementation._native_canonical_sha256_id
+
+    def tracking_canonical(value: Any, field_name: str) -> bytes:
+        result = original_canonical(value, field_name)
+        if field_name == "target ID":
+            ordinal = target_calls.get(value, 0) + 1
+            target_calls[value] = ordinal
+            role = f"target ID:{ordinal}"
+        elif "forecast target ID" in field_name:
+            ordinal = forecast_calls.get(value, 0) + 1
+            forecast_calls[value] = ordinal
+            role = f"{field_name}#{ordinal}"
+        else:
+            role = field_name
+        return TrackingBytes(result, role)
+
+    monkeypatch.setattr(implementation, "_native_canonical_sha256_id", tracking_canonical)
+    rows, metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+
+    first_pass_matches = [
+        pair
+        for pair in equality_roles
+        if (pair[0] == "target ID:1" and "forecast target ID#" in pair[1])
+        or (pair[1] == "target ID:1" and "forecast target ID#" in pair[0])
+    ]
+    assert len(first_pass_matches) >= len(rows) * 3
+    assert all(
+        any(
+            any(f"forecast target ID#{ordinal}" in role for role in pair)
+            for pair in first_pass_matches
+        )
+        for ordinal in (1, 2, 3)
+    )
+    assert metadata["selection_state"]["bounded_id_state_peak"] == len(rows)
+
+    projected_duplicate_key_bytes = 207_924 * 32
+    assert projected_duplicate_key_bytes > 888 * 1024
