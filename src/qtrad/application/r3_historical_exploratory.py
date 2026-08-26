@@ -30,7 +30,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "3fecb92df8221d776d3311d4764766fbdb0790ebe064de95b223749e0f87a92d"
+    "dd8fad6a70d44173ba678b8608f3e82d2f69fc5f2c3aad52d24975bdb60d879b"
 )
 _PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
 _PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
@@ -38,6 +38,10 @@ _MAX_PART_BYTES: Final = 64 * 1024 * 1024
 _TARGET_SOURCE_CONTRACT: Final = "qtrad-r2-holdout-target-source-v1"
 _TARGET_SOURCE_STORAGE: Final = "qtrad-r2-holdout-target-source-bounded-parts-v1"
 _TARGET_SOURCE_PART_CONTRACT: Final = "qtrad-r2-holdout-target-source-part-v1"
+_FORECAST_COVERAGE_POLICY: Final = (
+    "EXCLUDE_SHARED_ALL_ROLE_ABSENT_COMPLETE_GROUPS_REJECT_PARTIAL_ROLE_COVERAGE"
+)
+_FORECAST_COVERAGE_RECEIPT_CONTRACT: Final = "qtrad-r3-historical-forecast-coverage-receipt-v1"
 _TARGET_SOURCE_ID: Final = "b2c3442578bcc65a4b3ee573d34cef474f0dfb09cbdd563bacb1a7740a449994"
 _TARGET_SOURCE_WRAPPER_SHA256: Final = (
     "672206c558f7fd7db01f7f493f583b30d8944268ffaefa1df314f1f6151a0140"
@@ -458,6 +462,7 @@ _SECTION_KEYS: Final = {
             "fixture_row_count",
             "projected_peak_memory_mb",
             "projected_elapsed_seconds",
+            "resource_envelope_rationale",
             "selection",
             "source_scan",
             "decoder_limits",
@@ -1201,6 +1206,7 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
                 "paths",
                 "identities",
                 "role_bindings",
+                "forecast_coverage",
                 "terminal_authentication",
                 "authentication_performed",
                 "outcome_decode_performed",
@@ -1241,6 +1247,109 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     )
     for key in ("authentication_performed", "outcome_decode_performed"):
         _strict_bool(retained[key], f"retained_parents.{key}")
+    forecast_coverage = _strict_mapping(
+        retained["forecast_coverage"], "retained_parents.forecast_coverage"
+    )
+    coverage_policy = _strict_mapping(
+        config.document["retained_loader"]["selection_policy"],
+        "config.selection_policy",
+    )
+    expected_coverage_policy = _strict_text(
+        coverage_policy["forecast_coverage_policy"],
+        "config.selection_policy.forecast_coverage_policy",
+    )
+    coverage_state = forecast_coverage.get("state")
+    if coverage_state == "NOT_LOADED":
+        if frozenset(forecast_coverage) != frozenset({"contract", "state", "policy"}):
+            raise FreezeError("renderer unloaded forecast coverage receipt schema mismatch")
+        _strict_text(forecast_coverage["contract"], "retained_parents.forecast_coverage.contract")
+        _strict_text(forecast_coverage["policy"], "retained_parents.forecast_coverage.policy")
+    elif coverage_state == "ASSESSED":
+        if frozenset(forecast_coverage) != frozenset(
+            {
+                "contract",
+                "state",
+                "policy",
+                "eligible_target_count",
+                "all_roles_present_target_count",
+                "all_roles_absent_target_count",
+                "partial_role_target_count",
+                "decision_groups",
+                "excluded_target_counts",
+                "exclusion_digests",
+            }
+        ):
+            raise FreezeError("renderer forecast coverage receipt schema mismatch")
+        _strict_text(forecast_coverage["contract"], "retained_parents.forecast_coverage.contract")
+        for key in (
+            "eligible_target_count",
+            "all_roles_present_target_count",
+            "all_roles_absent_target_count",
+            "partial_role_target_count",
+        ):
+            _strict_integer(
+                forecast_coverage[key],
+                f"retained_parents.forecast_coverage.{key}",
+                minimum=0,
+            )
+        if (
+            forecast_coverage["all_roles_present_target_count"]
+            + forecast_coverage["all_roles_absent_target_count"]
+            + forecast_coverage["partial_role_target_count"]
+            != forecast_coverage["eligible_target_count"]
+            or forecast_coverage["partial_role_target_count"] != 0
+        ):
+            raise FreezeError("renderer forecast coverage target counts are inconsistent")
+        decision_groups = _strict_mapping(
+            forecast_coverage["decision_groups"],
+            "retained_parents.forecast_coverage.decision_groups",
+            frozenset(
+                {
+                    "all_roles_present",
+                    "shared_forecast_universe_excluded",
+                    "target_incomplete_excluded",
+                }
+            ),
+        )
+        for key in decision_groups:
+            _strict_integer(
+                decision_groups[key],
+                f"retained_parents.forecast_coverage.decision_groups.{key}",
+                minimum=0,
+            )
+        excluded_target_counts = _strict_mapping(
+            forecast_coverage["excluded_target_counts"],
+            "retained_parents.forecast_coverage.excluded_target_counts",
+            frozenset({"shared_forecast_universe", "target_incomplete"}),
+        )
+        for key in excluded_target_counts:
+            _strict_integer(
+                excluded_target_counts[key],
+                f"retained_parents.forecast_coverage.excluded_target_counts.{key}",
+                minimum=0,
+            )
+        if (
+            sum(excluded_target_counts.values())
+            != forecast_coverage["all_roles_absent_target_count"]
+        ):
+            raise FreezeError("renderer forecast coverage exclusion target counts are inconsistent")
+        exclusion_digests = _strict_mapping(
+            forecast_coverage["exclusion_digests"],
+            "retained_parents.forecast_coverage.exclusion_digests",
+            frozenset({"shared_forecast_universe", "target_incomplete"}),
+        )
+        for key in exclusion_digests:
+            _strict_hash(
+                exclusion_digests[key],
+                f"retained_parents.forecast_coverage.exclusion_digests.{key}",
+            )
+    else:
+        raise FreezeError("renderer forecast coverage receipt state is unsupported")
+    if (
+        forecast_coverage["contract"] != _FORECAST_COVERAGE_RECEIPT_CONTRACT
+        or forecast_coverage["policy"] != expected_coverage_policy
+    ):
+        raise FreezeError("renderer forecast coverage receipt differs from frozen policy")
     for key, value in retained["paths"].items():
         _strict_text(value, f"retained_parents.paths.{key}")
     for key, value in retained["identities"].items():
@@ -1894,6 +2003,7 @@ def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig)
                 "paths",
                 "identities",
                 "role_bindings",
+                "forecast_coverage",
                 "terminal_authentication",
                 "authentication_performed",
                 "outcome_decode_performed",
@@ -2298,6 +2408,25 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         _reject_unknown(section_object, _SECTION_KEYS[name], name)
         if set(section_object) != set(_SECTION_KEYS[name]):
             raise FreezeError(f"{name} is incomplete")
+    resource_envelope_rationale = raw["scale_projection"]["resource_envelope_rationale"]
+    if resource_envelope_rationale != {
+        "first_pass_observation": {"maximum_rss_kib": 513_296, "elapsed_seconds": 31},
+        "projected_first_pass": {"max_memory_mb": 512, "max_elapsed_seconds": 60},
+        "additional_authorized_work": [
+            "selected target/opportunity/forecast replays",
+            "outcome decode",
+            "bounded historical analysis",
+        ],
+        "envelope": {"max_memory_mb": 1024, "max_elapsed_seconds": 120},
+    }:
+        raise FreezeError("R3.H resource envelope rationale is not frozen")
+    if (
+        raw["observation_contract"]["resource_limits"]
+        != {"max_elapsed_seconds": 120, "max_memory_mb": 1024}
+        or raw["compute_limits"]["max_elapsed_seconds"] != 120
+        or raw["compute_limits"]["max_memory_mb"] != 1024
+    ):
+        raise FreezeError("R3.H resource envelope limits are not frozen")
     retained_forecasts_root = Path(
         "/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z/g2-preparation/forecasts"
     )
@@ -2339,6 +2468,12 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
         raise FreezeError("target_position_change compatibility field is forbidden")
     if not isinstance(loader.get("manifest_root"), str) or not loader["manifest_root"]:
         raise FreezeError("retained compact manifest root is not frozen")
+    selection_policy_value = loader.get("selection_policy")
+    if not isinstance(selection_policy_value, Mapping):
+        raise FreezeError("retained forecast coverage policy is not frozen")
+    selection_policy = cast(Mapping[str, Any], selection_policy_value)
+    if selection_policy["forecast_coverage_policy"] != _FORECAST_COVERAGE_POLICY:
+        raise FreezeError("retained forecast coverage policy is not frozen")
     expected_streaming_policy = {
         "parts_first": True,
         "stop_after_selected_groups": False,
@@ -4406,6 +4541,7 @@ def _load_native_retained_rows(
         selected_opportunities: dict[bytes, Mapping[str, Any]] = {}
         target_index: dict[bytes, int] = {}
         target_groups: dict[str, list[bytes | None]] = {}
+        coverage_target_instrument_ordinals = bytearray()
         eligible_count = 0
         target_row_count = 0
         opportunity_row_count = 0
@@ -4499,6 +4635,7 @@ def _load_native_retained_rows(
                     ) | instrument_ordinal
                     eligible_count += 1
                     target_index[target_id_bytes] = packed_identity
+                    coverage_target_instrument_ordinals.append(instrument_ordinal)
                     decision_group = target_groups.setdefault(
                         decision_time, [None] * len(_TARGET_IDS)
                     )
@@ -4518,10 +4655,12 @@ def _load_native_retained_rows(
                     raise FreezeError("native selected target ID is duplicated")
                 selected_targets[target_id_bytes] = dict(row)
             check_scan_progress(len(target_index))
-        # Target IDs are inserted after the source's strict-increasing check.  Preserve that
+        # Target IDs are inserted after the source's strict-increasing check. Preserve that
         # order as the compact forecast coverage index before opportunity reconciliation pops
         # entries from the temporary join map.
         inventory["_ordered_target_ids"] = tuple(target_index)
+        if selected_ids is None:
+            inventory["_ordered_target_instrument_ordinals"] = coverage_target_instrument_ordinals
         for row in opportunity_rows:
             opportunity_row_count += 1
             if selected_ids is not None:
@@ -4650,6 +4789,11 @@ def _load_native_retained_rows(
         raise FreezeError("native target-source exceeds frozen resource bound")
 
     coverage_target_ids = cast(tuple[bytes, ...], first_inventory.pop("_ordered_target_ids"))
+    coverage_target_instrument_ordinals = cast(
+        bytearray, first_inventory.pop("_ordered_target_instrument_ordinals")
+    )
+    if len(coverage_target_instrument_ordinals) != len(coverage_target_ids):
+        raise FreezeError("native target coverage identity is malformed")
     coverage_masks = bytearray(len(coverage_target_ids))
     unexpected_forecast_ids = False
 
@@ -4679,6 +4823,7 @@ def _load_native_retained_rows(
         selected_ids: set[bytes] | None,
         role_masks: bytearray,
         role_ids: Sequence[bytes],
+        expected_instrument_ordinals: Sequence[int] | None,
     ) -> tuple[dict[bytes, Mapping[str, Any]], dict[str, Any]]:
         limits = source_limits(name)
         metadata, parts, wrapper_size, _digest = _open_partitioned_json_document(
@@ -4753,6 +4898,13 @@ def _load_native_retained_rows(
                         check_scan_progress(len(role_masks))
                         continue
                     previous_mask = role_masks[slot]
+                    if expected_instrument_ordinals is not None:
+                        expected_instrument_ordinal = expected_instrument_ordinals[slot]
+                        if (
+                            expected_instrument_ordinal >= len(_TARGET_IDS)
+                            or instrument != _TARGET_IDS[expected_instrument_ordinal]
+                        ):
+                            raise FreezeError("native forecast instrument differs from target")
                     if previous_mask & role_bit:
                         raise FreezeError(
                             f"native {name} logical row identity or value is malformed"
@@ -4767,52 +4919,115 @@ def _load_native_retained_rows(
         return selected_rows, receipt
 
     for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
-        _unused_rows, receipt = forecast_pass(name, None, coverage_masks, coverage_target_ids)
+        _unused_rows, receipt = forecast_pass(
+            name,
+            None,
+            coverage_masks,
+            coverage_target_ids,
+            coverage_target_instrument_ordinals,
+        )
         source_receipts[name] = receipt
+    if unexpected_forecast_ids:
+        raise FreezeError("native forecast coverage contains unexpected target IDs")
+    all_roles_present_target_count = sum(mask == 0b111 for mask in coverage_masks)
+    all_roles_absent_target_count = sum(mask == 0b000 for mask in coverage_masks)
+    partial_role_target_count = len(coverage_masks) - (
+        all_roles_present_target_count + all_roles_absent_target_count
+    )
+    if partial_role_target_count:
+        raise FreezeError("native forecast coverage is incomplete")
     required_groups = int(
         cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
     )
-    incomplete: list[dict[str, Any]] = []
     complete: list[tuple[str, tuple[bytes, ...]]] = []
     complete_group_count = 0
+    shared_forecast_universe_group_count = 0
+    shared_forecast_universe_absent_target_count = 0
+    target_incomplete_group_count = 0
+    target_incomplete_absent_target_count = 0
+    shared_forecast_universe_digest = hashlib.sha256()
+    target_incomplete_digest = hashlib.sha256()
     ordered_decisions = sorted(first_target_groups)
-    periods = {decision: f"period-{index}" for index, decision in enumerate(ordered_decisions)}
     for decision in ordered_decisions:
         instrument_slots = first_target_groups[decision]
         group_row_count = sum(target_id is not None for target_id in instrument_slots)
         target_group_complete = group_row_count == len(_TARGET_IDS)
-        forecast_group_complete = target_group_complete and all(
-            coverage_masks[required_coverage_slot(target_id, coverage_target_ids)] == 0b111
-            for target_id in instrument_slots
-            if target_id is not None
-        )
         group_ids = tuple(target_id for target_id in instrument_slots if target_id is not None)
         if not target_group_complete:
-            incomplete.append(
-                {
-                    "decision_time": decision,
-                    "disposition": "INCOMPLETE_NOT_SELECTED",
-                    "row_count": group_row_count,
-                }
+            target_incomplete_absent_target_count += sum(
+                coverage_masks[required_coverage_slot(target_id, coverage_target_ids)] == 0b000
+                for target_id in group_ids
+            )
+            target_incomplete_group_count += 1
+            target_incomplete_digest.update(
+                _canonical_bytes(
+                    {
+                        "available_target_count": group_row_count,
+                        "decision_time": decision,
+                        "disposition": "TARGET_INCOMPLETE_NOT_SELECTED",
+                        "required_target_count": len(_TARGET_IDS),
+                    }
+                )
             )
             continue
-        if not forecast_group_complete:
-            raise FreezeError("native forecast coverage is incomplete")
+        all_roles_absent_target_ids = tuple(
+            target_id.hex()
+            for target_id in group_ids
+            if coverage_masks[required_coverage_slot(target_id, coverage_target_ids)] == 0b000
+        )
+        if all_roles_absent_target_ids:
+            shared_forecast_universe_absent_target_count += len(all_roles_absent_target_ids)
+            shared_forecast_universe_group_count += 1
+            shared_forecast_universe_digest.update(
+                _canonical_bytes(
+                    {
+                        "all_roles_absent_target_ids": all_roles_absent_target_ids,
+                        "decision_time": decision,
+                        "disposition": "SHARED_FORECAST_UNIVERSE_NOT_SELECTED",
+                        "required_target_count": len(_TARGET_IDS),
+                    }
+                )
+            )
+            continue
         complete_group_count += 1
         if len(complete) < required_groups:
             complete.append((decision, group_ids))
     if complete_group_count < required_groups:
         raise FreezeError("native target source contains fewer than three complete groups")
-    if unexpected_forecast_ids:
-        raise FreezeError("native forecast coverage contains unexpected target IDs")
+    periods = {decision: f"period-{index}" for index, (decision, _group) in enumerate(complete)}
     first_coverage_target_count = len(coverage_target_ids)
     first_coverage_mask_bytes = len(coverage_masks)
+    forecast_coverage = {
+        "contract": _FORECAST_COVERAGE_RECEIPT_CONTRACT,
+        "state": "ASSESSED",
+        "policy": _FORECAST_COVERAGE_POLICY,
+        "eligible_target_count": first_coverage_target_count,
+        "all_roles_present_target_count": all_roles_present_target_count,
+        "all_roles_absent_target_count": all_roles_absent_target_count,
+        "partial_role_target_count": partial_role_target_count,
+        "decision_groups": {
+            "all_roles_present": complete_group_count,
+            "shared_forecast_universe_excluded": shared_forecast_universe_group_count,
+            "target_incomplete_excluded": target_incomplete_group_count,
+        },
+        "excluded_target_counts": {
+            "shared_forecast_universe": shared_forecast_universe_absent_target_count,
+            "target_incomplete": target_incomplete_absent_target_count,
+        },
+        "exclusion_digests": {
+            "shared_forecast_universe": shared_forecast_universe_digest.hexdigest(),
+            "target_incomplete": target_incomplete_digest.hexdigest(),
+        },
+    }
     selected_target_ids = tuple(target_id for _decision, group in complete for target_id in group)
     selected_set = set(selected_target_ids)
-    if any(mask != 0b111 for mask in coverage_masks):
-        raise FreezeError("native forecast coverage is incomplete")
     first_target_groups.clear()
-    del first_target_groups, coverage_target_ids, coverage_masks
+    del (
+        first_target_groups,
+        coverage_target_ids,
+        coverage_target_instrument_ordinals,
+        coverage_masks,
+    )
     (
         selected_targets,
         selected_opportunities,
@@ -4828,7 +5043,11 @@ def _load_native_retained_rows(
     selected_role_masks = bytearray(len(selected_target_ids_sorted))
     for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
         selected_rows, receipt = forecast_pass(
-            name, selected_set, selected_role_masks, selected_target_ids_sorted
+            name,
+            selected_set,
+            selected_role_masks,
+            selected_target_ids_sorted,
+            None,
         )
         selected_forecasts[name] = selected_rows
         source_receipts[name]["second_pass"] = receipt
@@ -5040,7 +5259,7 @@ def _load_native_retained_rows(
         "authentication_performed": True,
         "outcome_decode_performed": not fixture,
         "native_target_source": first_inventory,
-        "incomplete_groups": incomplete,
+        "forecast_coverage": forecast_coverage,
         "selection": {
             "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
             "selected_decision_times": sorted({row.decision_time for row in selected}),
@@ -6859,6 +7078,17 @@ def analyse_fixture(
             "identities": parent_identities,
             "role_bindings": (
                 retained_metadata.get("role_bindings", {}) if retained_metadata else {}
+            ),
+            "forecast_coverage": (
+                retained_metadata["forecast_coverage"]
+                if retained_metadata and "forecast_coverage" in retained_metadata
+                else {
+                    "contract": _FORECAST_COVERAGE_RECEIPT_CONTRACT,
+                    "state": "NOT_LOADED",
+                    "policy": config.document["retained_loader"]["selection_policy"][
+                        "forecast_coverage_policy"
+                    ],
+                }
             ),
             "terminal_authentication": config.document["terminal_authentication"],
             "authentication_performed": bool(
