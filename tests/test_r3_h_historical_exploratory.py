@@ -44,6 +44,18 @@ def _rehashed(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
+def _fixture_config_with_group_count(config: FreezeConfig, group_count: int) -> FreezeConfig:
+    document = json.loads(config.canonical_json())
+    policy = document["retained_loader"]["selection_policy"]
+    policy["n_complete_decision_groups"] = group_count
+    policy["analysis_row_bound"] = group_count * len(policy["required_target_ids"])
+    document["scale_projection"]["group_count"] = group_count
+    document["scale_projection"]["fixture_row_count"] = policy["analysis_row_bound"]
+    document["scale_projection"]["selection"]["n_complete_decision_groups"] = group_count
+    document["scale_projection"]["selection"]["analysis_row_bound"] = policy["analysis_row_bound"]
+    return FreezeConfig(document=document, semantic_identity=config.semantic_identity)
+
+
 def test_compact_partitioned_bytes_match_runtime_writer_with_unicode() -> None:
     import qtrad.application.r3_historical_exploratory as implementation
 
@@ -112,6 +124,12 @@ def test_freeze_is_deterministic_and_rejects_unknown_expansion_and_mutation() ->
         ),
         ("tiny_graph_candidate", lambda value: value.__setitem__("hidden_units", 8)),
         ("compute_limits", lambda value: value.__setitem__("max_rows", 63)),
+        (
+            "retained_loader",
+            lambda value: value["selection_policy"].__setitem__(
+                "forecast_coverage_policy", "MUTATED_FORECAST_COVERAGE_POLICY"
+            ),
+        ),
         (
             "output_contract",
             lambda value: value.__setitem__("post_result_expansion", True),
@@ -201,13 +219,13 @@ def test_work_and_resource_limits_fail_closed() -> None:
         analyse_fixture(
             synthetic_fixture(),
             config,
-            measurement=FixtureMeasurement(elapsed_seconds=61, memory_mb=1),
+            measurement=FixtureMeasurement(elapsed_seconds=121, memory_mb=1),
         )
     with pytest.raises(FreezeError, match="max_memory_mb"):
         analyse_fixture(
             synthetic_fixture(),
             config,
-            measurement=FixtureMeasurement(elapsed_seconds=1, memory_mb=513),
+            measurement=FixtureMeasurement(elapsed_seconds=1, memory_mb=1025),
         )
 
 
@@ -1432,7 +1450,7 @@ def test_renderer_rejects_nested_schema_mutations() -> None:
             "walk_forward_fit_executions",
             report["graph"]["tiny_learned_graph"]["walk_forward_fit_executions"] + 1,
         ),
-        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", 61.0),
+        lambda report: report["work"]["measurement"].__setitem__("elapsed_seconds", 121.0),
         lambda report: report["economic"]["configurations"]["linear_ridge"][
             "all_in_cost_sensitivity"
         ][0].__setitem__("net_mean", None),
@@ -2252,6 +2270,7 @@ def _mutate_fixture_native_forecast_rows(
     mutation: str,
     *,
     role: str = "local_forecast",
+    predicate: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
     import qtrad.application.r3_historical_exploratory as implementation
 
@@ -2268,24 +2287,42 @@ def _mutate_fixture_native_forecast_rows(
         metadata, parts, wrapper_size, wrapper_digest = original_open(path, limits)
         if limits.get("_inventory_child") != role:
             return metadata, parts, wrapper_size, wrapper_digest
-
         changed = False
 
         def mutated_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
             nonlocal changed
             for descriptor, rows, part_size in parts:
                 mutable_rows: list[Mapping[str, Any]] = [dict(row) for row in rows]
-                if not changed and mutable_rows:
-                    changed = True
-                    if mutation == "duplicate":
-                        mutable_rows.append(deepcopy(mutable_rows[0]))
-                    elif mutation == "unexpected":
-                        mutable_rows.append(
-                            {
-                                **mutable_rows[0],
-                                "target_id": hashlib.sha256(b"unexpected-forecast-id").hexdigest(),
+                if not changed:
+                    for row_index, mutable_row in enumerate(mutable_rows):
+                        if predicate is not None and not predicate(mutable_row):
+                            continue
+                        changed = True
+                        if mutation == "duplicate":
+                            mutable_rows.append(deepcopy(mutable_row))
+                        elif mutation == "unexpected":
+                            mutable_rows.append(
+                                {
+                                    **mutable_row,
+                                    "target_id": hashlib.sha256(
+                                        b"unexpected-forecast-id"
+                                    ).hexdigest(),
+                                }
+                            )
+                        elif mutation == "instrument_mismatch":
+                            instrument = mutable_row["target_instrument_id"]
+                            assert isinstance(instrument, str)
+                            mutable_rows[row_index] = {
+                                **mutable_row,
+                                "target_instrument_id": next(
+                                    candidate
+                                    for candidate in implementation._TARGET_IDS
+                                    if candidate != instrument
+                                ),
                             }
-                        )
+                        else:
+                            raise AssertionError(f"unsupported forecast mutation: {mutation}")
+                        break
                 yield descriptor, mutable_rows, part_size
 
         return metadata, mutated_parts(), wrapper_size, wrapper_digest
@@ -2312,7 +2349,7 @@ def _extra_fixture_target(
     return extra
 
 
-def test_native_target_complete_group_missing_forecast_role_fails_globally(
+def test_native_partial_forecast_role_coverage_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import qtrad.application.r3_historical_exploratory as implementation
@@ -2336,14 +2373,80 @@ def test_native_target_complete_group_missing_forecast_role_fails_globally(
         implementation.load_fixture_rows(fixture_rows, config)
 
 
-def test_native_early_target_incomplete_group_is_excluded_before_forecast_join(
+def test_native_shared_all_role_absence_excludes_whole_complete_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
     config = FreezeConfig.from_path(CONFIG)
+    base_fixture_rows = synthetic_fixture()
+    late_decision = max(row.decision_time for row in base_fixture_rows)
+    fixture_rows = tuple(
+        replace(row, period=f"{row.period}-fixture-late-earlier")
+        if row.decision_time == late_decision
+        else row
+        for row in base_fixture_rows
+    )
+    early_decision = "1969-01-01T00:00:00Z"
+    missing_instrument = next(
+        row.asset for row in fixture_rows if row.decision_time == late_decision
+    )
+    _drop_fixture_native_forecast_rows(
+        monkeypatch,
+        lambda row: (
+            row["decision_time"] == early_decision
+            and row["target_instrument_id"] == missing_instrument
+        ),
+    )
+
+    rows, metadata = implementation.load_fixture_rows(fixture_rows, config)
+    receipt = metadata["forecast_coverage"]
+
+    assert len(rows) == 18
+    assert {row.decision_time for row in rows} == {row.decision_time for row in fixture_rows}
+    assert receipt["eligible_target_count"] == 24
+    assert receipt["all_roles_present_target_count"] == 23
+    assert receipt["all_roles_absent_target_count"] == 1
+    assert receipt["partial_role_target_count"] == 0
+    assert receipt["decision_groups"] == {
+        "all_roles_present": 3,
+        "shared_forecast_universe_excluded": 1,
+        "target_incomplete_excluded": 0,
+    }
+    assert receipt["excluded_target_counts"] == {
+        "shared_forecast_universe": 1,
+        "target_incomplete": 0,
+    }
+    assert all(len(value) == 64 for value in receipt["exclusion_digests"].values())
+    selected_decisions = sorted({row.decision_time for row in rows})
+    assert {row.decision_time: row.period for row in rows} == {
+        decision: f"period-{index}" for index, decision in enumerate(selected_decisions)
+    }
+    result = implementation.analyse_fixture(rows, config, retained_metadata=metadata)
+    assert result.report["retained_parents"]["forecast_coverage"] == receipt
+    assert implementation.render_markdown(result, config)
+
+
+def test_native_target_incomplete_group_is_recorded_separately_from_forecast_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _fixture_config_with_group_count(FreezeConfig.from_path(CONFIG), 2)
     fixture_rows = synthetic_fixture()
     early_decision = min(row.decision_time for row in fixture_rows)
     missing_instrument = next(
         row.asset for row in fixture_rows if row.decision_time == early_decision
+    )
+    all_roles_absent_instrument = next(
+        row.asset
+        for row in fixture_rows
+        if row.decision_time == early_decision and row.asset != missing_instrument
+    )
+    _drop_fixture_native_forecast_rows(
+        monkeypatch,
+        lambda row: (
+            row["decision_time"] == early_decision
+            and row["target_instrument_id"] in {missing_instrument, all_roles_absent_instrument}
+        ),
     )
 
     def mutate(target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]) -> None:
@@ -2364,8 +2467,47 @@ def test_native_early_target_incomplete_group_is_excluded_before_forecast_join(
             )
         ]
 
-    with pytest.raises(FreezeError, match="fewer than three complete groups"):
-        _mutate_fixture_native_source(monkeypatch, config, mutate)
+    rows, metadata = _mutate_fixture_native_source(monkeypatch, config, mutate)
+    receipt = metadata["forecast_coverage"]
+
+    assert len(rows) == 12
+    assert receipt["eligible_target_count"] == 17
+    assert receipt["all_roles_present_target_count"] == 16
+    assert receipt["all_roles_absent_target_count"] == 1
+    assert receipt["partial_role_target_count"] == 0
+    assert receipt["decision_groups"] == {
+        "all_roles_present": 2,
+        "shared_forecast_universe_excluded": 0,
+        "target_incomplete_excluded": 1,
+    }
+    assert receipt["excluded_target_counts"] == {
+        "shared_forecast_universe": 0,
+        "target_incomplete": 1,
+    }
+
+
+def test_native_nonselected_forecast_instrument_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = _fixture_config_with_group_count(FreezeConfig.from_path(CONFIG), 2)
+    fixture_rows = synthetic_fixture()
+    nonselected_decision = max(row.decision_time for row in fixture_rows)
+    nonselected_instrument = next(
+        row.asset for row in fixture_rows if row.decision_time == nonselected_decision
+    )
+    _mutate_fixture_native_forecast_rows(
+        monkeypatch,
+        "instrument_mismatch",
+        predicate=lambda row: (
+            row["decision_time"] == nonselected_decision
+            and row["target_instrument_id"] == nonselected_instrument
+        ),
+    )
+
+    with pytest.raises(FreezeError, match="native forecast instrument differs from target"):
+        implementation.load_fixture_rows(fixture_rows, config)
 
 
 def test_native_non_primary_target_is_validated_but_not_retained(
@@ -2709,8 +2851,10 @@ def test_native_retained_loader_uses_pop_reconciliation_and_explicit_disposal() 
     source = inspect.getsource(implementation._load_native_retained_rows)
     assert "target_index.pop(opportunity_id_bytes, None)" in source
     assert "remaining_eligible_ids" not in source
-    assert "forecast_coverage" not in source
-    assert "del first_target_groups, coverage_target_ids, coverage_masks" in source
+    assert '"incomplete_groups"' not in source
+    assert "shared_forecast_universe_digest" in source
+    assert "del (\n        first_target_groups," in source
+    assert "coverage_target_instrument_ordinals," in source
     assert "bytearray(len(coverage_target_ids))" in source
     assert "bisect_left" in source
     assert "0b111" in source
@@ -2919,6 +3063,24 @@ def test_native_first_forecast_pass_uses_exact_compact_coverage_and_preserves_se
     assert metadata["source_scan_unique_rows"]["local_forecast"] == 18
     assert metadata["source_scan_unique_rows"]["pooled_forecast"] == 18
     assert metadata["source_scan_unique_rows"]["zero_forecast"] == 18
+    receipt = metadata["forecast_coverage"]
+    assert receipt["state"] == "ASSESSED"
+    assert receipt["eligible_target_count"] == 18
+    assert receipt["all_roles_present_target_count"] == 18
+    assert receipt["all_roles_absent_target_count"] == 0
+    assert receipt["partial_role_target_count"] == 0
+    assert receipt["decision_groups"] == {
+        "all_roles_present": 3,
+        "shared_forecast_universe_excluded": 0,
+        "target_incomplete_excluded": 0,
+    }
+    assert receipt["excluded_target_counts"] == {
+        "shared_forecast_universe": 0,
+        "target_incomplete": 0,
+    }
+    result = analyse_fixture(rows, config, retained_metadata=metadata)
+    assert result.report["retained_parents"]["forecast_coverage"] == receipt
+    render_markdown(result, config)
 
     # Project the retained-scale container delta, including dict/tuple table overhead and
     # one byte per compact mask.  Authoritative target-ID bytes are shared by both designs;
