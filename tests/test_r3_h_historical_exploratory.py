@@ -3379,6 +3379,40 @@ def test_fabricated_native_report_runs_strict_markdown_and_create_only(
         for target in target_rows:
             target.pop("fixture_target_id", None)
 
+    original_open = implementation._open_partitioned_json_document
+    role_names = {"local_forecast", "pooled_forecast", "zero_forecast"}
+
+    def distinct_forecast_open(
+        path: Path, limits: Mapping[str, Any]
+    ) -> tuple[
+        dict[str, Any],
+        Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]],
+        int,
+        str,
+    ]:
+        metadata, parts, wrapper_size, wrapper_digest = original_open(path, limits)
+        role_name = limits.get("_inventory_child")
+        if role_name not in role_names:
+            return metadata, parts, wrapper_size, wrapper_digest
+
+        def distinct_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
+            for descriptor, rows, part_size in parts:
+                distinct_rows: list[Mapping[str, Any]] = []
+                for row in rows:
+                    distinct_row = dict(row)
+                    value = distinct_row["forecast"]
+                    if role_name == "pooled_forecast":
+                        value = float(value) + 1.0
+                    elif role_name == "zero_forecast":
+                        value = 0.0
+                    distinct_row["forecast"] = value
+                    distinct_rows.append(distinct_row)
+                yield descriptor, distinct_rows, part_size
+
+        return metadata, distinct_parts(), wrapper_size, wrapper_digest
+
+    monkeypatch.setattr(implementation, "_open_partitioned_json_document", distinct_forecast_open)
+
     loaded, metadata = _mutate_fixture_native_source(
         monkeypatch, config, omit_fixture_identity, preserve_target_order=True
     )
@@ -3388,7 +3422,6 @@ def test_fabricated_native_report_runs_strict_markdown_and_create_only(
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
 
-    role_records = deepcopy(metadata["_role_predictions"])
     ordered_loaded = sorted(
         loaded,
         key=lambda row: (
@@ -3400,45 +3433,8 @@ def test_fabricated_native_report_runs_strict_markdown_and_create_only(
             row.period,
         ),
     )
-    ordered_identities = [
-        (
-            row.decision_time,
-            row.target_id,
-            row.asset,
-            row.group,
-            row.horizon_minutes,
-            row.period,
-        )
-        for row in ordered_loaded
-    ]
-    local_by_identity = {
-        identity: row.prediction
-        for identity, row in zip(ordered_identities, ordered_loaded, strict=True)
-    }
-    role_values_by_identity = {
-        "local_forecast": local_by_identity,
-        "pooled_forecast": {key: value + 1.0 for key, value in local_by_identity.items()},
-        "zero_forecast": {key: 0.0 for key in local_by_identity},
-    }
-    for role_name, records in role_records.items():
-        for record in records:
-            identity = tuple(
-                record[field]
-                for field in (
-                    "decision_time",
-                    "target_id",
-                    "asset",
-                    "group",
-                    "horizon_minutes",
-                    "period",
-                )
-            )
-            record["prediction"] = role_values_by_identity[role_name][identity]
-    metadata["_role_predictions"] = role_records
-    local_values = [round(local_by_identity[key], 12) for key in ordered_identities]
-    pooled_values = [
-        round(role_values_by_identity["pooled_forecast"][key], 12) for key in ordered_identities
-    ]
+    local_values = [round(row.prediction, 12) for row in ordered_loaded]
+    pooled_values = [round(value + 1.0, 12) for value in local_values]
 
     result = implementation.analyse_fixture(loaded, config, retained_metadata=metadata)
     report = result.report
