@@ -2247,6 +2247,52 @@ def _drop_fixture_native_forecast_rows(
     monkeypatch.setattr(implementation, "_open_partitioned_json_document", filtered_open)
 
 
+def _mutate_fixture_native_forecast_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    *,
+    role: str = "local_forecast",
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    original_open = implementation._open_partitioned_json_document
+
+    def mutated_open(
+        path: Path, limits: Mapping[str, Any]
+    ) -> tuple[
+        dict[str, Any],
+        Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]],
+        int,
+        str,
+    ]:
+        metadata, parts, wrapper_size, wrapper_digest = original_open(path, limits)
+        if limits.get("_inventory_child") != role:
+            return metadata, parts, wrapper_size, wrapper_digest
+
+        changed = False
+
+        def mutated_parts() -> Iterator[tuple[dict[str, Any], list[Mapping[str, Any]], int]]:
+            nonlocal changed
+            for descriptor, rows, part_size in parts:
+                mutable_rows: list[Mapping[str, Any]] = [dict(row) for row in rows]
+                if not changed and mutable_rows:
+                    changed = True
+                    if mutation == "duplicate":
+                        mutable_rows.append(deepcopy(mutable_rows[0]))
+                    elif mutation == "unexpected":
+                        mutable_rows.append(
+                            {
+                                **mutable_rows[0],
+                                "target_id": hashlib.sha256(b"unexpected-forecast-id").hexdigest(),
+                            }
+                        )
+                yield descriptor, mutable_rows, part_size
+
+        return metadata, mutated_parts(), wrapper_size, wrapper_digest
+
+    monkeypatch.setattr(implementation, "_open_partitioned_json_document", mutated_open)
+
+
 def _extra_fixture_target(
     target_rows: list[dict[str, Any]],
     *,
@@ -2664,7 +2710,9 @@ def test_native_retained_loader_uses_pop_reconciliation_and_explicit_disposal() 
     assert "target_index.pop(opportunity_id_bytes, None)" in source
     assert "remaining_eligible_ids" not in source
     assert "forecast_coverage" not in source
-    assert "del first_target_groups, forecast_role_masks" in source
+    assert "del first_target_groups, coverage_target_ids, coverage_masks" in source
+    assert "bytearray(len(coverage_target_ids))" in source
+    assert "bisect_left" in source
     assert "0b111" in source
 
 
@@ -2849,65 +2897,62 @@ def test_native_nonselected_malformed_target_is_rejected_during_first_exhaustive
         _mutate_fixture_native_source(monkeypatch, config, mutate)
 
 
-def test_native_first_forecast_pass_reuses_target_id_keys_and_projects_memory_saving(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import qtrad.application.r3_historical_exploratory as implementation
+def test_native_first_forecast_pass_uses_exact_compact_coverage_and_preserves_selected_rows() -> (
+    None
+):
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
 
     config = FreezeConfig.from_path(CONFIG)
-    equality_roles: list[tuple[str, str]] = []
-    target_calls: dict[str, int] = {}
-    forecast_calls: dict[str, int] = {}
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    state = metadata["selection_state"]
 
-    class TrackingBytes(bytes):
-        __hash__ = bytes.__hash__
-        role: str
+    assert len(rows) == 18
+    assert len({(row.target_id, row.decision_time) for row in rows}) == 18
+    assert metadata["selected_rows"] == 18
+    assert metadata["selected_groups"] == 3
+    assert state["coverage_representation"] == "sorted_target_ids_bytearray"
+    assert state["first_pass_target_ids"] == 18
+    assert state["first_pass_mask_bytes"] == 18
+    assert state["first_pass_cleared_before_selected_pass"] is True
+    assert state["selected_pass_target_ids"] == 18
+    assert state["selected_pass_mask_bytes"] == 18
+    assert metadata["source_scan_unique_rows"]["local_forecast"] == 18
+    assert metadata["source_scan_unique_rows"]["pooled_forecast"] == 18
+    assert metadata["source_scan_unique_rows"]["zero_forecast"] == 18
 
-        def __new__(cls, value: bytes, role: str) -> TrackingBytes:
-            instance = super().__new__(cls, value)
-            instance.role = role
-            return instance
+    # Project the retained-scale container delta, including dict/tuple table overhead and
+    # one byte per compact mask.  Authoritative target-ID bytes are shared by both designs;
+    # transient canonical bytes and allocator high-water are therefore common overlap, not
+    # an invented saving.  This lower-bound projection still clears the prior 888 KiB margin.
+    retained_target_count = 207_924
+    sample_count = 8_192
+    sample_dict = {hashlib.sha256(str(index).encode()).digest(): 0 for index in range(sample_count)}
+    sample_tuple = tuple(sample_dict)
+    legacy_container_bytes = sys.getsizeof(sample_dict)
+    compact_container_bytes = sys.getsizeof(sample_tuple) + sys.getsizeof(bytearray(sample_count))
+    legacy_entry_bytes = legacy_container_bytes // sample_count
+    compact_entry_bytes = compact_container_bytes // sample_count
+    projected_saving = retained_target_count * (legacy_entry_bytes - compact_entry_bytes)
+    assert legacy_entry_bytes >= 32
+    assert compact_entry_bytes <= 9
+    assert projected_saving > 888 * 1024
+    transient_canonical_bytes = retained_target_count * 32
+    assert transient_canonical_bytes > projected_saving
 
-        def __eq__(self, other: object) -> bool:
-            other_role = getattr(other, "role", "")
-            if "forecast target ID" in self.role or "forecast target ID" in other_role:
-                equality_roles.append((self.role, str(other_role)))
-            return bytes.__eq__(self, other)
 
-    original_canonical = implementation._native_canonical_sha256_id
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ("duplicate", "logical row identity or value is malformed"),
+        ("unexpected", "coverage contains unexpected target IDs"),
+    ),
+)
+def test_native_compact_forecast_coverage_fails_closed_for_duplicate_and_unexpected_ids(
+    monkeypatch: pytest.MonkeyPatch, mutation: str, match: str
+) -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
 
-    def tracking_canonical(value: Any, field_name: str) -> bytes:
-        result = original_canonical(value, field_name)
-        if field_name == "target ID":
-            ordinal = target_calls.get(value, 0) + 1
-            target_calls[value] = ordinal
-            role = f"target ID:{ordinal}"
-        elif "forecast target ID" in field_name:
-            ordinal = forecast_calls.get(value, 0) + 1
-            forecast_calls[value] = ordinal
-            role = f"{field_name}#{ordinal}"
-        else:
-            role = field_name
-        return TrackingBytes(result, role)
-
-    monkeypatch.setattr(implementation, "_native_canonical_sha256_id", tracking_canonical)
-    rows, metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
-
-    first_pass_matches = [
-        pair
-        for pair in equality_roles
-        if (pair[0] == "target ID:1" and "forecast target ID#" in pair[1])
-        or (pair[1] == "target ID:1" and "forecast target ID#" in pair[0])
-    ]
-    assert len(first_pass_matches) >= len(rows) * 3
-    assert all(
-        any(
-            any(f"forecast target ID#{ordinal}" in role for role in pair)
-            for pair in first_pass_matches
-        )
-        for ordinal in (1, 2, 3)
-    )
-    assert metadata["selection_state"]["bounded_id_state_peak"] == len(rows)
-
-    projected_duplicate_key_bytes = 207_924 * 32
-    assert projected_duplicate_key_bytes > 888 * 1024
+    config = FreezeConfig.from_path(CONFIG)
+    _mutate_fixture_native_forecast_rows(monkeypatch, mutation)
+    with pytest.raises(FreezeError, match=match):
+        load_fixture_rows(synthetic_fixture(), config)
