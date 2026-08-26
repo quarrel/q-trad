@@ -3118,3 +3118,234 @@ def test_native_compact_forecast_coverage_fails_closed_for_duplicate_and_unexpec
     _mutate_fixture_native_forecast_rows(monkeypatch, mutation)
     with pytest.raises(FreezeError, match=match):
         load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    (
+        "selection",
+        "consumed",
+        "local_forecast",
+        "pooled_forecast",
+        "zero_forecast",
+        "outcome_evidence",
+    ),
+)
+def test_native_locator_mismatch_rejected_before_terminal_authentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, child_name: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    locators = {**frozen, "target_source": str(tmp_path / "target-source.json")}
+    locators[child_name] = f"{locators[child_name]}-alias"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        implementation,
+        "authenticate_terminal_authority",
+        lambda _config: calls.append("auth"),
+    )
+    monkeypatch.setattr(
+        implementation,
+        "_load_native_retained_rows",
+        lambda *_args, **_kwargs: (calls.append("scan"), ({},))[1],
+    )
+
+    with pytest.raises(FreezeError, match="locator"):
+        implementation.load_retained_rows(config, locators=locators)
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", ("missing", "extra"))
+def test_native_locator_key_set_is_exact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutation: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    locators = {**frozen, "target_source": str(tmp_path / "target-source.json")}
+    if mutation == "missing":
+        del locators["target_source"]
+    else:
+        locators["unexpected"] = str(tmp_path / "unexpected.json")
+    auth_calls: list[str] = []
+    monkeypatch.setattr(
+        implementation,
+        "authenticate_terminal_authority",
+        lambda _config: auth_calls.append("auth"),
+    )
+
+    with pytest.raises(FreezeError, match="locator set"):
+        implementation.load_retained_rows(config, locators=locators)
+    assert auth_calls == []
+
+
+def test_native_loader_passes_fresh_frozen_children_and_supplied_target_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    target_source = str(tmp_path / "target-source.json")
+    caller = {**frozen, "target_source": target_source}
+    seen: dict[str, str] = {}
+    identities: list[bool] = []
+
+    def capture(
+        _config: FreezeConfig,
+        actual: Mapping[str, str],
+        *,
+        fixture: bool,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert not fixture
+        seen.update(actual)
+        identities.append(actual is caller)
+        cast(dict[str, str], actual)["selection"] = "mutated"
+        return (), {}
+
+    monkeypatch.setattr(implementation, "_load_native_retained_rows", capture)
+    monkeypatch.setattr(implementation, "authenticate_terminal_authority", lambda _config: {})
+    implementation.load_retained_rows(config, locators=caller)
+
+    assert identities == [False]
+    assert seen == {**frozen, "target_source": target_source}
+    assert caller["selection"] == frozen["selection"]
+
+
+def test_native_locator_symlink_alias_rejected_before_native_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    alias = tmp_path / "selection-alias.json"
+    alias.symlink_to(frozen["selection"])
+    locators = {**frozen, "target_source": str(tmp_path / "target-source.json")}
+    locators["selection"] = str(alias)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        implementation,
+        "authenticate_terminal_authority",
+        lambda _config: calls.append("auth"),
+    )
+    monkeypatch.setattr(
+        implementation,
+        "_load_native_retained_rows",
+        lambda *_args, **_kwargs: (calls.append("scan"), ({},))[1],
+    )
+
+    with pytest.raises(FreezeError, match="locator"):
+        implementation.load_retained_rows(config, locators=locators)
+    assert calls == []
+
+
+def test_native_fixture_production_topology_binds_forecasts_and_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    original_load = implementation.load_retained_rows
+    original_open = implementation._open_partitioned_json_document
+    original_native = implementation._load_native_retained_rows
+    original_outcome = implementation._load_native_outcome_values
+    forecast_names = ("local_forecast", "pooled_forecast", "zero_forecast")
+    forecast_calls: list[tuple[str, Path, Path]] = []
+    outcome_calls: list[tuple[Path, Path]] = []
+
+    def capture_open(path: Path, limits: Mapping[str, Any]) -> Any:
+        child = limits.get("_inventory_child")
+        if child in forecast_names:
+            root = Path(cast(str, limits["manifest_root"]))
+            relative = PurePosixPath(cast(str, limits["manifest_relative_path"]))
+            forecast_calls.append((cast(str, child), path, root / relative))
+        return original_open(path, limits)
+
+    def capture_outcome(
+        path: Path,
+        limits: Mapping[str, Any],
+        *,
+        fixture: bool,
+        receipt: dict[str, Any] | None = None,
+        selected_ids: set[str] | None = None,
+        physical_budget: Mapping[str, Any] | None = None,
+    ) -> dict[str, float]:
+        root = Path(cast(str, limits["manifest_root"]))
+        relative = PurePosixPath(cast(str, limits["manifest_relative_path"]))
+        outcome_calls.append((path, root / relative))
+        return original_outcome(
+            path,
+            limits,
+            fixture=fixture,
+            receipt=receipt,
+            selected_ids=selected_ids,
+            physical_budget=physical_budget,
+        )
+
+    def native_fixture(
+        fixture_config: FreezeConfig,
+        *,
+        locators: Mapping[str, str] | None,
+        _fixture: bool,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert _fixture
+        assert locators is not None
+        document = json.loads(fixture_config.canonical_json())
+        loader = cast(dict[str, Any], document["retained_loader"])
+        loader["manifest_root"] = str(Path(locators["selection"]).parent)
+        loader["locators"] = {
+            name: locators[name]
+            for name in (
+                "selection",
+                "consumed",
+                "local_forecast",
+                "pooled_forecast",
+                "zero_forecast",
+                "outcome_evidence",
+            )
+        }
+        declarations = cast(dict[str, Any], loader["child_wrappers"])
+        for name, declaration_value in declarations.items():
+            declaration = cast(dict[str, Any], declaration_value)
+            encoded = Path(locators[name]).read_bytes()
+            metadata = cast(dict[str, Any], json.loads(encoded))
+            declaration["sha256"] = hashlib.sha256(encoded).hexdigest()
+            declaration["identity"] = metadata[declaration["identity_field"]]
+        source_path = Path(locators["target_source"])
+        source_bytes = source_path.read_bytes()
+        source_manifest = cast(dict[str, Any], json.loads(source_bytes))
+        target_source = cast(dict[str, Any], loader["target_source"])
+        target_source["wrapper_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+        target_source["closure_id"] = source_manifest["closure_id"]
+        native_config = FreezeConfig(
+            document=document, semantic_identity=fixture_config.semantic_identity
+        )
+        return original_load(native_config, locators=locators, _fixture=False)
+
+    def native_adapter(
+        native_config: FreezeConfig,
+        native_locators: Mapping[str, str],
+        *,
+        fixture: bool,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return original_native(native_config, native_locators, fixture=True)
+
+    monkeypatch.setattr(implementation, "_load_native_retained_rows", native_adapter)
+    monkeypatch.setattr(implementation, "_open_partitioned_json_document", capture_open)
+    monkeypatch.setattr(implementation, "_load_native_outcome_values", capture_outcome)
+    monkeypatch.setattr(implementation, "load_retained_rows", native_fixture)
+    monkeypatch.setattr(implementation, "authenticate_terminal_authority", lambda _config: {})
+    load_fixture_rows(synthetic_fixture(), config)
+
+    assert len(outcome_calls) == 1
+    outcome_path, outcome_expected = outcome_calls[0]
+    assert outcome_path == outcome_expected
+    for name in forecast_names:
+        calls = [item for item in forecast_calls if item[0] == name]
+        assert len(calls) == 2
+        assert all(path == expected for _, path, expected in calls)

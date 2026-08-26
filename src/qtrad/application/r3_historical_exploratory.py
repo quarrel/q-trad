@@ -4048,17 +4048,24 @@ def _load_native_outcome_values(
 ) -> dict[str, float]:
     """Stream tagged outcomes, retaining values only for the bounded selected IDs."""
     del fixture
-    path_absolute = path.absolute()
+    del path
+    manifest_root = Path(cast(str, limits["manifest_root"]))
+    manifest_relative_path = PurePosixPath(cast(str, limits["manifest_relative_path"]))
+    if manifest_relative_path.is_absolute() or ".." in manifest_relative_path.parts:
+        raise FreezeError("native outcome manifest path is unsafe")
+    root_absolute = manifest_root.absolute()
+    path_absolute = (root_absolute / manifest_relative_path).absolute()
     try:
         _wrapper_path, encoded_wrapper = _native_authenticated_read(
-            path,
-            PurePosixPath(path.name),
+            root_absolute,
+            manifest_relative_path,
             expected_sha256=limits.get("expected_wrapper_sha256"),
+            anchor_is_directory=True,
         )
     except FreezeError as exc:
         raise FreezeError("native outcome wrapper is missing or unsafe") from exc
     if _wrapper_path != path_absolute:
-        raise FreezeError("native outcome wrapper path differs from locator")
+        raise FreezeError("native outcome wrapper path differs from frozen manifest root")
     _charge_physical_budget(physical_budget, wrapper_bytes=len(encoded_wrapper), read_operations=1)
     if receipt is not None:
         receipt["wrapper_bytes"] = len(encoded_wrapper)
@@ -5080,6 +5087,7 @@ def _load_native_retained_rows(
         "expected_wrapper_sha256": None if fixture else wrappers["outcome_evidence"]["sha256"],
         "physical_required_keys": wrappers["outcome_evidence"]["physical_required_keys"],
         "manifest_relative_path": wrappers["outcome_evidence"]["manifest_relative_path"],
+        "manifest_root": str(cast(str, loader["manifest_root"])),
         "_physical_budget": physical_budget,
     }
     outcome_receipt: dict[str, Any] = {
@@ -5352,10 +5360,71 @@ def _load_native_retained_rows(
     return selected, metadata
 
 
+def _authoritative_native_locators(
+    config: FreezeConfig, locators: Mapping[str, Any] | None
+) -> dict[str, str]:
+    """Bind native retained children to the reviewed terminal preparation tree."""
+    if locators is None:
+        raise FreezeError(
+            "native retained loader requires exactly six frozen child locators and target_source"
+        )
+    required = frozenset((*_CHILD_WRAPPER_NAMES, "target_source"))
+    if frozenset(locators) != required:
+        raise FreezeError(
+            "native retained loader locator set must contain exactly six frozen terminal "
+            "children and target_source"
+        )
+    supplied: dict[str, Any] = dict(locators)
+    for name in required:
+        value = supplied[name]
+        if not isinstance(value, str) or not value:
+            raise FreezeError(f"native retained loader locator is not a non-empty string: {name}")
+
+    loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    expected_locators = cast(Mapping[str, str], loader["locators"])
+    for name in _CHILD_WRAPPER_NAMES:
+        if supplied[name] != expected_locators[name]:
+            raise FreezeError(
+                f"native retained loader locator differs from frozen terminal child: {name}"
+            )
+
+    manifest_root = loader["manifest_root"]
+    if not isinstance(manifest_root, str) or not manifest_root:
+        raise FreezeError("native retained compact manifest root is not frozen")
+    child_wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
+    for name in _CHILD_WRAPPER_NAMES[2:]:
+        declaration = cast(Mapping[str, Any], child_wrappers[name])
+        relative = declaration["manifest_relative_path"]
+        if not isinstance(relative, str) or not relative:
+            raise FreezeError(f"native retained compact manifest path is not frozen: {name}")
+        relative_path = PurePosixPath(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise FreezeError(f"native retained compact manifest path is unsafe: {name}")
+        expected_path = f"{manifest_root.rstrip('/')}/{relative_path.as_posix()}"
+        if expected_locators[name] != expected_path or supplied[name] != expected_path:
+            raise FreezeError(
+                "native retained compact manifest path differs from frozen preparation "
+                f"root: {name}"
+            )
+
+    # Do not retain the caller's mapping: downstream receives only frozen children and
+    # the separately supplied target-source authority.
+    authoritative: dict[str, str] = {name: expected_locators[name] for name in _CHILD_WRAPPER_NAMES}
+    authoritative["target_source"] = cast(str, supplied["target_source"])
+    return authoritative
+
+
 def load_retained_rows(
     config: FreezeConfig, *, locators: Mapping[str, str] | None = None, _fixture: bool = False
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
     """Stream frozen children through a bounded, outcome-blind join selector."""
+    loader = cast(Mapping[str, Any], config.document["retained_loader"])
+    expected_locators = cast(Mapping[str, str], loader["locators"])
+    if _fixture:
+        actual_locators = expected_locators if locators is None else locators
+    else:
+        # Validate caller paths before terminal authority or any native scan.
+        actual_locators = _authoritative_native_locators(config, locators)
     authority = (
         {
             "authentication_performed": False,
@@ -5366,13 +5435,6 @@ def load_retained_rows(
         if _fixture
         else authenticate_terminal_authority(config)
     )
-    loader = cast(Mapping[str, Any], config.document["retained_loader"])
-    expected_locators = cast(Mapping[str, str], loader["locators"])
-    actual_locators = expected_locators if locators is None else locators
-    if not _fixture and "target_source" not in actual_locators:
-        raise FreezeError(
-            "retained loader locator set requires the authorised target-source manifest"
-        )
     if "target_source" in actual_locators:
         return _load_native_retained_rows(config, actual_locators, fixture=_fixture)
     if not _fixture and dict(actual_locators) != dict(expected_locators):
