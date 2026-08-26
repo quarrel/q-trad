@@ -3118,3 +3118,98 @@ def test_native_compact_forecast_coverage_fails_closed_for_duplicate_and_unexpec
     _mutate_fixture_native_forecast_rows(monkeypatch, mutation)
     with pytest.raises(FreezeError, match=match):
         load_fixture_rows(synthetic_fixture(), config)
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    (
+        "selection",
+        "consumed",
+        "local_forecast",
+        "pooled_forecast",
+        "zero_forecast",
+        "outcome_evidence",
+    ),
+)
+def test_native_locator_mismatch_rejected_before_terminal_authentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, child_name: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    locators = {**frozen, "target_source": str(tmp_path / "target-source.json")}
+    locators[child_name] = f"{locators[child_name]}-alias"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        implementation,
+        "authenticate_terminal_authority",
+        lambda _config: calls.append("auth"),
+    )
+    monkeypatch.setattr(
+        implementation,
+        "_load_native_retained_rows",
+        lambda *_args, **_kwargs: (calls.append("scan"), ({},))[1],
+    )
+
+    with pytest.raises(FreezeError, match="locator"):
+        implementation.load_retained_rows(config, locators=locators)
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", ("missing", "extra"))
+def test_native_locator_key_set_is_exact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutation: str
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    locators = {**frozen, "target_source": str(tmp_path / "target-source.json")}
+    if mutation == "missing":
+        del locators["target_source"]
+    else:
+        locators["unexpected"] = str(tmp_path / "unexpected.json")
+    auth_calls: list[str] = []
+    monkeypatch.setattr(
+        implementation,
+        "authenticate_terminal_authority",
+        lambda _config: auth_calls.append("auth"),
+    )
+
+    with pytest.raises(FreezeError, match="locator set"):
+        implementation.load_retained_rows(config, locators=locators)
+    assert auth_calls == []
+
+
+def test_native_loader_passes_fresh_frozen_children_and_supplied_target_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    frozen = cast(Mapping[str, str], config.document["retained_loader"]["locators"])
+    target_source = str(tmp_path / "target-source.json")
+    caller = {**frozen, "target_source": target_source}
+    seen: dict[str, str] = {}
+    identities: list[bool] = []
+
+    def capture(
+        _config: FreezeConfig,
+        actual: Mapping[str, str],
+        *,
+        fixture: bool,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        assert not fixture
+        seen.update(actual)
+        identities.append(actual is caller)
+        cast(dict[str, str], actual)["selection"] = "mutated"
+        return (), {}
+
+    monkeypatch.setattr(implementation, "_load_native_retained_rows", capture)
+    monkeypatch.setattr(implementation, "authenticate_terminal_authority", lambda _config: {})
+    implementation.load_retained_rows(config, locators=caller)
+
+    assert identities == [False]
+    assert seen == {**frozen, "target_source": target_source}
+    assert caller["selection"] == frozen["selection"]
