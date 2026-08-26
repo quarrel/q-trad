@@ -30,7 +30,7 @@ from typing import Any, Final, cast
 CONTRACT: Final = "qtrad-r3-historical-exploratory-freeze-v2"
 REPORT_CONTRACT: Final = "qtrad-r3-historical-exploratory-report-v2"
 _REVIEWED_SEMANTIC_IDENTITY: Final = (
-    "dd8fad6a70d44173ba678b8608f3e82d2f69fc5f2c3aad52d24975bdb60d879b"
+    "eb69a3b1e7fb2e4dd1585169856c71f6a5b3e833f503b250704a6e32e8d950b1"
 )
 _PARTITIONED_ROWS_STORAGE: Final = "qtrad-r2-partitioned-json-rows-v1"
 _PARTITIONED_PART_CONTRACT: Final = "qtrad-r2-partitioned-json-row-part-v1"
@@ -42,6 +42,13 @@ _FORECAST_COVERAGE_POLICY: Final = (
     "EXCLUDE_SHARED_ALL_ROLE_ABSENT_COMPLETE_GROUPS_REJECT_PARTIAL_ROLE_COVERAGE"
 )
 _FORECAST_COVERAGE_RECEIPT_CONTRACT: Final = "qtrad-r3-historical-forecast-coverage-receipt-v1"
+_TEMPORAL_SELECTION_ALGORITHM: Final = (
+    "LEXICOGRAPHIC_EARLIEST_INCREASING_THREE_COMPLETE_GROUPS_WITH_ROW_CAUSAL_TRAINING"
+)
+_CAUSAL_ROW_PREDICATE: Final = (
+    "decision_time < evaluation_time AND target_available_at <= evaluation_time "
+    "AND dependency_end < evaluation_time"
+)
 _TARGET_SOURCE_ID: Final = "b2c3442578bcc65a4b3ee573d34cef474f0dfb09cbdd563bacb1a7740a449994"
 _TARGET_SOURCE_WRAPPER_SHA256: Final = (
     "672206c558f7fd7db01f7f493f583b30d8944268ffaefa1df314f1f6151a0140"
@@ -451,6 +458,8 @@ _SECTION_KEYS: Final = {
             "purge_rule",
             "embargo_rule",
             "fold_rule",
+            "selection_algorithm",
+            "causal_row_predicate",
         }
     ),
     "retained_loader": frozenset(
@@ -1427,6 +1436,10 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     selection_keys = frozenset(
         {
             "outcome_blind",
+            "algorithm",
+            "causal_predicate",
+            "first_admissible_evaluation_time",
+            "causal_training_count",
             "selected_decision_times",
             "selected_rows",
             "selected_bytes",
@@ -1447,6 +1460,17 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
     )
     if selection["outcome_blind"] is not policy["outcome_blind"]:
         raise FreezeError("renderer selection outcome_blind differs from frozen policy")
+    if (
+        selection["algorithm"] != policy["temporal_selection_algorithm"]
+        or selection["causal_predicate"] != policy["causal_row_predicate"]
+    ):
+        raise FreezeError("renderer temporal selection policy differs from frozen policy")
+    _strict_text(
+        selection["first_admissible_evaluation_time"], "selection.first_admissible_evaluation_time"
+    )
+    _strict_integer(
+        selection["causal_training_count"], "selection.causal_training_count", minimum=1
+    )
     required_target_ids = _strict_sequence(
         policy["required_target_ids"], "config.selection_policy.required_target_ids"
     )
@@ -2442,7 +2466,7 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
             raise FreezeError(f"{name} is incomplete")
     resource_envelope_rationale = raw["scale_projection"]["resource_envelope_rationale"]
     if resource_envelope_rationale != {
-        "first_pass_observation": {"maximum_rss_kib": 513_296, "elapsed_seconds": 31},
+        "first_pass_observation": {"maximum_rss_kib": 519_188, "elapsed_seconds": 49.23},
         "projected_first_pass": {"max_memory_mb": 512, "max_elapsed_seconds": 60},
         "additional_authorized_work": [
             "selected target/opportunity/forecast replays",
@@ -2504,8 +2528,12 @@ def _validate_nested_sections(raw: Mapping[str, Any]) -> None:
     if not isinstance(selection_policy_value, Mapping):
         raise FreezeError("retained forecast coverage policy is not frozen")
     selection_policy = cast(Mapping[str, Any], selection_policy_value)
-    if selection_policy["forecast_coverage_policy"] != _FORECAST_COVERAGE_POLICY:
-        raise FreezeError("retained forecast coverage policy is not frozen")
+    if (
+        selection_policy["forecast_coverage_policy"] != _FORECAST_COVERAGE_POLICY
+        or selection_policy["temporal_selection_algorithm"] != _TEMPORAL_SELECTION_ALGORITHM
+        or selection_policy["causal_row_predicate"] != _CAUSAL_ROW_PREDICATE
+    ):
+        raise FreezeError("retained selection policy is not frozen")
     expected_streaming_policy = {
         "parts_first": True,
         "stop_after_selected_groups": False,
@@ -2859,11 +2887,65 @@ def _canonical_join_key(row: Mapping[str, Any], mappings: Mapping[str, str]) -> 
     )
 
 
+def _causal_temporal_predicate(
+    decision_time: str,
+    dependency_end: str,
+    target_available_at: str,
+    evaluation_time: str,
+) -> bool:
+    """Return the single frozen row-level causal admissibility predicate."""
+    evaluation = _native_utc_timestamp(evaluation_time, "evaluation decision time")
+    return (
+        _native_utc_timestamp(decision_time, "decision time") < evaluation
+        and _native_utc_timestamp(target_available_at, "target availability") <= evaluation
+        and _native_utc_timestamp(dependency_end, "dependency end") < evaluation
+    )
+
+
+def _select_temporal_group_times(
+    groups: Mapping[str, Sequence[tuple[str, str, str]]], required_groups: int
+) -> tuple[list[str], str, int]:
+    """Select the lexicographically earliest causal tuple without materialising combinations."""
+    ordered = sorted(groups)
+    if required_groups not in (2, 3):
+        raise FreezeError("temporal selection requires two or three decision groups")
+    for first_index, first_time in enumerate(ordered):
+        first_rows = groups[first_time]
+        if not first_rows:
+            continue
+        second_limit = len(ordered) if required_groups == 2 else len(ordered) - 1
+        for second_index in range(first_index + 1, second_limit):
+            second_time = ordered[second_index]
+            second_training_count = sum(
+                1
+                for decision, dependency_end, target_available_at in first_rows
+                if _causal_temporal_predicate(
+                    decision, dependency_end, target_available_at, second_time
+                )
+            )
+            if second_training_count == 0:
+                continue
+            if required_groups == 2:
+                return [first_time, second_time], second_time, second_training_count
+            third_time = ordered[second_index + 1]
+            third_training_count = sum(
+                1
+                for group_time in (first_time, second_time)
+                for decision, dependency_end, target_available_at in groups[group_time]
+                if _causal_temporal_predicate(
+                    decision, dependency_end, target_available_at, third_time
+                )
+            )
+            if third_training_count == 0:
+                continue
+            return [first_time, second_time, third_time], second_time, second_training_count
+    raise FreezeError("no complete decision tuple satisfies the frozen causal selection predicate")
+
+
 def select_synchronised_rows(
     rows: Sequence[FixtureRow], config: FreezeConfig
 ) -> tuple[tuple[FixtureRow, ...], dict[str, Any]]:
-    """Outcome-blind, bounded selection of earliest complete decision groups."""
-
+    """Outcome-blind selection of the earliest three complete causally admissible groups."""
     policy = cast(
         Mapping[str, Any],
         cast(Mapping[str, Any], config.document["retained_loader"])["selection_policy"],
@@ -2877,28 +2959,52 @@ def select_synchronised_rows(
             raise FreezeError("duplicate decision identity")
         seen.add(identity)
         groups[row.decision_time].append(row)
-    selected_times: list[str] = []
-    for decision_time in sorted(groups):
-        group_rows = groups[decision_time]
-        row_targets = [row.target_id for row in group_rows]
-        if len(group_rows) != len(target_ids) or set(row_targets) != set(target_ids):
-            if bool(policy["reject_incomplete"]):
-                raise FreezeError(f"incomplete canonical decision group: {decision_time}")
+    complete: dict[str, list[FixtureRow]] = {}
+    incomplete_times: list[str] = []
+    for decision_time, group_rows in groups.items():
+        if len(group_rows) != len(target_ids) or {row.target_id for row in group_rows} != set(
+            target_ids
+        ):
+            incomplete_times.append(decision_time)
             continue
-        selected_times.append(decision_time)
-        if len(selected_times) == int(policy["n_complete_decision_groups"]):
-            break
-    if len(selected_times) != int(policy["n_complete_decision_groups"]):
-        raise FreezeError(
-            "fewer than the frozen number of complete decision groups; incomplete groups remain"
+        complete[decision_time] = group_rows
+    if not complete:
+        raise FreezeError("no complete canonical decision groups")
+    causal_groups = {
+        decision_time: [
+            (row.decision_time, row.dependency_end, row.target_available_at) for row in group_rows
+        ]
+        for decision_time, group_rows in complete.items()
+    }
+    try:
+        selected_times, first_evaluation_time, causal_count = _select_temporal_group_times(
+            causal_groups, int(policy["n_complete_decision_groups"])
         )
-    selected = tuple(
-        row
-        for row in sorted(rows, key=lambda item: _decision_identity(item))
-        if row.decision_time in selected_times
+    except FreezeError:
+        if incomplete_times and policy["reject_incomplete"]:
+            raise FreezeError("incomplete canonical decision group") from None
+        raise
+    if (
+        any(decision_time <= selected_times[-1] for decision_time in incomplete_times)
+        and policy["reject_incomplete"]
+    ):
+        raise FreezeError("incomplete canonical decision group")
+    selected_rows_list = [
+        row for decision_time in selected_times for row in complete[decision_time]
+    ]
+    selected_rows = tuple(sorted(selected_rows_list, key=_decision_identity))
+    bound = int(policy["analysis_row_bound"])
+    if len(selected_rows) > bound:
+        raise FreezeError("selected fixture rows exceed frozen analysis bound")
+    selected_bytes = sum(
+        len(
+            json.dumps(
+                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
+                separators=(",", ":"),
+            ).encode()
+        )
+        for row in selected_rows
     )
-    if len(selected) > int(policy["analysis_row_bound"]):
-        raise FreezeError("selected analysis rows exceed frozen bound")
     source_bytes = sum(
         len(
             json.dumps(
@@ -2908,21 +3014,16 @@ def select_synchronised_rows(
         )
         for row in rows
     )
-    selected_bytes = sum(
-        len(
-            json.dumps(
-                {field: getattr(row, field) for field in FixtureRow.__dataclass_fields__},
-                separators=(",", ":"),
-            ).encode()
-        )
-        for row in selected
-    )
-    return selected, {
+    metadata = {
         "outcome_blind": True,
+        "algorithm": policy["temporal_selection_algorithm"],
+        "causal_predicate": policy["causal_row_predicate"],
         "selected_decision_times": selected_times,
-        "selected_rows": len(selected),
+        "first_admissible_evaluation_time": first_evaluation_time,
+        "causal_training_count": causal_count,
+        "selected_rows": len(selected_rows),
         "selected_bytes": selected_bytes,
-        "selected_parts": 1 if selected else 0,
+        "selected_parts": 1 if selected_rows else 0,
         "source_rows": len(rows),
         "source_bytes": source_bytes,
         "source_parts": 1 if rows else 0,
@@ -2930,6 +3031,7 @@ def select_synchronised_rows(
         "target_count": len(target_ids),
         "stop_state": "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF",
     }
+    return selected_rows, metadata
 
 
 def _authority_digest(path: Path) -> tuple[str, int]:
@@ -4585,6 +4687,7 @@ def _load_native_retained_rows(
         selected_opportunities: dict[bytes, Mapping[str, Any]] = {}
         target_index: dict[bytes, int] = {}
         target_groups: dict[str, list[bytes | None]] = {}
+        target_temporal: dict[bytes, tuple[str, str, str | None]] = {}
         coverage_target_instrument_ordinals = bytearray()
         eligible_count = 0
         target_row_count = 0
@@ -4680,6 +4783,7 @@ def _load_native_retained_rows(
                     eligible_count += 1
                     target_index[target_id_bytes] = packed_identity
                     coverage_target_instrument_ordinals.append(instrument_ordinal)
+                    target_temporal[target_id_bytes] = (decision_time, target_available_at, None)
                     decision_group = target_groups.setdefault(
                         decision_time, [None] * len(_TARGET_IDS)
                     )
@@ -4766,6 +4870,15 @@ def _load_native_retained_rows(
                 check_scan_progress(len(target_index))
                 continue
             target_identity = target_index.pop(opportunity_id_bytes, None)
+            if selected_ids is None and target_identity is not None:
+                prior_temporal = target_temporal.get(opportunity_id_bytes)
+                if prior_temporal is None:
+                    raise FreezeError("native target temporal identity is missing")
+                target_temporal[opportunity_id_bytes] = (
+                    prior_temporal[0],
+                    prior_temporal[1],
+                    str(row["dependency_end"]),
+                )
             if target_identity is None:
                 if selected_ids is not None and opportunity_id_bytes in selected_opportunities:
                     raise FreezeError("native selected opportunity ID is duplicated")
@@ -4793,6 +4906,8 @@ def _load_native_retained_rows(
         elif target_index:
             raise FreezeError("native selected target/opportunity join is incomplete")
         check_state(len(target_index))
+        if selected_ids is None:
+            inventory["_target_temporal"] = target_temporal
         return selected_targets, selected_opportunities, inventory, target_groups, eligible_count
 
     (
@@ -4983,7 +5098,7 @@ def _load_native_retained_rows(
     required_groups = int(
         cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
     )
-    complete: list[tuple[str, tuple[bytes, ...]]] = []
+    coverage_complete: list[tuple[str, tuple[bytes, ...]]] = []
     complete_group_count = 0
     shared_forecast_universe_group_count = 0
     shared_forecast_universe_absent_target_count = 0
@@ -5034,10 +5149,26 @@ def _load_native_retained_rows(
             )
             continue
         complete_group_count += 1
-        if len(complete) < required_groups:
-            complete.append((decision, group_ids))
+        coverage_complete.append((decision, group_ids))
     if complete_group_count < required_groups:
         raise FreezeError("native target source contains fewer than three complete groups")
+    target_temporal = cast(
+        dict[bytes, tuple[str, str, str | None]], first_inventory["_target_temporal"]
+    )
+    temporal_groups: dict[str, list[tuple[str, str, str]]] = {}
+    groups_by_time = dict(coverage_complete)
+    for decision, group_ids in coverage_complete:
+        temporal_rows: list[tuple[str, str, str]] = []
+        for target_id in group_ids:
+            temporal = target_temporal.get(target_id)
+            if temporal is None or temporal[2] is None:
+                raise FreezeError("native target temporal identity is incomplete")
+            temporal_rows.append((temporal[0], temporal[2], temporal[1]))
+        temporal_groups[decision] = temporal_rows
+    selected_times, first_evaluation_time, causal_training_count = _select_temporal_group_times(
+        temporal_groups, required_groups
+    )
+    complete = [(decision, groups_by_time[decision]) for decision in selected_times]
     periods = {decision: f"period-{index}" for index, (decision, _group) in enumerate(complete)}
     first_coverage_target_count = len(coverage_target_ids)
     first_coverage_mask_bytes = len(coverage_masks)
@@ -5071,6 +5202,7 @@ def _load_native_retained_rows(
         coverage_target_ids,
         coverage_target_instrument_ordinals,
         coverage_masks,
+        target_temporal,
     )
     (
         selected_targets,
@@ -5328,23 +5460,31 @@ def _load_native_retained_rows(
         "forecast_coverage": forecast_coverage,
         "selection": {
             "outcome_blind": True,
-            "selected_decision_times": sorted({row.decision_time for row in selected}),
+            "algorithm": cast(Mapping[str, Any], loader["selection_policy"])[
+                "temporal_selection_algorithm"
+            ],
+            "causal_predicate": cast(Mapping[str, Any], loader["selection_policy"])[
+                "causal_row_predicate"
+            ],
+            "selected_decision_times": selected_times,
+            "first_admissible_evaluation_time": first_evaluation_time,
+            "causal_training_count": causal_training_count,
             "selected_rows": len(selected),
             "selected_bytes": selected_bytes,
             "selected_parts": source_scan_parts,
             "source_rows": source_scan_rows,
             "source_bytes": source_scan_bytes,
             "source_parts": source_scan_parts,
-            "complete_groups": len({row.decision_time for row in selected}),
+            "complete_groups": len(selected_times),
             "target_count": len(_TARGET_IDS),
             "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
             "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
         },
         "selection_exhausted_parts": True,
         "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
-        "selected_decision_times": sorted({row.decision_time for row in selected}),
+        "selected_decision_times": selected_times,
         "selected_rows": len(selected),
-        "selected_groups": len({row.decision_time for row in selected}),
+        "selected_groups": len(selected_times),
         "consumed_rows": source_scan_rows,
         "selected_bytes": selected_bytes,
         "consumed_bytes": source_scan_bytes,
@@ -6236,14 +6376,14 @@ def _metrics(
     }
 
 
+def _causal_row_admissible(row: FixtureRow, evaluation_time: str) -> bool:
+    return _causal_temporal_predicate(
+        row.decision_time, row.dependency_end, row.target_available_at, evaluation_time
+    )
+
+
 def _causal_training_indices(rows: Sequence[FixtureRow], evaluation_time: str) -> list[int]:
-    return [
-        index
-        for index, row in enumerate(rows)
-        if row.decision_time < evaluation_time
-        and row.target_available_at <= evaluation_time
-        and row.dependency_end < evaluation_time
-    ]
+    return [index for index, row in enumerate(rows) if _causal_row_admissible(row, evaluation_time)]
 
 
 def _first_training_fold(rows: Sequence[FixtureRow]) -> tuple[list[int], str]:
@@ -6836,7 +6976,11 @@ def _validate_native_selection(
     selection = cast(Mapping[str, Any], selection_value)
     required = {
         "outcome_blind",
+        "algorithm",
+        "causal_predicate",
         "selected_decision_times",
+        "first_admissible_evaluation_time",
+        "causal_training_count",
         "selected_rows",
         "selected_bytes",
         "selected_parts",
@@ -6852,6 +6996,10 @@ def _validate_native_selection(
     policy = cast(Mapping[str, Any], config.document["retained_loader"]["selection_policy"])
     if selection["outcome_blind"] is not policy["outcome_blind"]:
         raise FreezeError("native selection receipt is not outcome-blind")
+    if selection["algorithm"] != policy["temporal_selection_algorithm"]:
+        raise FreezeError("native selection receipt algorithm is not frozen")
+    if selection["causal_predicate"] != policy["causal_row_predicate"]:
+        raise FreezeError("native selection receipt causal predicate is not frozen")
     times_value = selection["selected_decision_times"]
     if not isinstance(times_value, Sequence) or isinstance(times_value, (str, bytes)):
         raise FreezeError("native selection receipt times are malformed")
@@ -6870,6 +7018,23 @@ def _validate_native_selection(
     row_times = sorted({row.decision_time for row in rows})
     if times_list != row_times:
         raise FreezeError("native selection receipt times disagree with selected rows")
+    temporal_groups = {
+        decision_time: [
+            (row.decision_time, row.dependency_end, row.target_available_at)
+            for row in rows
+            if row.decision_time == decision_time
+        ]
+        for decision_time in row_times
+    }
+    expected_times, expected_evaluation, expected_count = _select_temporal_group_times(
+        temporal_groups, int(policy["n_complete_decision_groups"])
+    )
+    if times_list != expected_times:
+        raise FreezeError("native selection receipt violates frozen temporal tuple")
+    if selection["first_admissible_evaluation_time"] != expected_evaluation:
+        raise FreezeError("native selection receipt evaluation time is malformed")
+    if selection["causal_training_count"] != expected_count:
+        raise FreezeError("native selection receipt causal training count is malformed")
     row_identities = [_decision_identity(row) for row in rows]
     if len(set(row_identities)) != len(row_identities):
         raise FreezeError("native selected rows contain duplicate identities")

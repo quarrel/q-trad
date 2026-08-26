@@ -66,7 +66,10 @@
         "dependency_interval_fields": ["dependency_start", "dependency_end"],
         "purge_rule": "exclude training rows whose dependency_end overlaps evaluation decision time",
         "embargo_rule": "exclude training rows whose target_available_at is after evaluation decision time",
-        "fold_rule": "chronological synchronized decision-time groups; first mature fold only trains later evaluation groups"},
+        "fold_rule": "chronological synchronized decision-time groups; first mature fold only trains later evaluation groups",
+        "selection_algorithm": "LEXICOGRAPHIC_EARLIEST_INCREASING_THREE_COMPLETE_GROUPS_WITH_ROW_CAUSAL_TRAINING",
+        "causal_row_predicate": "decision_time < evaluation_time AND target_available_at <= evaluation_time AND dependency_end < evaluation_time"
+    },
     "retained_loader": {
         "manifest_contract": "qtrad-r2-g2-terminal-children-v1",
         "required_children": [
@@ -148,6 +151,8 @@
             "reject_incomplete": true,
             "reject_duplicate": true,
             "outcome_blind": true,
+            "temporal_selection_algorithm": "LEXICOGRAPHIC_EARLIEST_INCREASING_THREE_COMPLETE_GROUPS_WITH_ROW_CAUSAL_TRAINING",
+            "causal_row_predicate": "decision_time < evaluation_time AND target_available_at <= evaluation_time AND dependency_end < evaluation_time",
             "forecast_coverage_policy": "EXCLUDE_SHARED_ALL_ROLE_ABSENT_COMPLETE_GROUPS_REJECT_PARTIAL_ROLE_COVERAGE"},
         "streaming_policy": {
             "parts_first": true,
@@ -269,7 +274,7 @@
         "projected_peak_memory_mb": 512,
         "projected_elapsed_seconds": 60,
         "resource_envelope_rationale": {
-            "first_pass_observation": {"maximum_rss_kib": 513296, "elapsed_seconds": 31},
+            "first_pass_observation": {"maximum_rss_kib": 519188, "elapsed_seconds": 49.23},
             "projected_first_pass": {"max_memory_mb": 512, "max_elapsed_seconds": 60},
             "additional_authorized_work": [
                 "selected target/opportunity/forecast replays",
@@ -378,4 +383,4 @@
         "report_contract": "qtrad-r3-historical-exploratory-report-v2",
         "create_only": true,
         "post_result_expansion": false},
-    "semantic_identity": "dd8fad6a70d44173ba678b8608f3e82d2f69fc5f2c3aad52d24975bdb60d879b"}
+    "semantic_identity": "eb69a3b1e7fb2e4dd1585169856c71f6a5b3e833f503b250704a6e32e8d950b1"}
