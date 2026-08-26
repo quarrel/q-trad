@@ -118,9 +118,9 @@ experiment must compare native-only and augmented controls and preserve an untou
 The reviewed 23-market `capture-v4` is live. The native quote-size, session, gap, revision and
 aligned-bar audit, bounded historical-data decision and successful independent restore verification
 are retained in `docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain
-quarantined pending eligible exact evidence. R0 and R1 are complete; `R2-IBKR-HISTORICAL` is now
-complete with a source-specific terminal result, while R3 is the next milestone and native-source
-experiments remain provenance-distinct under their own gates.
+quarantined pending eligible exact evidence. R0–R3 are complete; `R2-IBKR-HISTORICAL` has its
+source-specific terminal result and R3 has its cost/portfolio implementation plus bounded historical
+exploration. R4 is not started or authorised, and native-source experiments remain provenance-distinct.
 
 ### R1 — causal multi-asset research foundation
 
@@ -139,20 +139,20 @@ The source-specific `R2-IBKR-HISTORICAL` experiment is complete with `VALID_CONS
 
 This result does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness. The separate fixture-only micro-run remains implementation evidence and is not this confirmatory result. Native-source experiments retain distinct foundations, availability assumptions, report identities and conclusion boundaries.
 
-### R3 — cost and portfolio baseline (NEXT; NOT STARTED)
+### R3 — cost and portfolio baseline (COMPLETE)
 
-Add versioned cost assumptions, shrinkage covariance, explicit group/currency mappings,
-horizon-specific virtual positions, horizon-specific optimisation and global netting/constraint
-repair. Select solver and numerical dependencies at milestone entry using version-specific
-documentation; CVXPY and the source plan's package tree are not architectural requirements.
+R3 implements versioned cost assumptions, ordered shrinkage risk, explicit group/currency mappings,
+horizon-specific persistent virtual positions, horizon optimisation and deterministic global
+netting/constraint repair. Numerical model/risk arrays use tested floating-point boundaries while prices,
+quantities, currency conversion and money remain `Decimal`. Solver failure cannot expose a partial target.
 
-Model matrices may use an appropriate floating-point numerical representation. Prices, quantities,
-currency conversion and money continue to use `Decimal`, with explicit conversions at the numerical
-boundary.
-
-Optimiser failure cannot expose partially solved targets. Retain a valid current position where
-permitted; otherwise project it into the valid set, block new alpha-driven exposure and record a
-stable failure reason.
+The mandatory historical-exploratory lane is published at
+`docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md`. Aggregate break-even was about 0.584 bps and the
+aggregate was negative at the first tested 5-bps cost. Pooled-local was the best quick diagnostic but
+inconclusive; nonlinear Huber failed; fixed and tiny learned graph results were negative. These MIDPOINT
+results are deliberately lightweight and do not establish effectiveness, executable alpha, native validity
+or profitability. The frozen future native authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md` and
+is not instantiated or authorised to run.
 
 ### R4 — residual structural graph experiment
 

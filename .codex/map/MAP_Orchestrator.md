@@ -272,6 +272,8 @@ Merge only when the operator request or applicable governing workflow authorizes
 
 Continue until every binding requirement and accepted execution gate is established, or genuine operator/external authority is required.
 
+Completion includes repository closeout. Enumerate programme-created branches, worktrees and live processes; remove known-clean completed disposable worktrees without force; prune stale worktree registrations; and record an explicit retention reason for anything left. A clean superseded candidate may be removed when its owner is inactive and its branch/commit remains recoverable. Preserve every dirty, in-use or ambiguously owned worktree. Worktree removal does not authorise branch deletion. Do not defer routine closeout until the operator asks.
+
 Report concisely:
 
 - PRs and exact candidate or merge SHAs;

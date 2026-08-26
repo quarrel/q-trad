@@ -1,11 +1,11 @@
 # Current status
 
-**Updated:** 2026-08-24
-**Current milestone:** R3 — cost and portfolio baseline (NOT STARTED; R2-IBKR-HISTORICAL terminal result complete)
+**Updated:** 2026-08-26
+**Current milestone:** R3 — cost and portfolio baseline (COMPLETE); R4 is not started or authorised
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
-**Completed decision-grade execution record:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`; active R3 execution authority: `docs/R3_EXECUTION_PLAN.md`
+**Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md` and `docs/archive/r3/R3_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
-**State:** R0 and R1 are complete; `R2-IBKR-HISTORICAL` is complete with `VALID_CONSUMED_RESULT`; R3 is next and not started. `capture-v4` is live with 23/23 channels ready, and paper research remains offline/replay.
+**State:** R0–R3 are complete. `R2-IBKR-HISTORICAL` is `VALID_CONSUMED_RESULT`; R3 delivered the cost/portfolio baseline, historical-exploratory report and frozen future native protocol. `capture-v4` remains live with 23/23 channels ready, and paper research remains offline/replay.
 
 ## Terminal `R2-IBKR-HISTORICAL` result (2026-08-23)
 
@@ -18,6 +18,14 @@ The locked `LOCAL_RIDGE` versus `ZERO_RETURN` question was **NEGATIVE**. `POOLED
 This source-specific result does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness. The separate fixture-only micro-run remains implementation evidence, not this result.
 
 **Terminal IDs:** evaluation `f21b1e4b05ef32eae232dd559c84d1c2a73732d47ed898f431c5eea7bb75fc91`; selection `15483908d45455ae7ccc5f8d1a3fdcd19b3226308b3a4c6afda067daedb627dc`; seal `1159b5f068882acf9a106e67dafc67dc4d976e04f13355b886fd5fdd7138047f`; opened `90495dd3e8d6401704728472ebc45e3ccf087ca3c241dea4ba3a9c336e113bc9`; consumed `c9bf58cebaa51435369704e629fc9df65b05020bf4354c0541ae17726a802446`.
+
+## Completed R3 result (2026-08-26)
+
+R3.A–R3.G implement the deterministic cost, ordered-risk, persistent virtual-position, global physical-target and independently reconciled evaluation path. R3.I freezes the future native protocol at `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md`; it does not authorise instantiation, provider access, holdout opening or a native run.
+
+The mandatory R3.H report is `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md` (SHA-256 `74a371a5f4481893be1608072a3ee641b2d347b13f447156bab75e8ca5034b4d`; semantic identity `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`). It is `HISTORICAL_EXPLORATORY`, uses `IBKR_HISTORICAL_RESEARCH` MIDPOINT OHLC and makes no effectiveness, executable-alpha, native-validity, profitability, order or promotion claim.
+
+Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0.584 bps, and the aggregate was negative at the first tested 5-bps cost. Gold and US-500 remained positive through 10 bps but not 20 bps; crude and EUR/USD were negative before costs. Pooled-local was the best quick diagnostic but inconclusive on support 12; nonlinear Huber failed; fixed and tiny learned graphs were negative. Nothing supports cancelling or promoting the future R4 graph experiment.
 
 ## Working now
 
@@ -43,9 +51,9 @@ This source-specific result does not establish native IG predictability, live IB
   deterministic single-horizon forecasts/outcomes, causal bid/ask paper fills, isolated reconciling
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
-- The active programme now targets multi-horizon local and cross-asset return forecasts followed by
-  explicit cost/risk states and constrained paper portfolio construction. The first full path will
-  be offline and chronological; continuous shadow paper follows only after the offline MVP.
+- R3 completed the multi-horizon cost/risk, persistent sleeve, constrained physical portfolio and
+  independently reconciled offline path. The next programme decision is whether to authorise R4; no
+  R4 experiment, native protocol instantiation or continuous shadow-paper work is currently authorised.
 - R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
@@ -205,10 +213,11 @@ This source-specific result does not establish native IG predictability, live IB
 
 ## Next actions
 
-1. Retain the final-authenticated historical report and approval attestation as the terminal `R2-IBKR-HISTORICAL` record; the separate fixture-only micro-run remains implementation evidence.
-2. Start R3 — cost and portfolio baseline — only as a new milestone, preserving the historical source boundary and not treating the small pooled-versus-local MSE improvement as executable or post-cost alpha.
-3. Keep native IG and native IBKR conclusions provenance-distinct and fail-closed pending their own qualifying foundations and untouched holdouts.
-4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+1. Retain the final-authenticated R2 result and the completed R3 plan/report as provenance-distinct records.
+2. Complete the R3 process post-mortem, especially proportionality, retained-run escalation, reviewer loops and mandatory worktree closeout.
+3. Do not start R4 or instantiate the frozen native protocol without separate authority; any future design must preserve the negative/inconclusive R3.H result rather than treating it as alpha.
+4. Keep native IG and native IBKR conclusions provenance-distinct and fail closed pending their own qualifying foundations and untouched holdouts.
+5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 
 ## Evidence and current authorities
 
@@ -224,8 +233,8 @@ This source-specific result does not establish native IG predictability, live IB
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
 - First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`
-- Completed R1/R2 implementation and scientific-execution plans: `docs/archive/r1/` and
-  `docs/archive/r2/`
+- Completed R1–R3 implementation and scientific/exploratory records: `docs/archive/r1/`,
+  `docs/archive/r2/` and `docs/archive/r3/`
 - Superseded plans, qualification and incident evidence: `docs/archive/`
 
 Historical records are consulted only to reconstruct an incident or decision, verify retained

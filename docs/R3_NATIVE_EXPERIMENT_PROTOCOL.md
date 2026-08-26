@@ -8,7 +8,7 @@
 
 ## 1. Authority, scope and non-authorisation
 
-This is the reviewed authority for one future source-specific native paper experiment. It implements R3.I in `docs/R3_EXECUTION_PLAN.md`; `PLAN.md`, `docs/TRADING_RESEARCH.md`, `docs/ARCHITECTURE.md`, ADR 0006, ADR 0007 and ADR 0030 remain governing constraints. Source separation, causal availability, holdout protection, no-order and fail-closed rules prevail if wording conflicts.
+This is the reviewed authority for one future source-specific native paper experiment. It implements R3.I in the completed plan at `docs/archive/r3/R3_EXECUTION_PLAN.md`; `PLAN.md`, `docs/TRADING_RESEARCH.md`, `docs/ARCHITECTURE.md`, ADR 0006, ADR 0007 and ADR 0030 remain governing constraints. Source separation, causal availability, holdout protection, no-order and fail-closed rules prevail if wording conflicts.
 
 This document neither authorises nor performs provider acquisition, qualification, deployment, evidence writing, protocol instantiation, readiness review, feature/model construction, a scientific run, holdout access or outcome access. It does not authorise broker orders, account operations, external submission, a production endpoint or real capital. Each is a later separately authorised operation.
 

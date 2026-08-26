@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R3 — cost and portfolio baseline (NOT STARTED; R2 is complete for the source-specific terminal result below)
+**Current milestone:** R3 — cost and portfolio baseline (COMPLETE); R4 is not started and requires separate execution authority
 **Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and do not inherit that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -9,9 +9,9 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 orders or production broker connectivity.
 
 `docs/TRADING_RESEARCH.md` defines the stable research programme. The completed R2 decision-grade
-execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`. The active R3
-execution authority is `docs/R3_EXECUTION_PLAN.md`; this file selects the current work and records
-only the milestone sequence needed to reach the next trustworthy decision.
+execution record is archived at `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`; the completed R3
+execution record is archived at `docs/archive/r3/R3_EXECUTION_PLAN.md`. The uninstantiated future native
+authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md`. This file selects the next programme decision.
 
 ## Current position
 
@@ -47,6 +47,7 @@ only the milestone sequence needed to reach the next trustworthy decision.
 - A separate bounded 20-week sparse fixture exercises the exact production CLI and persistence path through Stage 8, feature receipts, OOF, F2 promotion, G1 selection and unopened G2 preparation. It remains implementation-only evidence and is not the source-specific result below.
 - The terminal `R2-IBKR-HISTORICAL` run is `VALID_CONSUMED_RESULT`. Scope is `IBKR_HISTORICAL_RESEARCH`, historical MIDPOINT OHLC, declared provider-history delay, primary 15-minute horizon, six fixed targets and three fixed groups. Locked `LOCAL_RIDGE` versus `ZERO_RETURN` was **NEGATIVE**; `POOLED_LOCAL_RIDGE` versus `LOCAL_RIDGE` was **POSITIVE**; pooled beyond zero is **INCONCLUSIVE** because no pooled-versus-zero question was frozen; and pooled cross-asset was rejected at OOF. Both locked questions had coverage `0.9749187203016487` and support `202,709`.
 - This result is source-specific. It does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness.
+- R3 is complete. R3.A–R3.G implement the cost, ordered-risk, persistent sleeve, physical target and independently reconciled evaluation path; R3.I freezes but does not authorise a future native experiment. The mandatory R3.H historical-exploratory report is archived with semantic identity `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`.
 - The evidence-handoff simplification programme converged the Stage 6 through R2 boundaries before the terminal run on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
 - PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
@@ -67,7 +68,7 @@ only the milestone sequence needed to reach the next trustworthy decision.
 | R0 — alignment, coverage and data readiness | COMPLETE    | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
 | R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
 | R2 — local and pooled baselines             | COMPLETE    | `R2-IBKR-HISTORICAL` reached `VALID_CONSUMED_RESULT`; locked local-vs-zero was NEGATIVE, pooled-vs-local POSITIVE, pooled-vs-zero INCONCLUSIVE (not frozen), and pooled cross-asset was rejected at OOF; coverage `0.9749187203016487`, support `202,709` |
-| R3 — cost and portfolio baseline            | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically                                                                                                                            |
+| R3 — cost and portfolio baseline            | COMPLETE    | R3.A–R3.G contracts and reconciliation are merged; the historical-exploratory report is published; the future native protocol is frozen but uninstantiated                                                |
 | R4 — residual structural graph experiment   | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value                                                                                                                                               |
 | R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
 | R6 — continuous shadow paper                | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L                                                                                                                       |
@@ -151,17 +152,18 @@ chronology ambiguity before those contracts are fixed.
 
 ## R3 — cost and portfolio baseline
 
-- Version observed spread, adverse slippage, commission, financing and supported impact assumptions.
-- Estimate ordered horizon-specific shrinkage covariance and configured group/currency exposures.
-- Maintain virtual asset/horizon positions, optimise each horizon, then net and repair the global
-  physical paper target with stable reason codes.
-- Select solver and numerical dependencies at milestone entry. Preserve `Decimal` at price,
-  quantity, conversion and money boundaries.
-- Run a mandatory lightweight historical-exploratory lane over authenticated R2 evidence: break-even
-  cost/turnover sensitivity, a small pre-declared statistical/nonlinear comparison and one tiny
-  graph/GNN feasibility configuration with controls. It is not decision-grade and does not replace R4.
-- Freeze the precise future native decision-grade experiment protocol before R3 completes, without
-  provider acquisition, qualification execution, holdout opening or outcome access.
+- **Complete:** versioned product economics, expected-cost state, ordered shrinkage risk, configured
+  group/currency exposure, persistent virtual asset/horizon positions and deterministic global physical
+  target construction are implemented and independently reconciled.
+- **Complete:** solver, infeasibility, rounding, repair, zero-forecast and attribution paths fail closed and
+  preserve `Decimal` at price, quantity, conversion and money boundaries.
+- **Complete:** the mandatory lightweight R3.H historical-exploratory report covers break-even/turnover,
+  the bounded statistical/nonlinear comparison and one tiny graph feasibility configuration. Aggregate
+  break-even was about 0.584 bps and the result was negative at the first tested 5-bps cost; pooled-local
+  was the best quick diagnostic but inconclusive, nonlinear Huber failed, and fixed/tiny learned graphs
+  were negative. This is not decision-grade and establishes no executable alpha or profitability claim.
+- **Complete:** `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md` freezes the future native decision-grade protocol
+  without provider acquisition, qualification execution, instantiation, holdout opening or outcome access.
 
 ## R4 — residual structural graph experiment
 
