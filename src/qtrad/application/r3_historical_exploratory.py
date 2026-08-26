@@ -4050,7 +4050,7 @@ def _load_native_outcome_values(
     del fixture
     del path
     manifest_root = Path(cast(str, limits["manifest_root"]))
-    manifest_relative_path = PurePosixPath(str(limits["manifest_relative_path"]))
+    manifest_relative_path = PurePosixPath(cast(str, limits["manifest_relative_path"]))
     if manifest_relative_path.is_absolute() or ".." in manifest_relative_path.parts:
         raise FreezeError("native outcome manifest path is unsafe")
     root_absolute = manifest_root.absolute()
