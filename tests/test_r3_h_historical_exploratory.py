@@ -1062,6 +1062,17 @@ def test_native_fixture_receipts_are_cumulative_and_outcome_values_do_not_select
     assert metadata["native_target_source"]["pre_holdout_parts_unopened"] == 1
 
 
+def test_native_selection_receipt_times_bind_selected_rows() -> None:
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    rows, metadata = load_fixture_rows(synthetic_fixture(), config)
+    stale_metadata = deepcopy(metadata)
+    stale_metadata["selection"]["selected_decision_times"][-1] = "2099-01-01T00:00:00Z"
+    with pytest.raises(FreezeError, match="times disagree"):
+        analyse_fixture(rows, config, retained_metadata=stale_metadata)
+
+
 def test_retained_cli_requires_target_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
@@ -3353,40 +3364,127 @@ def test_native_fixture_production_topology_binds_forecasts_and_outcome(
 
 def test_fabricated_native_report_runs_strict_markdown_and_create_only(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import importlib.util
 
     import qtrad.application.r3_historical_exploratory as implementation
 
     config = FreezeConfig.from_path(CONFIG)
-    loaded, metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+
+    def omit_fixture_identity(
+        target_rows: list[dict[str, Any]], opportunity_rows: list[dict[str, Any]]
+    ) -> None:
+        del opportunity_rows
+        for target in target_rows:
+            target.pop("fixture_target_id", None)
+
+    loaded, metadata = _mutate_fixture_native_source(
+        monkeypatch, config, omit_fixture_identity, preserve_target_order=True
+    )
     assert len(loaded) == 18
+    assert all(row.target_id in implementation._TARGET_GROUP_MAP for row in loaded)
     assert metadata["authority"]["state"] == "FIXTURE_INJECTED"
     assert metadata["authority"]["authentication_performed"] is False
     assert metadata["outcome_decode_performed"] is False
 
-    role_records = metadata["_role_predictions"]
-    role_names = ("local_forecast", "pooled_forecast", "zero_forecast")
-    identities = [
-        {
-            (
-                record["decision_time"],
-                record["target_id"],
-                record["asset"],
-                record["group"],
-                record["horizon_minutes"],
-                record["period"],
-            )
-            for record in role_records[name]
-        }
-        for name in role_names
+    role_records = deepcopy(metadata["_role_predictions"])
+    ordered_loaded = sorted(
+        loaded,
+        key=lambda row: (
+            row.decision_time,
+            row.target_id,
+            row.asset,
+            row.group,
+            row.horizon_minutes,
+            row.period,
+        ),
+    )
+    ordered_identities = [
+        (
+            row.decision_time,
+            row.target_id,
+            row.asset,
+            row.group,
+            row.horizon_minutes,
+            row.period,
+        )
+        for row in ordered_loaded
     ]
-    assert all(identity_set == identities[0] for identity_set in identities)
-    assert len(identities[0]) == 18
+    local_by_identity = {
+        identity: row.prediction
+        for identity, row in zip(ordered_identities, ordered_loaded, strict=True)
+    }
+    role_values_by_identity = {
+        "local_forecast": local_by_identity,
+        "pooled_forecast": {key: value + 1.0 for key, value in local_by_identity.items()},
+        "zero_forecast": {key: 0.0 for key in local_by_identity},
+    }
+    for role_name, records in role_records.items():
+        for record in records:
+            identity = tuple(
+                record[field]
+                for field in (
+                    "decision_time",
+                    "target_id",
+                    "asset",
+                    "group",
+                    "horizon_minutes",
+                    "period",
+                )
+            )
+            record["prediction"] = role_values_by_identity[role_name][identity]
+    metadata["_role_predictions"] = role_records
+    local_values = [round(local_by_identity[key], 12) for key in ordered_identities]
+    pooled_values = [
+        round(role_values_by_identity["pooled_forecast"][key], 12) for key in ordered_identities
+    ]
 
     result = implementation.analyse_fixture(loaded, config, retained_metadata=metadata)
+    report = result.report
     markdown = implementation.render_markdown(result, config)
     assert markdown
+    assert report["evidence_class"] == "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE"
+    assert report["claims"] == [
+        "midpoint_only",
+        "historical_exploratory",
+        "implementation_evidence_only",
+        "not_executable_evidence",
+        "no_effectiveness_claim",
+    ]
+
+    candidates = {entry["id"]: entry for entry in report["statistical"]["candidates"]}
+    assert candidates["linear_ridge"]["prediction_trace"] == local_values
+    assert candidates["linear_zero_return"]["prediction_trace"] == [0.0] * 18
+    controls = {entry["id"]: entry for entry in report["statistical"]["simple_controls"]}
+    assert controls["local_ridge"]["prediction_trace"] == local_values
+    pooled_control_trace = [
+        value if included else None
+        for value, included in zip(
+            pooled_values, controls["pooled_local_ridge"]["prediction_mask"], strict=True
+        )
+    ]
+    assert controls["pooled_local_ridge"]["prediction_trace"] == pooled_control_trace
+    assert controls["zero_return"]["prediction_trace"] == [0.0] * 18
+
+    graph_controls = {entry["id"]: entry for entry in report["graph"]["controls"]}
+    assert graph_controls["local_non_graph"]["prediction_trace"] == local_values
+    assert graph_controls["pooled_non_graph"]["prediction_trace"] == [
+        value if included else None
+        for value, included in zip(
+            pooled_values, graph_controls["pooled_non_graph"]["prediction_mask"], strict=True
+        )
+    ]
+    economic = report["economic"]["configurations"]
+    assert [
+        trace["target_position"] for trace in economic["linear_ridge"]["position_trace"]
+    ] == local_values
+    assert [
+        trace["target_position"] for trace in economic["pooled_local_ridge"]["position_trace"]
+    ] == pooled_values
+    assert [
+        trace["target_position"] for trace in economic["linear_zero_return"]["position_trace"]
+    ] == [0.0] * 18
 
     script_path = Path(__file__).parents[1] / "ops/research/r3_historical_exploratory.py"
     spec = importlib.util.spec_from_file_location("r3_h_cli_fabricated", script_path)
@@ -3396,3 +3494,35 @@ def test_fabricated_native_report_runs_strict_markdown_and_create_only(
     destination = tmp_path / "report.md"
     module._write_create_only(destination, markdown)
     assert destination.read_text(encoding="utf-8") == markdown
+
+
+def test_create_only_writer_classifies_post_link_directory_fsync_ambiguity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    script_path = Path(__file__).parents[1] / "ops/research/r3_historical_exploratory.py"
+    spec = importlib.util.spec_from_file_location("r3_h_cli_postlink", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    real_fsync = module.os.fsync
+    fsync_calls = 0
+
+    def fail_directory_fsync(file_descriptor: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError("injected directory fsync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", fail_directory_fsync)
+    destination = tmp_path / "ambiguous.md"
+    with pytest.raises(module.CreateOnlyDurabilityError) as error:
+        module._write_create_only(destination, "report")
+    assert error.value.classification == "DESTINATION_PRESENT_DURABILITY_UNCONFIRMED"
+    assert error.value.destination == destination
+    assert error.value.durability_confirmed is False
+    assert destination.read_text(encoding="utf-8") == "report"
+    assert not list(tmp_path.glob(".ambiguous.md.*.tmp"))

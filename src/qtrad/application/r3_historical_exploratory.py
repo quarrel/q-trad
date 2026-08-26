@@ -6863,11 +6863,22 @@ def _validate_native_selection(
         raise FreezeError("native selection receipt times are not chronological")
     if selection["selected_rows"] != len(rows):
         raise FreezeError("native selected rows disagree with selection receipt")
-    expected_rows = len(times_list) * len(cast(Sequence[Any], policy["required_target_ids"]))
+    required_target_ids = set(cast(Sequence[str], policy["required_target_ids"]))
+    expected_rows = len(times_list) * len(required_target_ids)
     if len(rows) != expected_rows:
         raise FreezeError("native selected rows do not reconcile with frozen policy")
+    row_times = sorted({row.decision_time for row in rows})
+    if times_list != row_times:
+        raise FreezeError("native selection receipt times disagree with selected rows")
+    row_identities = [_decision_identity(row) for row in rows]
+    if len(set(row_identities)) != len(row_identities):
+        raise FreezeError("native selected rows contain duplicate identities")
+    for decision_time in row_times:
+        group_rows = [row for row in rows if row.decision_time == decision_time]
+        if {row.target_id for row in group_rows} != required_target_ids:
+            raise FreezeError("native selected rows do not match frozen target identities")
     if selection["complete_groups"] != len(times_list) or selection["target_count"] != len(
-        cast(Sequence[Any], policy["required_target_ids"])
+        required_target_ids
     ):
         raise FreezeError("native selection receipt counts differ from frozen policy")
     if "stop_reason" in selection:
