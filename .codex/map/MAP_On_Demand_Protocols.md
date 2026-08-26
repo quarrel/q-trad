@@ -1,6 +1,6 @@
 # Multi-Agent Programme orchestrator — on-demand protocols
 
-## Version 0.7 (24 August 2026)
+## Version 0.9 (25 August 2026)
 
 Read only a section triggered by MAP_Orchestrator.md or explicitly referenced in a delegated packet.
 
@@ -52,20 +52,19 @@ Never treat an unclassified plan as binding in full. Determine material statemen
 
 Revalidate observations only when they affect a live decision. Adopt, revise, defer, or reject advisory material based on evidence. Resolve decision-required material before dependent mutation unless the decision belongs to the operator.
 
-### Choose scale
+### Choose scale, uncertainty and task shape
 
-Choose DIRECT, DELEGATED, or PROGRAMME using:
+Choose DIRECT, DELEGATED, or PROGRAMME using task coupling, ownership conflicts, independent judgment, genuine parallelism, validation/risk, controlled operations, duration/recovery and coordination/token cost.
 
-    task coupling and implementation ambiguity
-    mutation-surface conflicts
-    need for independent judgment
-    opportunity for genuinely parallel progress
-    validation cost and risk
-    controlled operations
-    expected duration and recovery needs
-    coordination and token cost
+Classify independently:
 
-Prefer DIRECT unless delegation has a concrete benefit. Do not spawn a planner or owner merely to satisfy a process shape.
+    specification_certainty: CLEAR | UNCLEAR
+    implementation_uncertainty: LOW | MEDIUM | HIGH
+    task_shape: SIMPLE | COMPOSITE
+
+A delivery item is COMPOSITE when several trust boundaries, immediate consumers, retained/create-only operations, causal/identity semantics, accounting joins, numerical failure policies, resource limits or independently verifiable changes prevent one small discriminating packet.
+
+Prefer DIRECT unless delegation has concrete value. Use multiple implementers only for a clear contract with real implementation uncertainty and discriminating evidence. Resolve or escalate unclear meaning; decompose composite work before broad candidate search.
 
 ### Compile the live execution model
 
@@ -76,11 +75,12 @@ For DELEGATED work, define one complete owner packet.
 For PROGRAMME work, record a compact manifest:
 
     work_item:
-        id | purpose | authority refs | context refs |
-        deps/start/merge gates | custody |
-        expected outputs | mutation scope |
-        mandatory checks | invariants/capsules |
-        state/blocker
+        id | logical lineage | purpose | authority/context refs |
+        task shape | specification/implementation uncertainty |
+        deps/start/merge gates | custody | generation/candidate budgets |
+        expected outputs | mutation scope | acceptance matrix |
+        immediate downstream gate | invariants/capsules |
+        checks | state/blocker
 
     ownership:
         surface | mutation owner | consumers | conflict risk
@@ -108,19 +108,17 @@ Use before delegating a bounded implementation/review work item to `map_item_own
 
 Establish:
 
-    exact work item and permitted base SHA
-    isolated or otherwise safe working root
-    binding authority references
-    separately classified decision-support references
-    satisfied start gates and dependencies
-    owned and prohibited mutation surfaces
-    expected outputs and active invariants/capsules
+    exact item and stable logical_item_id
+    task_shape and specification/implementation uncertainty
+    exact permitted base SHA and safe working root
+    binding authority and separately classified context refs
+    satisfied gates/dependencies and owned/prohibited surfaces
+    expected outputs, acceptance matrix, immediate downstream gate, invariants/capsules
     mandatory checks and optional exploration
-    environment mutation boundary
-    Git/branch/push/PR delivery contract
-    local decision rights
-    escalation boundary
-    protocols_path and applicable protocol_sections
+    explicit generation_budget and total candidate_budget
+    environment mutation and Git/PR delivery contract
+    local decision rights and escalation boundary
+    resolved protocols_path and applicable sections
     receipt paths
 
 Do not delegate unresolved cross-item ownership, authority conflicts, protected-operation authorization, or binding task meaning.
@@ -139,14 +137,15 @@ Treat the owner subtree as a local context boundary. Do not request routine prog
 
 Continue independent work. When genuinely idle, use event-aware waiting or one suitably long wait. Reconcile states after a wait or material event; do not stack short polls.
 
-React to:
+React only to:
 
     READY_FOR_ACCEPTANCE
     NO_CHANGE
+    DECOMPOSE_REQUIRED
     ESCALATE
     BLOCKED
 
-Resolve only the escalated programme decision. Return the minimum changed boundary to the same owner when practical.
+Resolve only the programme-level decision. DECOMPOSE_REQUIRED terminates the current logical search lineage when evidence shows a composite/non-discriminating unit: preserve exact state, use the failure clusters and look-ahead evidence to split it, and do not reset its budget through a new owner or name. ESCALATE terminates a CLEAR, SIMPLE, indivisible lineage whose budget is exhausted: preserve the same evidence and require an explicit decision to change model/approach/boundary, abandon it, or seek operator direction. Return a changed boundary to the same owner only when the original lineage budget remains live.
 
 ### Acceptance
 
@@ -227,12 +226,12 @@ Use LONGRUN for observation mechanics. This protocol adds the evidence and autho
 
 Before launch:
 
-1. Run a small representative sample through the exact production entry point, persistence path, schemas, state transitions, and verifier. The sample must exercise every planned output type. If safe down-scaling cannot represent a material property, record that evidence gap and establish another credible gate.
-2. Inventory variable-length and nested outputs, file or part limits, decoders, memory and disk boundaries, transaction boundaries, create-only destinations, and other scale-sensitive edges.
-3. Project retained-scale counts, bytes, partitions, peak memory, peak disk, elapsed time, and safe concurrency from authorized metadata, bounded constructions, or representative measurements. State assumptions and explicit safety margins.
-4. Trace each output through its immediate downstream consumers, authenticators, verifiers, publication gates, and other boundaries that could reject an otherwise successful producer.
-5. Record untested assumptions, exact source and destination identities, stop conditions, and the evidence required to retire each material uncertainty.
-6. Base concurrency on measured or credibly bounded peak resources. Do not launch the maximum number of heavy jobs merely because parallel agent or worker slots are available.
+1. Resolve exact operational values from authoritative inputs; never infer paths, identities, mappings, universes or commands from abbreviations or conversational summaries.
+2. Run correctly shaped authorized inputs through the exact production entry point and every reversible/fail-closed gate up to mutation, including schemas, persistence, planned outputs, state transitions and verifier.
+3. Inventory variable-length/nested outputs, file/part/decoder limits, memory/disk, transactions, create-only destinations and other scale-sensitive edges.
+4. Project retained counts, bytes, partitions, peak memory/disk, elapsed time and safe concurrency from authorized metadata, bounded constructions or representative measurements with explicit margins.
+5. Trace every output and sibling through immediate consumers, authenticators, verifiers, publication gates and other boundaries that could reject an otherwise successful producer.
+6. Record untested assumptions, exact source/destination identities, stop conditions and evidence needed to retire each uncertainty.
 
 A successful sample proves only the dimensions it exercised. It does not override contrary retained-scale evidence or discharge an untested scale boundary.
 
@@ -284,36 +283,43 @@ Discharge the protocol only when the run has a truthful terminal classification,
 
 ## CONTROLLED_OPERATIONS
 
-Use before a protected, destructive, irreversible, production, migration, retained-evidence, security-sensitive, compatibility-deletion, or otherwise consequential operation.
+Use before a protected, destructive, irreversible, production, migration, retained-evidence, security-sensitive, compatibility-deletion or otherwise consequential operation. A task or plan does not grant separately protected authority.
 
-A task or plan requirement does not grant authority for a separately protected operation unless applicable governing authority allows it.
+Progress through explicit states:
 
-The orchestrator defines a capsule:
+    AUTHORITY_DEFINED
+    -> INPUTS_RESOLVED
+    -> PREFLIGHT_EXECUTED
+    -> CAPSULE_REVIEWED
+    -> EXECUTION_AUTHORISED
+    -> EXECUTED
 
-    capsule ID
-    authority references
-    exact source identity
-    exact destination identity
-    operation and prohibited operations
-    immutability or overwrite rule
-    preflight
-    success evidence
-    failure and rollback semantics
-    deletion trigger
+Record each transition durably. Validation and capsule construction do not grant execution authority.
 
-Do not fill unresolved values with plausible defaults.
+The machine-readable capsule binds:
 
-Before mutation establish exact authority, prerequisites, identities, non-overwrite rules, failure boundary, and required evidence. Only then may the designated owner execute the operation. The executor may not widen or reinterpret the capsule.
+    capsule ID and state
+    authority references and designated owner/executor
+    exact argv array, cwd, code/config identity
+    exact input paths and semantic/closure/authority identities
+    exact destination and create-only/overwrite rule
+    allowed and forbidden reads and mutations
+    exact permitted tool read/search scopes, required globs/exclusions, and output bounds
+    resource, time and stop limits
+    executed preflight receipt against the actual authorized inputs
+    independent capsule-review identity and findings
+    success/terminal evidence
+    failure, rollback, orphan and partial-destination semantics
+    retry count, destination policy and retry authority
+    deletion or discharge trigger
 
-On failure:
+Operational values come from authoritative files or observed state, never an abbreviation, naming convention or conversational summary. The preflight must exercise actual authorized inputs through every reversible gate, including cardinality, subset/order semantics, representation limits and resource projections. A synthetic fixture discharges only properties it actually represents.
 
-- preserve existing authority and useful failure evidence;
-- do not reuse an ambiguous partial destination;
-- do not perform downstream deletion;
-- do not invent replacement identity, path, mapping, or equivalence;
-- stop when fresh operator authority or specialist judgment is required.
+For a read-restricted operation, tools whose default scope may extend beyond the working root must receive an explicit absolute scope and required exclusions; omitted or fallback scope is prohibited. Instructions and capsule fields are audit controls, not a confidentiality sandbox. When prohibited inputs must be technically unreadable, run the task in an environment that cannot access them.
 
-Keep the capsule active until deliberately discharged.
+Only after exact inputs are resolved, preflight has executed, the capsule is independently reviewed and applicable authority explicitly moves it to EXECUTION_AUTHORISED may the designated executor run the exact argv. The executor cannot fill blanks, widen scope or reinterpret the capsule.
+
+On failure preserve authority and useful evidence; do not reuse an ambiguous partial destination, perform downstream deletion, invent replacement identity/path/mapping/equivalence, or retry without the recorded authority. Keep the capsule active until deliberately discharged.
 
 ---
 
@@ -348,11 +354,13 @@ Prefer one deterministic sequence:
 
 Keep the PR title and description concise and grounded in actual tracked changes and controlling task references. Do not paste plans, internal transcripts, sensitive state, large logs, or broad diffs.
 
+Pass Markdown titles, bodies, comments and reviews as structured API data or through a safely created body file. Never interpolate such content into shell source: backticks and command substitutions remain executable even when the content was JSON-encoded for insertion into a command string.
+
 An open, non-draft, mergeable, approved, or green PR is not acceptance by itself.
 
 ### Review publication
 
-Bind the verdict to the exact reviewed SHA. Immediately before publication, recheck the PR head when practical.
+Bind the verdict to the exact reviewed SHA. Immediately before publication, recheck that the PR head equals that SHA. If the head cannot be established, retain and return the local verdict but do not publish it.
 
 Publish one complete verdict through the repository's normal review mechanism. If GitHub prevents formal self-review because author and reviewer identity are the same, publish the structured verdict once as a top-level PR comment instead. Do not publish both.
 
@@ -398,29 +406,29 @@ Do not infer that deleting the source branch, closing related issues, deploying,
 
 ## CONTEXT_ROTATION
 
-Use only when a long PROGRAMME run must continue from compact durable state. Do not rotate a small task merely because this protocol exists.
+Use when a long PROGRAMME run can discard closed conversational state at a semantic transition. Do not rotate a small task merely because this protocol exists, and do not rotate on a fixed timer or turn count.
 
-Write bootstrap.json atomically with:
+State roles are:
 
-    run/state version
-    exact observed default-branch identity
-    snapshot/events/manifest/coverage paths
-    active item IDs and states
-    runnable queue
-    delegated owner task identities
-    candidate and PR heads
-    blockers and escalations
-    ownership conflicts
-    active invariants/capsules
-    long-job identities
-    validation fingerprint
-    exact receipt/finding refs needed next
+    bootstrap.json — immutable run identity, initial authority and state-file locations
+    events.jsonl — append-only material transitions/incidents
+    manifest.json — sole current programme projection
+    coverage.json — plan/source coverage when required
 
-Do not include descendant transcripts, credentials, or copied logs.
+Do not maintain a second mutable snapshot. If a human status view is later needed, derive it from the manifest and bind its manifest identity/event sequence so staleness is detectable.
 
-A fresh continuation reads only the kernel, bootstrap.json, and exact sources required for the next decision. Before semantic action it revalidates current Git, GitHub, owner, job, and controlled-operation state.
+Good rotation points include:
 
-Durable state is evidence and recovery material, not authority merely because it was written down.
+- after bootstrap and initial delegation;
+- after a merge wave or closed dependency tranche;
+- after abandoning a candidate lineage;
+- immediately before a controlled operation;
+- after an incident or authority change; and
+- at operator handoff or continuation.
+
+Before compacting, update durable state and retain only exact current default-branch identity, active item/owner/job IDs and states, candidate/PR heads, live authority/capsule identities, blockers, receipt/finding refs and the next legal transitions. Exclude descendant transcripts, routine logs and closed candidate histories.
+
+A continuation reads the kernel, immutable bootstrap, current manifest and exact sources required for the next decision. Before semantic action it revalidates Git, GitHub, owner, job and controlled-operation state. Durable state is recovery evidence, not authority merely because it was written.
 
 ---
 
