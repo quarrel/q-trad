@@ -102,6 +102,22 @@ _NON_EXECUTABLE_CLAIMS: Final = (
     "not_executable_evidence",
     "no_effectiveness_claim",
 )
+_AUTHENTICATED_CLAIMS: Final = (
+    "midpoint_only",
+    "historical_exploratory",
+    "not_executable_evidence",
+    "no_effectiveness_claim",
+)
+_IMPLEMENTATION_EVIDENCE_CLASS = "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE"
+_AUTHENTICATED_EVIDENCE_CLASS = "HISTORICAL_EXPLORATORY"
+
+
+def _evidence_purpose(authenticated: bool) -> tuple[str, tuple[str, ...]]:
+    if authenticated:
+        return _AUTHENTICATED_EVIDENCE_CLASS, _AUTHENTICATED_CLAIMS
+    return _IMPLEMENTATION_EVIDENCE_CLASS, _NON_EXECUTABLE_CLAIMS
+
+
 _TARGET_IDS: Final = (
     "fx:aud-usd",
     "fx:eur-usd",
@@ -1185,9 +1201,13 @@ def _validate_strict_canonical_report(report: Mapping[str, Any], config: FreezeC
         )
         if report_json != config_json:
             raise FreezeError(f"renderer {section} differs from the frozen canonical schema")
-    claims = _strict_sequence(report["claims"], "claims", length=len(_NON_EXECUTABLE_CLAIMS))
-    if tuple(claims) != _NON_EXECUTABLE_CLAIMS:
-        raise FreezeError("renderer claims differ from the frozen canonical claim set")
+    authenticated = bool(
+        cast(Mapping[str, Any], report["retained_parents"])["authentication_performed"]
+    )
+    _expected_evidence_class, expected_claims = _evidence_purpose(authenticated)
+    claims = _strict_sequence(report["claims"], "claims", length=len(expected_claims))
+    if tuple(claims) != expected_claims:
+        raise FreezeError("renderer claims differ from the evidence-purpose claim set")
     provenance = _strict_mapping(
         report["code_provenance"],
         "code_provenance",
@@ -1983,10 +2003,14 @@ def _validate_renderable_report(report: Mapping[str, Any], config: FreezeConfig)
         raise FreezeError("renderer requires IBKR historical research source")
     if report["price_basis"] != "MIDPOINT_OHLC":
         raise FreezeError("renderer requires MIDPOINT-only report")
-    if report["evidence_class"] != "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE":
-        raise FreezeError("renderer requires historical exploratory evidence")
-    if report["claims"] != list(_NON_EXECUTABLE_CLAIMS):
-        raise FreezeError("renderer requires the complete non-executable claim set")
+    authenticated = bool(
+        cast(Mapping[str, Any], report["retained_parents"])["authentication_performed"]
+    )
+    expected_evidence_class, expected_claims = _evidence_purpose(authenticated)
+    if report["evidence_class"] != expected_evidence_class:
+        raise FreezeError("renderer evidence class does not match evidence purpose")
+    if report["claims"] != list(expected_claims):
+        raise FreezeError("renderer claims differ from evidence purpose")
     if not isinstance(report["no_post_result_expansion"], bool):
         raise FreezeError("renderer requires a boolean no_post_result_expansion")
     _require_report_sequence(report, "claims")
@@ -2256,25 +2280,33 @@ def render_markdown(result: MicroRun, config: FreezeConfig) -> str:
         "canonical_report_contract": report["contract"],
         "canonical_report_semantic_identity": semantic_identity,
         "stage": "R3.H",
-        "evidence_class": "HISTORICAL_EXPLORATORY",
+        "evidence_class": report["evidence_class"],
         "source_class": report["source_class"],
         "price_basis": report["price_basis"],
         "configuration_semantic_identity": config.semantic_identity,
         "no_post_result_expansion": report["no_post_result_expansion"],
     }
+    claims = set(cast(Sequence[str], semantic_report["claims"]))
     claim_boundary = {
         "claims": semantic_report["claims"],
-        "no_effectiveness_claim": True,
-        "no_executable_alpha_claim": True,
-        "no_profitability_claim": True,
-        "no_native_validity_claim": True,
-        "no_promotion_claim": True,
-        "no_order_claim": True,
+        "no_effectiveness_claim": "no_effectiveness_claim" in claims,
+        "no_executable_alpha_claim": "not_executable_evidence" in claims,
+        "no_profitability_claim": "not_executable_evidence" in claims,
+        "no_native_validity_claim": "historical_exploratory" in claims,
+        "no_promotion_claim": "not_executable_evidence" in claims,
+        "no_order_claim": "not_executable_evidence" in claims,
     }
     sections = [
         "# R3.H Historical Exploratory Report\n",
-        "This is machine-readably labelled historical, MIDPOINT-only implementation evidence. "
-        "It is not executable evidence or a recommendation.\n",
+        (
+            "This is machine-readably labelled historical, MIDPOINT-only "
+            + (
+                "authenticated evidence."
+                if report["evidence_class"] == _AUTHENTICATED_EVIDENCE_CLASS
+                else "implementation evidence."
+            )
+            + " It is not executable evidence or a recommendation.\n"
+        ),
         _render_section("Machine-readable report identity", metadata),
         _render_section(
             "Terminal authority and consumed child identities",
@@ -4280,8 +4312,13 @@ def _native_fixture_row(
 ) -> FixtureRow:
     target = targets[target_id]
     opportunity = opportunities[target_id]
-    instrument = str(target["instrument_id"])
-    group = _TARGET_GROUP_MAP.get(instrument, _TARGET_GROUP_MAP.get(target_id, instrument))
+    instrument = target["instrument_id"]
+    if not isinstance(instrument, str) or instrument not in _TARGET_GROUP_MAP:
+        raise FreezeError("native target instrument identity is malformed")
+    fixture_target_id = target.get("fixture_target_id")
+    if fixture_target_id is not None and fixture_target_id != instrument:
+        raise FreezeError("native fixture target identity differs from authenticated instrument")
+    group = _TARGET_GROUP_MAP[instrument]
     local = forecasts["local_forecast"][target_id]
     prediction_value = local.get("forecast", local.get("prediction"))
     if not isinstance(prediction_value, (int, float)) or isinstance(prediction_value, bool):
@@ -4294,7 +4331,7 @@ def _native_fixture_row(
     return FixtureRow(
         timestamp=decision_time,
         decision_time=decision_time,
-        target_id=str(target.get("fixture_target_id", target_id)),
+        target_id=instrument,
         asset=instrument,
         group=group,
         horizon_minutes=int(target["target_horizon_seconds"]) // 60,
@@ -5244,17 +5281,38 @@ def _load_native_retained_rows(
             "wrapper_sha256": wrappers["zero_forecast"]["sha256"],
         },
     }
-    role_predictions = {
-        name: [
-            float(
-                selected_forecasts_hex[name][target_id].get(
-                    "forecast", selected_forecasts_hex[name][target_id].get("prediction")
-                )
-            )
-            for target_id in selected_target_ids_hex
-        ]
-        for name in ("local_forecast", "pooled_forecast", "zero_forecast")
+    retained_target_hashes: dict[str, str] = {}
+    role_predictions: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in ("local_forecast", "pooled_forecast", "zero_forecast")
     }
+    for target_hash, row in zip(selected_target_ids_hex, selected, strict=True):
+        identity = _decision_identity(row)
+        token = _identity_token(identity)
+        if token in retained_target_hashes:
+            raise FreezeError("native selected decision identity is duplicated")
+        retained_target_hashes[token] = target_hash
+        for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
+            raw_prediction = selected_forecasts_hex[name][target_hash].get(
+                "forecast", selected_forecasts_hex[name][target_hash].get("prediction")
+            )
+            if (
+                not isinstance(raw_prediction, (int, float))
+                or isinstance(raw_prediction, bool)
+                or not math.isfinite(float(raw_prediction))
+            ):
+                raise FreezeError(f"native {name} selected prediction is malformed")
+            role_predictions[name].append(
+                {
+                    "decision_time": row.decision_time,
+                    "target_id": row.target_id,
+                    "asset": row.asset,
+                    "group": row.group,
+                    "horizon_minutes": row.horizon_minutes,
+                    "period": row.period,
+                    "prediction": float(raw_prediction),
+                    "retained_target_id": target_hash,
+                }
+            )
     first_inventory["cumulative_receipt"] = target_source_receipt
     target_wrapper_bytes = target_source_receipt["wrapper_bytes"]
     if not isinstance(target_wrapper_bytes, int):
@@ -5269,8 +5327,18 @@ def _load_native_retained_rows(
         "native_target_source": first_inventory,
         "forecast_coverage": forecast_coverage,
         "selection": {
-            "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+            "outcome_blind": True,
             "selected_decision_times": sorted({row.decision_time for row in selected}),
+            "selected_rows": len(selected),
+            "selected_bytes": selected_bytes,
+            "selected_parts": source_scan_parts,
+            "source_rows": source_scan_rows,
+            "source_bytes": source_scan_bytes,
+            "source_parts": source_scan_parts,
+            "complete_groups": len({row.decision_time for row in selected}),
+            "target_count": len(_TARGET_IDS),
+            "stop_state": "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF",
+            "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
         },
         "selection_exhausted_parts": True,
         "stop_reason": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
@@ -5294,6 +5362,7 @@ def _load_native_retained_rows(
         "source_scan_wrapper_bytes_kind": "wrapper_bytes_cumulative",
         "role_bindings": role_bindings,
         "_role_predictions": role_predictions,
+        "_retained_target_hashes": retained_target_hashes,
         "source_scan_rows": source_scan_rows,
         "source_scan_parts": source_scan_parts,
         "source_scan_bytes": source_scan_bytes,
@@ -5645,25 +5714,41 @@ def load_retained_rows(
         raise FreezeError("bounded join selector could not prove required complete groups")
     rows: list[FixtureRow] = []
     role_names = ("local_forecast", "pooled_forecast", "zero_forecast")
-    role_predictions: dict[str, list[float]] = {name: [] for name in role_names}
+    role_predictions: dict[str, list[dict[str, Any]]] = {name: [] for name in role_names}
+    retained_target_hashes: dict[str, str] = {}
     for _, group in complete[:required_groups]:
         for key in sorted(group):
             children = group[key]
             local = children["local_forecast"]
             outcome = children["outcome_evidence"]
+            row = FixtureRow(
+                **{field: local[mappings[field]] for field in required}
+                | {
+                    "timestamp": local[mappings["decision_time"]],
+                    "realised_return": outcome[mappings["realised_return"]],
+                }
+            )
+            rows.append(row)
+            token = _identity_token(_decision_identity(row))
+            if token in retained_target_hashes:
+                raise FreezeError("retained decision identity is duplicated")
+            retained_target_hashes[token] = str(key[1])
             for role_name in role_names:
+                prediction = float(children[role_name][mappings["prediction"]])
+                if not math.isfinite(prediction):
+                    raise FreezeError("retained role prediction value is non-finite")
                 role_predictions[role_name].append(
-                    float(children[role_name][mappings["prediction"]])
-                )
-            rows.append(
-                FixtureRow(
-                    **{field: local[mappings[field]] for field in required}
-                    | {
-                        "timestamp": local[mappings["decision_time"]],
-                        "realised_return": outcome[mappings["realised_return"]],
+                    {
+                        "decision_time": row.decision_time,
+                        "target_id": row.target_id,
+                        "asset": row.asset,
+                        "group": row.group,
+                        "horizon_minutes": row.horizon_minutes,
+                        "period": row.period,
+                        "prediction": prediction,
+                        "retained_target_id": str(key[1]),
                     }
                 )
-            )
     selected, selection_meta = select_synchronised_rows(rows, config)
     selection_meta["stop_state"] = stop_state
     selection_meta["stop_reason"] = stop_reason
@@ -5722,6 +5807,7 @@ def load_retained_rows(
         "selected_raw_part_provenance": "not individually attributable after bounded join",
         "role_bindings": role_bindings,
         "_role_predictions": role_predictions,
+        "_retained_target_hashes": retained_target_hashes,
         "scanned_part_hashes": scanned_hashes,
         "stop_state": stop_state,
         "stop_reason": stop_reason,
@@ -6722,6 +6808,154 @@ def _code_provenance() -> dict[str, str]:
     }
 
 
+_ROLE_PREDICTION_FIELDS = frozenset(
+    {
+        "decision_time",
+        "target_id",
+        "asset",
+        "group",
+        "horizon_minutes",
+        "period",
+        "prediction",
+        "retained_target_id",
+    }
+)
+_ROLE_PREDICTION_NAMES = ("local_forecast", "pooled_forecast", "zero_forecast")
+
+
+def _identity_token(identity: tuple[Any, ...]) -> str:
+    return json.dumps(list(identity), separators=(",", ":"), ensure_ascii=False)
+
+
+def _validate_native_selection(
+    rows: Sequence[FixtureRow], metadata: Mapping[str, Any], config: FreezeConfig
+) -> dict[str, Any]:
+    selection_value = metadata.get("selection")
+    if not isinstance(selection_value, Mapping):
+        raise FreezeError("native selection receipt is missing")
+    selection = cast(Mapping[str, Any], selection_value)
+    required = {
+        "outcome_blind",
+        "selected_decision_times",
+        "selected_rows",
+        "selected_bytes",
+        "selected_parts",
+        "source_rows",
+        "source_bytes",
+        "source_parts",
+        "complete_groups",
+        "target_count",
+        "stop_state",
+    }
+    if not required <= set(selection):
+        raise FreezeError("native selection receipt is incomplete")
+    policy = cast(Mapping[str, Any], config.document["retained_loader"]["selection_policy"])
+    if selection["outcome_blind"] is not policy["outcome_blind"]:
+        raise FreezeError("native selection receipt is not outcome-blind")
+    times_value = selection["selected_decision_times"]
+    if not isinstance(times_value, Sequence) or isinstance(times_value, (str, bytes)):
+        raise FreezeError("native selection receipt times are malformed")
+    times = cast(Sequence[Any], times_value)
+    times_list = [str(value) for value in times]
+    if len(times_list) != int(policy["n_complete_decision_groups"]):
+        raise FreezeError("native selection receipt group count is incomplete")
+    if times_list != sorted(times_list) or len(set(times_list)) != len(times_list):
+        raise FreezeError("native selection receipt times are not chronological")
+    if selection["selected_rows"] != len(rows):
+        raise FreezeError("native selected rows disagree with selection receipt")
+    required_target_ids = set(cast(Sequence[str], policy["required_target_ids"]))
+    expected_rows = len(times_list) * len(required_target_ids)
+    if len(rows) != expected_rows:
+        raise FreezeError("native selected rows do not reconcile with frozen policy")
+    row_times = sorted({row.decision_time for row in rows})
+    if times_list != row_times:
+        raise FreezeError("native selection receipt times disagree with selected rows")
+    row_identities = [_decision_identity(row) for row in rows]
+    if len(set(row_identities)) != len(row_identities):
+        raise FreezeError("native selected rows contain duplicate identities")
+    for decision_time in row_times:
+        group_rows = [row for row in rows if row.decision_time == decision_time]
+        if {row.target_id for row in group_rows} != required_target_ids:
+            raise FreezeError("native selected rows do not match frozen target identities")
+    if selection["complete_groups"] != len(times_list) or selection["target_count"] != len(
+        required_target_ids
+    ):
+        raise FreezeError("native selection receipt counts differ from frozen policy")
+    if "stop_reason" in selection:
+        expected_reason = {
+            "SCANNED_ALL_PARTS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "SCANNED_ALL_ROWS_REQUIRED_NO_ORDER_PROOF": "FULL_SCAN_REQUIRED_NO_ORDER_PROOF",
+            "STOPPED_AFTER_EARLIEST_COMPLETE_GROUP_BOUND": "EARLIEST_COMPLETE_GROUP_BOUND",
+        }.get(selection["stop_state"])
+        if expected_reason is None or selection["stop_reason"] != expected_reason:
+            raise FreezeError("native selection receipt stop reason is malformed")
+    return dict(selection)
+
+
+def _validated_role_prediction_arrays(
+    ordered: Sequence[FixtureRow], metadata: Mapping[str, Any]
+) -> dict[str, list[float]]:
+    raw_value = metadata.get("_role_predictions")
+    if not isinstance(raw_value, Mapping) or set(cast(Mapping[str, Any], raw_value)) != set(
+        _ROLE_PREDICTION_NAMES
+    ):
+        raise FreezeError("retained role prediction records are incomplete")
+    raw = cast(Mapping[str, Any], raw_value)
+    expected = {_identity_token(_decision_identity(row)): row for row in ordered}
+    provenance_value = metadata.get("_retained_target_hashes", {})
+    if not isinstance(provenance_value, Mapping):
+        raise FreezeError("retained role prediction provenance is malformed")
+    provenance = cast(Mapping[str, Any], provenance_value)
+    if set(provenance) != set(expected):
+        raise FreezeError("retained role prediction provenance is incomplete")
+    arrays: dict[str, list[float]] = {}
+    for role in _ROLE_PREDICTION_NAMES:
+        records_value = raw[role]
+        if not isinstance(records_value, Sequence) or isinstance(records_value, (str, bytes)):
+            raise FreezeError("retained role prediction records are malformed")
+        records = cast(Sequence[Any], records_value)
+        by_identity: dict[str, float] = {}
+        for record_value in records:
+            if not isinstance(record_value, Mapping):
+                raise FreezeError("retained role prediction record schema is malformed")
+            record = cast(Mapping[str, Any], record_value)
+            if len(record) != len(_ROLE_PREDICTION_FIELDS) or any(
+                field not in record for field in _ROLE_PREDICTION_FIELDS
+            ):
+                raise FreezeError("retained role prediction record schema is malformed")
+            identity = (
+                record["decision_time"],
+                record["target_id"],
+                record["asset"],
+                record["group"],
+                record["horizon_minutes"],
+                record["period"],
+            )
+            token = _identity_token(identity)
+            row = expected.get(token)
+            if row is None:
+                raise FreezeError("retained role prediction has unexpected identity")
+            if identity != _decision_identity(row):
+                raise FreezeError("retained role prediction identity mismatch")
+            if token in by_identity:
+                raise FreezeError("duplicate retained role prediction identity")
+            prediction = record["prediction"]
+            if (
+                not isinstance(prediction, (int, float))
+                or isinstance(prediction, bool)
+                or not math.isfinite(float(prediction))
+            ):
+                raise FreezeError("retained role prediction value is non-finite")
+            retained_target_id = record["retained_target_id"]
+            if not isinstance(retained_target_id, str) or retained_target_id != provenance[token]:
+                raise FreezeError("retained role prediction provenance mismatch")
+            by_identity[token] = float(prediction)
+        if set(by_identity) != set(expected):
+            raise FreezeError("retained role prediction records do not match selected rows")
+        arrays[role] = [by_identity[_identity_token(_decision_identity(row))] for row in ordered]
+    return arrays
+
+
 def analyse_fixture(
     rows: Sequence[FixtureRow],
     config: FreezeConfig,
@@ -6735,7 +6969,11 @@ def analyse_fixture(
     if len(rows) > limits["max_rows"]:
         raise FreezeError("fixture exceeds max_rows")
 
-    selected_rows, selection_metadata = select_synchronised_rows(rows, config)
+    if retained_metadata is None:
+        selected_rows, selection_metadata = select_synchronised_rows(rows, config)
+    else:
+        selected_rows = tuple(rows)
+        selection_metadata = _validate_native_selection(selected_rows, retained_metadata, config)
     oof, row_count, ordered = _chronological_oof(selected_rows)
     training_indices, first_evaluation_time = _first_training_fold(ordered)
     evaluation_mask = _evaluation_mask(ordered, training_indices)
@@ -6782,7 +7020,6 @@ def analyse_fixture(
     huber_predictions = _apply_causal_linear(ordered, training_indices, huber_coefficients)
     huber_fit_executions = 1 if training_indices else 0
     if retained_metadata is not None and "_role_predictions" in retained_metadata:
-        role_predictions = cast(Mapping[str, Any], retained_metadata["_role_predictions"])
         loader = cast(Mapping[str, Any], config.document["retained_loader"])
         wrappers = cast(Mapping[str, Any], loader["child_wrappers"])
         identity_bindings = cast(Mapping[str, Any], loader["identity_bindings"])
@@ -6806,17 +7043,10 @@ def analyse_fixture(
         actual_role_bindings = cast(Mapping[str, Any], retained_metadata.get("role_bindings", {}))
         if dict(actual_role_bindings) != expected_role_bindings:
             raise FreezeError("retained forecast role bindings are swapped or incomplete")
-        try:
-            local_role = [float(value) for value in role_predictions["local_forecast"]]
-            pooled_role = [float(value) for value in role_predictions["pooled_forecast"]]
-            zero_role = [float(value) for value in role_predictions["zero_forecast"]]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise FreezeError("retained role prediction records are incomplete") from exc
-        if not all(len(values) == row_count for values in (local_role, pooled_role, zero_role)):
-            raise FreezeError("retained role prediction records do not match selected rows")
-        local_predictions = local_role
-        pooled_predictions = pooled_role
-        zero_predictions = zero_role
+        role_arrays = _validated_role_prediction_arrays(ordered, retained_metadata)
+        local_predictions = role_arrays["local_forecast"]
+        pooled_predictions = role_arrays["pooled_forecast"]
+        zero_predictions = role_arrays["zero_forecast"]
 
     candidate_predictions: dict[str, list[float]] = {}
     candidate_masks: dict[str, list[bool]] = {}
@@ -7131,8 +7361,22 @@ def analyse_fixture(
         "config_semantic_identity": config.semantic_identity,
         "source_class": config.document["source_class"],
         "price_basis": config.document["price_basis"],
-        "evidence_class": "HISTORICAL_EXPLORATORY_IMPLEMENTATION_EVIDENCE",
-        "claims": list(_NON_EXECUTABLE_CLAIMS),
+        "evidence_class": _evidence_purpose(
+            bool(
+                retained_metadata
+                and retained_metadata.get("authority", {}).get("authentication_performed", False)
+            )
+        )[0],
+        "claims": list(
+            _evidence_purpose(
+                bool(
+                    retained_metadata
+                    and retained_metadata.get("authority", {}).get(
+                        "authentication_performed", False
+                    )
+                )
+            )[1]
+        ),
         "code_provenance": _code_provenance(),
         "target_group_resolution": config.document["target_group_resolution"],
         "retained_parents": {

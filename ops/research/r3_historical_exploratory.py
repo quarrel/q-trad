@@ -24,6 +24,19 @@ from qtrad.application.r3_historical_exploratory import (
 )
 
 
+class CreateOnlyDurabilityError(OSError):
+    """The destination was linked, but directory durability is unconfirmed."""
+
+    classification = "DESTINATION_PRESENT_DURABILITY_UNCONFIRMED"
+
+    def __init__(self, destination: Path) -> None:
+        self.destination = destination
+        self.durability_confirmed = False
+        super().__init__(
+            f"create-only report linked but directory durability is unconfirmed: {destination}"
+        )
+
+
 def _write_create_only(destination: Path, rendered: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = rendered.encode("utf-8")
@@ -40,11 +53,18 @@ def _write_create_only(destination: Path, rendered: str) -> None:
             os.link(temporary, destination)
         except FileExistsError as exc:
             raise FileExistsError(f"create-only report already exists: {destination}") from exc
-        directory_fd = os.open(destination.parent, os.O_RDONLY)
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                raise CreateOnlyDurabilityError(destination) from exc
+            finally:
+                os.close(directory_fd)
+        except CreateOnlyDurabilityError:
+            raise
+        except OSError as exc:
+            raise CreateOnlyDurabilityError(destination) from exc
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
