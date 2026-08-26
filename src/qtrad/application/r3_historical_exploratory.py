@@ -4309,7 +4309,7 @@ def _load_native_retained_rows(
             "required_record_keys": None,
             "physical_required_keys": declaration["physical_required_keys"],
             "manifest_relative_path": declaration["manifest_relative_path"],
-            "manifest_root": str(source_path.parent),
+            "manifest_root": str(cast(str, loader["manifest_root"])),
             "_physical_budget": physical_budget,
             "_inventory_child": name,
             "partition_row_field": declaration["partition_row_field"],
@@ -5169,11 +5169,7 @@ def load_retained_rows(
                     {
                         "physical_required_keys": declaration["physical_required_keys"],
                         "manifest_relative_path": declaration["manifest_relative_path"],
-                        "manifest_root": str(
-                            Path(actual_locators["selection"]).parent
-                            if _fixture
-                            else Path(cast(str, loader["manifest_root"]))
-                        ),
+                        "manifest_root": str(cast(str, loader["manifest_root"])),
                         "partition_row_field": declaration["partition_row_field"],
                         "partition_fields": declaration["partition_fields"],
                         "partition_mapping_fields": declaration["partition_mapping_fields"],
@@ -5430,6 +5426,7 @@ def load_fixture_rows(
     with tempfile.TemporaryDirectory(prefix="qtrad-r3-h-fixture-") as temporary:
         root = Path(temporary)
         locators: dict[str, str] = {}
+        target_source_root = root / "target-source"
         declarations = cast(Mapping[str, Any], loader["child_wrappers"])
 
         def metadata_for(name: str) -> dict[str, Any]:
@@ -5678,7 +5675,7 @@ def load_fixture_rows(
                 "rows": list(rows_value),
             }
             encoded = _canonical_bytes(payload)
-            part_path = root / relative
+            part_path = target_source_root / relative
             part_path.parent.mkdir(parents=True, exist_ok=True)
             part_path.write_bytes(encoded)
             return {
@@ -5730,10 +5727,18 @@ def load_fixture_rows(
             "opportunity_count": len(opportunity_source_rows),
         }
         source_manifest["closure_id"] = _native_source_closure(source_manifest)
-        source_manifest_path = root / source_manifest_relative
+        source_manifest_path = target_source_root / source_manifest_relative
+        source_manifest_path.parent.mkdir(parents=True, exist_ok=True)
         source_manifest_path.write_bytes(_canonical_bytes(source_manifest))
         locators["target_source"] = str(source_manifest_path)
-        return load_retained_rows(config, locators=locators, _fixture=True)
+        fixture_document = cast(dict[str, Any], _thaw_value(config.document))
+        fixture_loader = cast(dict[str, Any], fixture_document["retained_loader"])
+        fixture_loader["manifest_root"] = str(root)
+        fixture_config = FreezeConfig(
+            document=cast(Mapping[str, Any], _freeze_value(fixture_document)),
+            semantic_identity=config.semantic_identity,
+        )
+        return load_retained_rows(fixture_config, locators=locators, _fixture=True)
 
 
 def _decision_identity(row: FixtureRow) -> tuple[str, str, str, str, int, str]:
