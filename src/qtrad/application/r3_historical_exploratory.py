@@ -966,8 +966,6 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
     if view["turnover"] < 0:
         raise FreezeError(f"renderer {label}.turnover must be non-negative")
     _strict_number(view["break_even_cost"], f"{label}.break_even_cost", nullable=True)
-    if view["break_even_cost"] is not None and view["break_even_cost"] < 0:
-        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
     sensitivity = _strict_sequence(
         view["all_in_cost_sensitivity"], f"{label}.all_in_cost_sensitivity"
     )
@@ -989,11 +987,6 @@ def _strict_economic_view(value: Any, label: str, *, root: bool = False) -> Mapp
             f"{label}.all_in_cost_sensitivity[{index}].break_even_cost",
             nullable=True,
         )
-        if entry["break_even_cost"] is not None and entry["break_even_cost"] < 0:
-            raise FreezeError(
-                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
-                "must be non-negative"
-            )
         _strict_text(entry["label"], f"{label}.all_in_cost_sensitivity[{index}].label")
     positions = _strict_sequence(view["position_trace"], f"{label}.position_trace")
     for index, item in enumerate(positions):
@@ -1144,8 +1137,6 @@ def _reconcile_economic_view(
         raise FreezeError(f"renderer {label} economic totals do not reconcile with position trace")
     if actual_turnover is not None and actual_turnover < 0:
         raise FreezeError(f"renderer {label}.turnover must be non-negative")
-    if actual_break_even is not None and actual_break_even < 0:
-        raise FreezeError(f"renderer {label}.break_even_cost must be non-negative")
     if not _decimal_matches(actual_break_even, expected_break_even):
         raise FreezeError(
             f"renderer {label}.break_even_cost does not reconcile with position trace"
@@ -1181,11 +1172,6 @@ def _reconcile_economic_view(
         if cost < 0 or net_mean is None or not _decimal_matches(net_mean, expected_net_mean):
             raise FreezeError(
                 f"renderer {label}.all_in_cost_sensitivity[{index}] does not reconcile"
-            )
-        if entry_break_even is not None and entry_break_even < 0:
-            raise FreezeError(
-                f"renderer {label}.all_in_cost_sensitivity[{index}].break_even_cost "
-                "must be non-negative"
             )
         if not _decimal_matches(entry_break_even, expected_break_even):
             raise FreezeError(

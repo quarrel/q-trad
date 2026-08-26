@@ -349,9 +349,10 @@ def test_economic_positions_derive_signed_deltas_and_costs() -> None:
 
     signed = list(rows)
     aud_rows = [index for index, row in enumerate(signed) if row.target_id == "fx:aud-usd"]
-    for index, prediction in zip(aud_rows, (-0.2, 0.0, 0.2), strict=True):
+    for index, prediction in zip(aud_rows, (-0.2, 0.0, -0.2), strict=True):
         signed[index] = replace(signed[index], prediction=prediction)
-    signed_report = analyse_fixture(tuple(signed), config).report
+    signed_result = analyse_fixture(tuple(signed), config)
+    signed_report = signed_result.report
     signed_linear = signed_report["economic"]["configurations"]["linear_ridge"]
     signed_trace = [
         item for item in signed_linear["position_trace"] if item["target_id"] == "fx:aud-usd"
@@ -359,13 +360,15 @@ def test_economic_positions_derive_signed_deltas_and_costs() -> None:
     assert [item["target_position_change"] for item in signed_trace] == [
         pytest.approx(-0.2),
         pytest.approx(0.2),
-        pytest.approx(0.2),
+        pytest.approx(-0.2),
     ]
     signed_asset = signed_linear["asset"]["fx:aud-usd"]
     assert signed_asset["turnover"] == pytest.approx(0.6)
     signed_gross = sum(item["realised_gross"] for item in signed_trace)
     assert signed_asset["gross_total"] == pytest.approx(signed_gross)
     assert signed_asset["break_even_cost"] == pytest.approx(signed_gross / 0.6)
+    assert signed_asset["break_even_cost"] < 0
+    assert render_markdown(signed_result, config)
     first_cost = signed_linear["all_in_cost_sensitivity"][0]
     assert first_cost["net_mean"] == pytest.approx(
         signed_linear["gross_mean"] - first_cost["cost"] * signed_linear["turnover"] / len(signed)
