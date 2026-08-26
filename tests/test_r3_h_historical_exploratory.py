@@ -3349,3 +3349,50 @@ def test_native_fixture_production_topology_binds_forecasts_and_outcome(
         calls = [item for item in forecast_calls if item[0] == name]
         assert len(calls) == 2
         assert all(path == expected for _, path, expected in calls)
+
+
+def test_fabricated_native_report_runs_strict_markdown_and_create_only(
+    tmp_path: Path,
+) -> None:
+    import importlib.util
+
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    loaded, metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+    assert len(loaded) == 18
+    assert metadata["authority"]["state"] == "FIXTURE_INJECTED"
+    assert metadata["authority"]["authentication_performed"] is False
+    assert metadata["outcome_decode_performed"] is False
+
+    role_records = metadata["_role_predictions"]
+    role_names = ("local_forecast", "pooled_forecast", "zero_forecast")
+    identities = [
+        {
+            (
+                record["decision_time"],
+                record["target_id"],
+                record["asset"],
+                record["group"],
+                record["horizon_minutes"],
+                record["period"],
+            )
+            for record in role_records[name]
+        }
+        for name in role_names
+    ]
+    assert all(identity_set == identities[0] for identity_set in identities)
+    assert len(identities[0]) == 18
+
+    result = implementation.analyse_fixture(loaded, config, retained_metadata=metadata)
+    markdown = implementation.render_markdown(result, config)
+    assert markdown
+
+    script_path = Path(__file__).parents[1] / "ops/research/r3_historical_exploratory.py"
+    spec = importlib.util.spec_from_file_location("r3_h_cli_fabricated", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    destination = tmp_path / "report.md"
+    module._write_create_only(destination, markdown)
+    assert destination.read_text(encoding="utf-8") == markdown
