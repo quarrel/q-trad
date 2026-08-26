@@ -16,6 +16,7 @@ import stat
 import sys
 import tempfile
 import time
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -4517,6 +4518,10 @@ def _load_native_retained_rows(
                     raise FreezeError("native selected target ID is duplicated")
                 selected_targets[target_id_bytes] = dict(row)
             check_scan_progress(len(target_index))
+        # Target IDs are inserted after the source's strict-increasing check.  Preserve that
+        # order as the compact forecast coverage index before opportunity reconciliation pops
+        # entries from the temporary join map.
+        inventory["_ordered_target_ids"] = tuple(target_index)
         for row in opportunity_rows:
             opportunity_row_count += 1
             if selected_ids is not None:
@@ -4644,17 +4649,36 @@ def _load_native_retained_rows(
     if first_inventory["combined_rows"] > max_rows or first_inventory["combined_bytes"] > max_bytes:
         raise FreezeError("native target-source exceeds frozen resource bound")
 
-    forecast_role_masks: dict[bytes, int] = {
-        target_id: 0
-        for instrument_slots in first_target_groups.values()
-        for target_id in instrument_slots
-        if target_id is not None
-    }
+    coverage_target_ids = cast(tuple[bytes, ...], first_inventory.pop("_ordered_target_ids"))
+    coverage_masks = bytearray(len(coverage_target_ids))
+    unexpected_forecast_ids = False
+
+    def coverage_slot(target_id: bytes, target_ids: Sequence[bytes]) -> int | None:
+        index = bisect_left(target_ids, target_id)
+        if index >= len(target_ids) or target_ids[index] != target_id:
+            return None
+        return index
+
+    def forecast_slot_or_mark_unexpected(
+        target_id: bytes, target_ids: Sequence[bytes]
+    ) -> int | None:
+        nonlocal unexpected_forecast_ids
+        slot = coverage_slot(target_id, target_ids)
+        if slot is None:
+            unexpected_forecast_ids = True
+        return slot
+
+    def required_coverage_slot(target_id: bytes, target_ids: Sequence[bytes]) -> int:
+        slot = coverage_slot(target_id, target_ids)
+        if slot is None:
+            raise FreezeError("native forecast coverage contains unexpected target IDs")
+        return slot
 
     def forecast_pass(
         name: str,
         selected_ids: set[bytes] | None,
-        role_masks: dict[bytes, int],
+        role_masks: bytearray,
+        role_ids: Sequence[bytes],
     ) -> tuple[dict[bytes, Mapping[str, Any]], dict[str, Any]]:
         limits = source_limits(name)
         metadata, parts, wrapper_size, _digest = _open_partitioned_json_document(
@@ -4688,6 +4712,7 @@ def _load_native_retained_rows(
             receipt["physical_rows"] += len(part_rows)
             receipt["physical_part_bytes"] += part_size
             for row in part_rows:
+                target_id_bytes: bytes | None = None
                 if selected_ids is not None:
                     replay_target_id = row.get("target_id")
                     if not isinstance(replay_target_id, str):
@@ -4700,6 +4725,7 @@ def _load_native_retained_rows(
                     if replay_target_id_bytes not in selected_ids:
                         check_scan_progress(len(role_masks))
                         continue
+                    target_id_bytes = replay_target_id_bytes
                 if not required_native <= set(row):
                     raise FreezeError(f"native {name} logical row fields are incomplete")
                 if fixture and "asset" not in row:
@@ -4709,11 +4735,8 @@ def _load_native_retained_rows(
                     row["target_instrument_id"],
                     row["forecast"],
                 )
-                target_id_bytes = (
-                    _native_canonical_sha256_id(target_id, f"{name} target ID")
-                    if isinstance(target_id, str)
-                    else None
-                )
+                if target_id_bytes is None and isinstance(target_id, str):
+                    target_id_bytes = _native_canonical_sha256_id(target_id, f"{name} target ID")
                 if (
                     target_id_bytes is None
                     or not isinstance(instrument, str)
@@ -4724,12 +4747,17 @@ def _load_native_retained_rows(
                 ):
                     raise FreezeError(f"native {name} logical row identity or value is malformed")
                 if selected_ids is None or target_id_bytes in selected_ids:
-                    previous_mask = role_masks.get(target_id_bytes, 0)
+                    assert target_id_bytes is not None
+                    slot = forecast_slot_or_mark_unexpected(target_id_bytes, role_ids)
+                    if slot is None:
+                        check_scan_progress(len(role_masks))
+                        continue
+                    previous_mask = role_masks[slot]
                     if previous_mask & role_bit:
                         raise FreezeError(
                             f"native {name} logical row identity or value is malformed"
                         )
-                    role_masks[target_id_bytes] = previous_mask | role_bit
+                    role_masks[slot] = previous_mask | role_bit
                     role_unique_count += 1
                     if selected_ids is not None:
                         selected_rows[target_id_bytes] = dict(row)
@@ -4739,7 +4767,7 @@ def _load_native_retained_rows(
         return selected_rows, receipt
 
     for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
-        _unused_rows, receipt = forecast_pass(name, None, forecast_role_masks)
+        _unused_rows, receipt = forecast_pass(name, None, coverage_masks, coverage_target_ids)
         source_receipts[name] = receipt
     required_groups = int(
         cast(Mapping[str, Any], loader["selection_policy"])["n_complete_decision_groups"]
@@ -4754,7 +4782,7 @@ def _load_native_retained_rows(
         group_row_count = sum(target_id is not None for target_id in instrument_slots)
         target_group_complete = group_row_count == len(_TARGET_IDS)
         forecast_group_complete = target_group_complete and all(
-            forecast_role_masks.get(target_id, 0) == 0b111
+            coverage_masks[required_coverage_slot(target_id, coverage_target_ids)] == 0b111
             for target_id in instrument_slots
             if target_id is not None
         )
@@ -4775,18 +4803,16 @@ def _load_native_retained_rows(
             complete.append((decision, group_ids))
     if complete_group_count < required_groups:
         raise FreezeError("native target source contains fewer than three complete groups")
+    if unexpected_forecast_ids:
+        raise FreezeError("native forecast coverage contains unexpected target IDs")
+    first_coverage_target_count = len(coverage_target_ids)
+    first_coverage_mask_bytes = len(coverage_masks)
     selected_target_ids = tuple(target_id for _decision, group in complete for target_id in group)
     selected_set = set(selected_target_ids)
-    for instrument_slots in first_target_groups.values():
-        for target_id in instrument_slots:
-            if target_id is None:
-                continue
-            if forecast_role_masks.pop(target_id, None) != 0b111:
-                raise FreezeError("native forecast coverage is incomplete")
-    if forecast_role_masks:
-        raise FreezeError("native forecast coverage contains unexpected target IDs")
+    if any(mask != 0b111 for mask in coverage_masks):
+        raise FreezeError("native forecast coverage is incomplete")
     first_target_groups.clear()
-    del first_target_groups, forecast_role_masks
+    del first_target_groups, coverage_target_ids, coverage_masks
     (
         selected_targets,
         selected_opportunities,
@@ -4798,17 +4824,19 @@ def _load_native_retained_rows(
     if set(selected_targets) != selected_set or set(selected_opportunities) != selected_set:
         raise FreezeError("native selected target/opportunity join is incomplete")
     selected_forecasts: dict[str, dict[bytes, Mapping[str, Any]]] = {}
-    selected_role_masks: dict[bytes, int] = {}
+    selected_target_ids_sorted = tuple(sorted(selected_set))
+    selected_role_masks = bytearray(len(selected_target_ids_sorted))
     for name in ("local_forecast", "pooled_forecast", "zero_forecast"):
-        selected_rows, receipt = forecast_pass(name, selected_set, selected_role_masks)
+        selected_rows, receipt = forecast_pass(
+            name, selected_set, selected_role_masks, selected_target_ids_sorted
+        )
         selected_forecasts[name] = selected_rows
         source_receipts[name]["second_pass"] = receipt
         if set(selected_rows) != selected_set:
             raise FreezeError(f"native {name} selected coverage is incomplete")
-    if set(selected_role_masks) != selected_set or any(
-        mask != 0b111 for mask in selected_role_masks.values()
-    ):
+    if any(mask != 0b111 for mask in selected_role_masks):
         raise FreezeError("native selected forecast coverage is incomplete")
+    selected_pass_mask_bytes = len(selected_role_masks)
     del selected_role_masks
     selected_targets_hex = {target_id.hex(): row for target_id, row in selected_targets.items()}
     selected_opportunities_hex = {
@@ -5072,6 +5100,12 @@ def _load_native_retained_rows(
             + sum(len(rows) for rows in selected_forecasts.values())
             + len(outcome_values),
             "full_payload_materialisation": False,
+            "coverage_representation": "sorted_target_ids_bytearray",
+            "first_pass_target_ids": first_coverage_target_count,
+            "first_pass_mask_bytes": first_coverage_mask_bytes,
+            "first_pass_cleared_before_selected_pass": True,
+            "selected_pass_target_ids": len(selected_target_ids_sorted),
+            "selected_pass_mask_bytes": selected_pass_mask_bytes,
         },
         "unopened_parts": {
             "targets": "EXHAUSTED",
