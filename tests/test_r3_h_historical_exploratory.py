@@ -460,6 +460,29 @@ def test_fixture_loader_rejects_unknown_fields_and_retained_locator_mismatch(
         load_retained_rows(config, locators=locators)
 
 
+def test_native_fixture_uses_frozen_preparation_root_for_forecasts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+    from qtrad.application.r3_historical_exploratory import load_fixture_rows
+
+    config = FreezeConfig.from_path(CONFIG)
+    original_open = implementation._open_partitioned_json_document
+    opened: list[tuple[Path, Path]] = []
+
+    def capture_open(path: Path, limits: Mapping[str, Any]) -> Any:
+        child = limits.get("_inventory_child")
+        if child in {"local_forecast", "pooled_forecast", "zero_forecast"}:
+            opened.append((path, Path(cast(str, limits["manifest_root"]))))
+        return original_open(path, limits)
+
+    monkeypatch.setattr(implementation, "_open_partitioned_json_document", capture_open)
+    load_fixture_rows(synthetic_fixture(), config)
+
+    assert opened
+    assert all(path.parent.parent == manifest_root for path, manifest_root in opened)
+
+
 def test_algorithm_parameters_are_reported_and_consumed_from_frozen_config() -> None:
     config = FreezeConfig.from_path(CONFIG)
     report = analyse_fixture(synthetic_fixture(), config).report
