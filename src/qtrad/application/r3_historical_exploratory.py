@@ -5385,8 +5385,7 @@ def _authoritative_native_locators(
     for name in _CHILD_WRAPPER_NAMES:
         if supplied[name] != expected_locators[name]:
             raise FreezeError(
-                "native retained loader locator differs from frozen terminal child: "
-                f"{name}"
+                f"native retained loader locator differs from frozen terminal child: {name}"
             )
 
     manifest_root = loader["manifest_root"]
@@ -5410,9 +5409,7 @@ def _authoritative_native_locators(
 
     # Do not retain the caller's mapping: downstream receives only frozen children and
     # the separately supplied target-source authority.
-    authoritative: dict[str, str] = {
-        name: expected_locators[name] for name in _CHILD_WRAPPER_NAMES
-    }
+    authoritative: dict[str, str] = {name: expected_locators[name] for name in _CHILD_WRAPPER_NAMES}
     authoritative["target_source"] = cast(str, supplied["target_source"])
     return authoritative
 

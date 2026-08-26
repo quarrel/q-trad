@@ -3326,6 +3326,7 @@ def test_native_fixture_production_topology_binds_forecasts_and_outcome(
             document=document, semantic_identity=fixture_config.semantic_identity
         )
         return original_load(native_config, locators=locators, _fixture=False)
+
     def native_adapter(
         native_config: FreezeConfig,
         native_locators: Mapping[str, str],
