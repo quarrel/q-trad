@@ -61,6 +61,8 @@ services:
     env_file:
       - path: .env
         required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
       QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
@@ -82,6 +84,11 @@ services:
     volumes:
       - .:/workspace
       - qtrad-codex-home:/home/vscode/.codex
+      - type: bind
+        source: ${HOME}/.codex/sessions
+        target: /home/vscode/.codex/sessions
+        bind:
+          create_host_path: false
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv

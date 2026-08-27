@@ -50,6 +50,7 @@ RUN apt-get update \
         socat \
         sudo \
         tcpdump \
+        time \
         tmux \
         traceroute \
         unzip \
