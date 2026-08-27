@@ -114,3 +114,9 @@ implementation mechanisms and PR sequencing are soft unless expressly made bindi
 Make the narrowest necessary exception to a soft tactic when it prevents the smallest correct
 implementation, and record the reason. Never resolve a contradiction by silently weakening
 correctness or by preserving obsolete complexity without a current requirement.
+
+## GPU Acceleration
+
+- The Dev Container requests GPUs with `gpus: all`. `nvidia-smi` is available.
+- PyTorch or similar will need the correct CUDA wheel index. Consult the operator if there are issues.
+- Code must check CUDA availability explicitly; CUDA-required work should fail clearly rather than silently run a materially different experiment on CPU.
