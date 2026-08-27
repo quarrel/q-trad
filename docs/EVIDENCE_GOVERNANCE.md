@@ -3,14 +3,42 @@
 ## Purpose and routing
 
 This document governs q-trad identity-bearing contracts, immutable research/operational evidence,
-compatibility and migration, retained-scale execution, verification, promotion and consequential
-research authority. It applies whether work is performed directly or through MAP. MAP supplies
-generic orchestration procedure; this document supplies q-trad authority and scientific constraints.
+compatibility and migration, plan-classified consequential retained execution, verification,
+promotion and consequential research authority. It applies whether work is performed directly or
+through MAP. MAP supplies generic orchestration procedure; this document supplies q-trad authority
+and scientific constraints.
 
 For direct work, read only the relevant active-plan sections and accepted ADR or runbook governing the
 boundary. For delegated MAP work, follow the exact supplied plan/ADR/runbook references; do not load a
 whole authority merely because the packet cites one section. Historical documents under `docs/archive/`
 are evidence, not current authority unless an active source names the surviving boundary.
+
+## Plan-declared work class
+
+An active plan authorizing scientific analysis or consequential retained execution declares, in a
+compact block:
+
+- `experiment_class`;
+- `evidence_state`;
+- permitted actions;
+- prohibited actions;
+- conditions that require stopping for new authority; and
+- scientific or operational controls that remain binding.
+
+Use the smallest class vocabulary that distinguishes current q-trad work. Current standard classes are:
+
+- `IMPLEMENTATION_ONLY` — software and implementation evidence without a scientific result;
+- `POST_HOC_HISTORICAL_EXPLORATORY` — analysis of already-revealed authenticated historical evidence,
+  with explicitly exploratory claims;
+- `DECISION_GRADE_LOCKED` — locked evaluation whose selection, reveal or consumption can support a
+  decision-grade result; and
+- `OPERATIONAL_OR_EVIDENCE_MUTATION` — provider, collector, migration, publication, promotion or other
+  authorized mutation of operational or immutable evidence state.
+
+A plan may refine a class when needed, but must state the resulting permissions and stop conditions.
+MAP and delegated agents pass this project-owned classification through without reinterpreting it.
+Retained input, create-only output, elapsed time, compute size or archival intent does not by itself
+change the declared class.
 
 ## Evidence handoff
 
@@ -108,9 +136,21 @@ Never overwrite immutable evidence in place. Migration creates a new artefact, i
 it and records the relationship. Never rewrite or selectively delete running collectors' raw or
 canonical history.
 
-## Preflight before retained or expensive execution
+## Consequential retained execution
 
-Before the first retained-scale or computationally significant production path:
+The active plan opts into `CONSEQUENTIAL_RETAINED_EXECUTION` when a retained production-path failure
+could invalidate a decision-grade result, mutate or publish protected evidence, require provider
+reacquisition, or irretrievably waste separately protected or materially costly work. This mode is
+normally applicable to retained execution under `DECISION_GRADE_LOCKED` or
+`OPERATIONAL_OR_EVIDENCE_MUTATION` when those consequences are present.
+
+It is not triggered solely because an input or output is retained, a destination is create-only, a
+report will be archived, or a command is expected to take ten minutes or longer. Long duration and
+resource observation are operational concerns: when MAP is active, use its `LONGRUN` procedure.
+
+### Preflight
+
+Before the first plan-classified consequential retained execution:
 
 1. run a correctly shaped micro-sample through the exact production CLI, persistence path, schemas,
    authority handoffs, planned outputs, state transitions and verifier;
@@ -124,18 +164,13 @@ Before the first retained-scale or computationally significant production path:
 6. record every untested assumption, exact source/destination and stop condition.
 
 A small row slice proves only the dimensions it exercises. It does not discharge cardinality,
-representation or resource risk. Do not launch a multi-hour or 10+ minute retained run until this
+representation or resource risk. Do not launch the consequential retained execution until this
 preflight establishes a credible end-to-end path.
 
-Before a command that may run for 10+ minutes, record exact command/code/input/output identity, start
-time, process/session identity, durable terminal evidence, resource/stop limits and authority for
-follow-up actions. Observe via a supported event-aware wait or a low-cost passive monitor. Activity,
-elapsed time, checkpoints and partial files do not prove completion.
+### Failure and rerun mode
 
-## Failure and rerun mode
-
-A failed retained-scale or 10+ minute run changes operating mode. Preserve truthful state and do not
-immediately replay the next patch.
+A failed plan-classified consequential retained execution changes operating mode. Preserve truthful
+state and do not immediately replay the next patch.
 
 Before another attempt:
 
@@ -157,6 +192,11 @@ of the finite inventory and downstream gate across all applicable scale-sensitiv
 raise limits, shrink required evidence or weaken identity to force success. Reuse a valid immutable
 upstream artefact when a downstream gate failed; rebuild it only after demonstrated invalidation and
 authority for a create-only replacement.
+
+A `POST_HOC_HISTORICAL_EXPLORATORY` invocation or implementation failure remains ordinary same-lineage
+diagnosis, repair and rerun unless it reveals a plan-declared stop condition or the operator sets a
+specific attempt or resource budget. Attempt count, duration and retained output do not promote it
+into consequential rerun mode.
 
 ## Validation and change records
 

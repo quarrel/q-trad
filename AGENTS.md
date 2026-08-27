@@ -20,8 +20,8 @@ Read the minimum authority needed:
 4. Read the relevant part of `docs/ARCHITECTURE.md` when changing an implemented or intended system
    boundary or flow.
 5. Read `docs/EVIDENCE_GOVERNANCE.md` for identity-bearing contracts, immutable evidence,
-   compatibility/migration, retained-scale execution, verification, promotion or consequential
-   research authority.
+   compatibility/migration, plan-classified consequential retained execution, verification, promotion
+   or consequential research authority.
 6. Read `docs/DEVELOPMENT.md` for verification, PostgreSQL test and GitHub CI semantics.
 7. Read accepted ADRs and the task-specific runbook only when touching their decision or operation.
 8. When the operator invokes MAP, read `.codex/map/MAP_Orchestrator.md`; MAP owns generic
@@ -32,14 +32,16 @@ or decision, verify retained evidence, or handle a named surviving compatibility
 
 An operator-approved active implementation plan supplies task-specific execution authority. A generated
 or advisory artifact does not become authority merely because it is labelled a plan; MAP classifications
-retain their stated authority semantics. File lists, function names and mechanisms are normally soft
-guidance; scientific, evidence, safety and authority boundaries are hard constraints.
+retain their stated authority semantics. For scientific analysis or retained execution, preserve the
+plan's experiment class, evidence state, permitted/prohibited actions, stop conditions and controls;
+operational shape such as duration, retained input or create-only output does not reclassify the work.
+File lists, function names and mechanisms are normally soft guidance; scientific, evidence, safety and
+authority boundaries are hard constraints.
 
 ## Always-on boundaries
 
-Apply rigour where an error could invalidate the current experiment, create false confidence, corrupt
-retained evidence or cross a safety boundary. Do not import public-API, multi-tenant, production or
-real-capital requirements unless their absence would make the current result dishonest or unusable.
+Do not import public-API, multi-tenant, production or real-capital requirements unless their absence
+would make the current result dishonest or unusable.
 
 Keep these distinctions explicit:
 
@@ -103,17 +105,11 @@ qualification, backup or restore use the documented `ops/ibkr/` orchestration. S
 operator command and use its terminal evidence; do not decompose supported orchestration into ad-hoc
 remote steps.
 
-At accepted PR or programme completion, close the disposable Git lifecycle in the same task. Enumerate
-worktrees, branches and live owners; remove known-clean completed worktrees without force; prune stale
-registrations; and report anything retained. A clean superseded candidate worktree may be removed once its
-owner is inactive and its branch/commit remains recoverable. Never remove a dirty, in-use or ambiguously
-owned worktree, and never treat worktree removal as authority to delete its branch.
-
 ## Contradictions
 
-Merged ADRs, scientific invariants, immutable evidence, holdout boundaries and explicitly retained
-expensive work are hard constraints. Tactical file lists, locations, implementation mechanisms and PR
-sequencing are soft unless expressly made binding.
+Merged ADRs, scientific invariants, immutable evidence, holdout boundaries and plan-declared
+scientific/evidence classes and controls are hard constraints. Tactical file lists, locations,
+implementation mechanisms and PR sequencing are soft unless expressly made binding.
 
 Make the narrowest necessary exception to a soft tactic when it prevents the smallest correct
 implementation, and record the reason. Never resolve a contradiction by silently weakening

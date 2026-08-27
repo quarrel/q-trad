@@ -34,7 +34,7 @@ runbook; do not run them during ordinary development.
 The authenticated `gh` CLI is available. Candidate-specific validation, review, PR state and merge
 authority bind to one exact commit SHA; head movement invalidates affected conclusions.
 
-The fine-grained PAT cannot access the Checks API. Verify CI through GitHub Actions workflow runs for
+The fine-grained PAT cannot access the Checks API. When needed verify CI through GitHub Actions workflow runs for
 the exact commit.
 
 GitHub Actions testing is temporarily paused. Its `verify` job covers formatting, linting, typing and

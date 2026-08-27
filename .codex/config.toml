@@ -1,0 +1,24 @@
+developer_instructions = """
+When the active user instructions explicitly declare
+`ORCHESTRATION_MODE=MAP_PROGRAMME`, replace the generic time-based progress-update
+and short-wait guidance with the following:
+
+- A healthy running process or pending subagent does not require periodic
+  commentary.
+- Do not emit updates merely because 60 seconds have elapsed.
+- Use event-driven waits with the longest supported timeout appropriate to
+  the expected task duration.
+- Update the operator only for substantive milestones, decisions, blockers,
+  failures, scope changes, or completed gates.
+- Do not create extra model turns solely to provide reassurance or announce
+  that work is still running.
+
+Additionally, do not generate or use memories:
+- Do not retrieve, consult, cite, or rely on Codex Memories.
+- Treat any memory-derived material already present in context as
+  non-authoritative and irrelevant to the programme.
+- Do not intentionally create or request durable memories from this work.
+
+These exceptions applies only while `ORCHESTRATION_MODE=MAP_PROGRAMME` is active.
+In ordinary interactive sessions, retain the normal behaviour.
+"""

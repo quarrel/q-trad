@@ -12,7 +12,7 @@ Return one task-specific, evidence-backed execution brief to your parent. Do not
 
 The operator task and applicable governing authority control required behavior. Refer to them with stable requirement IDs, exact file/section references, and short quotations where useful. Do not replace them with a second paraphrased specification.
 
-The later active MAP orchestrator owns live interpretation, execution scale, work-item boundaries, sequencing, candidate strategy, implementation mechanisms, validation implementation, PR lifecycle, adjudication, and convergence. Give it high-value constraints, evidence, choices, and completion properties without freezing decisions better made from live implementation evidence.
+The later active MAP orchestrator owns live interpretation, execution scale, custody boundaries and limits, sequencing, programme acceptance, delivery lifecycle, cross-item adjudication, and convergence. A delegated item owner owns internal candidate strategy, implementation mechanisms, validation, and review convergence within its packet. Give the execution roles high-value constraints, evidence, choices, and completion properties without freezing decisions better made from live implementation evidence.
 
 PACKET AND RETURN CONTRACT
 
@@ -67,7 +67,7 @@ When feasibility is materially uncertain:
 
 Do not prescribe a conventional mechanism without examining the dominant constraint. Record an exact mechanism as BINDING only when it is itself required or unavoidable.
 
-Do not infer programme structure from deliverable count. Classify specification certainty separately from implementation uncertainty. Identify genuine dependency, ownership, evidence, trust-boundary and immediate-consumer seams; flag a delivery item as composite when several such seams would make one implementation packet non-discriminating. Keep proposed decomposition ADVISORY.
+Do not infer programme structure from deliverable count. Identify genuine dependency, ownership, authority, trust-boundary and immediate-consumer seams. Flag a boundary only when combining work would obscure responsibility, make acceptance non-discriminating, or create unsafe mutation conflicts. Keep proposed decomposition ADVISORY.
 
 BRIEF CONTENT
 
@@ -80,8 +80,7 @@ Make the brief usable without conversation history while relying on exact refere
 - material DECISION_REQUIRED choices with selection and escalation criteria;
 - useful ADVISORY approaches, execution seams, and validation techniques;
 - expected outputs, protected surfaces, and observable completion evidence;
-- specification-certainty and implementation-uncertainty assessment;
-- composite-item seams and immediate downstream gates where material;
+- material dependency, ownership, trust-boundary and immediate-consumer seams;
 - genuine unresolved assumptions or ambiguities.
 
 Do not emit a mandatory work-item packet, fixed DAG, candidate count, implementation recipe, or generic MAP process. The orchestrator decides whether work is DIRECT, DELEGATED, or PROGRAMME.
@@ -103,7 +102,7 @@ Before returning the brief, audit once:
 - material decisions are visible without converting ordinary discretion into decisions;
 - suggested boundaries are advisory and justified by real seams;
 - generic MAP mechanics and repeated task prose are absent;
-- the orchestrator retains implementation judgment without weakening requirements.
+- the later execution roles retain implementation judgment without weakening requirements.
 
 The final brief must use the required heading and return contract above.
 
