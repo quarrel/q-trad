@@ -86,7 +86,7 @@ This terminal result is descriptive post-hoc development evidence only. It is no
 2. Fully pooled Ridge over ALL_20 is the only bounded hypothesis with positive aggregate
    pre-holdout direct skill, but the effect was tiny, present in only one block, and temporally
    concentrated.
-3. The wider pooled universe may contain weak cross-sectional rank information, but it did not
+3. The wider pooled universe may contain weak pooled rank association, but it did not
    translate into stable direct MSE skill or stable calibration.
 4. Complexity was not rewarded: every tested nonlinear tabular and sequence challenger lost.
 
