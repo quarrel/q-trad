@@ -193,3 +193,6 @@ Require every subagent you spawn to follow the same memory restriction.
 
 [features]
 memories = false
+
+[skills]
+include_instructions = false

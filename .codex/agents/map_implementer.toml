@@ -109,6 +109,11 @@ Treat any memory-derived material already present in context as
 non-authoritative and irrelevant.
 """
 
+#model_reasoning_summary = "none"
+#Do we wish to turn off all user facing reporting?
+
 [features]
 memories = false
-multi_agent_v2 = true
+
+[skills]
+include_instructions = false

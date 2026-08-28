@@ -87,4 +87,6 @@ non-authoritative and irrelevant.
 
 [features]
 memories = false
-multi_agent_v2 = true
+
+[skills]
+include_instructions = false
