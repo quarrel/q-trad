@@ -5,6 +5,7 @@
 - **Experiment class:** `POST_HOC_HISTORICAL_EXPLORATORY`
 - **Source class:** `IBKR_HISTORICAL_RESEARCH`
 - **Primary horizon:** 15 minutes
+- **Decision cadence:** 60 seconds
 - **Safety boundary:** no provider access, acquisition, deployment, native-source claim, broker order,
   production endpoint or real-capital path
 - **Planning base:** `8b82297c0c873964c66183d84878f3680ef7cc65`
@@ -57,7 +58,8 @@ permitted_actions:
   authenticate and consume the named historical/laboratory input;
   create bounded experiment code, configuration, predictions, metrics and attempt records;
   fit and evaluate the closed candidate register chronologically;
-  inspect the already-consumed terminal historical block only through the terminal stage below;
+  materialise terminal eligibility through the outcome-blind boundary in section 6.3;
+  inspect terminal outcomes only after the development register and terminal-support capsule close;
   retain negative, failed, invalidated and inconclusive results;
   nominate exact historical hypotheses under section 10 without promoting them
 
@@ -86,7 +88,7 @@ binding_controls:
   every residual label is generated from an out-of-fold local forecast;
   every feature and graph input is available by its decision time;
   candidate families and graph specifications are fixed before scientific execution;
-  the terminal historical block cannot influence architecture, graph, feature, seed or training policy;
+  terminal outcome values cannot influence architecture, graph, feature, seed, training or support policy;
   all primary comparisons use exact common support and direct zero/local/pooled controls;
   failed models remain failed and never become zero forecasts;
   every started substantive fit is recorded before it begins;
@@ -108,12 +110,12 @@ R4-P0 asks one primary question:
 
 Secondary questions are:
 
-1. Does a fixed economically specified graph improve on the pooled non-graph control?
+1. Does a fixed economically specified graph improve on the pooled non-graph residual control?
 2. Does the learned static graph improve on the fixed graph?
 3. Does the fixed economic graph beat an isomorphic graph whose node-to-market assignment is frozen
-   and permuted?
-4. Does any graph result also beat the exact local Ridge, pooled local Ridge and zero-return
-   total-forecast controls?
+   and materially permuted?
+4. Does any graph result also beat the exact all-twenty local Ridge, all-twenty fully pooled Ridge and
+   zero-return total-forecast controls?
 5. Is any improvement broad across periods and instruments rather than supplied by one node or block?
 
 The temporal backbone, feature tensor and optimisation policy are shared, but the models are not
@@ -125,7 +127,7 @@ Trainable parameter counts are reported for every family.
 A trustworthy negative, failed or inconclusive result completes R4-P0. The terminal outcomes support
 historical falsification and nomination only; they are not a second holdout.
 
-The only successful-result vocabulary is:
+The result vocabulary is:
 
 - `HYPOTHESIS_NOMINATED` — an exact fixed or learned graph configuration passes section 10's historical
   nomination rule;
@@ -144,9 +146,9 @@ Current evidence materially lowers the prior for a positive graph result but doe
   versus local Ridge, no frozen pooled-versus-zero conclusion and the fixed pooled cross-asset Ridge
   rejected at OOF.
 - The completed historical laboratory found no promoted horizon, cadence, universe, target-scaling,
-  calibration, recency, histogram-boosting, MLP or LSTM configuration. Its weak all-twenty pooled
-  result was temporally and cross-sectionally concentrated and reversed on the terminal development
-  block.
+  calibration, recency, histogram-boosting, MLP or LSTM configuration. Its weak all-twenty fully pooled
+  Ridge result was temporally and cross-sectionally concentrated and reversed on the terminal
+  development block.
 - R3.H's tiny fixed and learned graph checks were negative, but they were deliberately lightweight and
   did not implement the R4 residual target, shared temporal control or full fixed/learned/shuffled
   comparison. They neither promote nor cancel R4-P0.
@@ -156,7 +158,7 @@ Current evidence materially lowers the prior for a positive graph result but doe
 R4-P0 therefore receives a closed candidate register and bounded execution policy. It is not a broad
 GNN research programme.
 
-## 5. Input, universe and authentication — BINDING
+## 5. Input, universe and linear controls — BINDING
 
 ### 5.1 Exact immediate exploratory parent
 
@@ -177,7 +179,7 @@ There is no fallback rebuild under this plan. If the manifest or any required de
 or fails exact authentication, R4-P0 stops before model fitting. A later reconstruction requires
 separate authority, a new explicit input identity and complete structural/semantic authentication of
 rows, memberships, features, target maturity and block assignments. Reproducing aggregate support and
-MSE is a useful regression gate, not proof of input identity.
+MSE is a regression gate, not proof of input identity.
 
 ### 5.2 Fixed universe
 
@@ -205,23 +207,30 @@ R4-P0 uses only the 15-minute MIDPOINT return target at the 60-second decision c
 60-minute horizons and alternate cadence phases are excluded. Historical BID and ASK extrema are not
 executable sides and do not enter R4-P0.
 
-### 5.4 Input and baseline gate
+### 5.4 Row-count provenance and authentication gates
 
-Before residual or graph work begins, the input capsule must establish:
+The input capsule records these distinct existing counts without conflating them:
 
-- exact LAB-0 manifest and consumed-child authentication;
-- canonical twenty-node order and exact block memberships;
-- source opportunity counts of 771,140 rows across `DEV_1`–`DEV_3` and 655,424 rows in
-  `TERMINAL_FORMER_HOLDOUT` for the all-twenty P0/15-minute source view;
-- exact per-block and per-instrument source counts, frozen in the pre-run capsule; and
-- the original six-target 15-minute development baseline:
+| Population | `DEV_1`–`DEV_3` | `TERMINAL_FORMER_HOLDOUT` | Meaning |
+| --- | ---: | ---: | --- |
+| LAB-0 raw 15-minute target rows | 781,650 | 664,380 | rows in the authenticated target parts before `target_valid` filtering |
+| LAB-0 valid-target rows | 771,540 | 655,424 | rows with `target_valid == true` |
+| LAB-S fully pooled evaluation support | 771,140 | 655,424 | exact rows scored by LAB-S after its development terminal-maturity rule |
+
+None of those populations is the R4 sequence-eligible support. R4 support additionally applies the
+frozen causal-sequence and local-forecast foundation rules in sections 6 and 7. Its development row
+identities and counts are frozen at `R4P0_G0`; its terminal row identities and counts are frozen at the
+outcome-blind terminal-support boundary in section 6.3.
+
+The capsule also records exact per-block and per-instrument counts for each population and reproduces
+the original six-target 15-minute development regression gate under explicit anchor names:
 
 ```text
-support:                  239,535
-ZERO_RETURN MSE:          0.0000028404586671320294
-POOLED_LOCAL_RIDGE MSE:   0.000002841663414474555
-LOCAL_RIDGE MSE:          0.0000028481068080631273
-ordering:                 ZERO < POOLED < LOCAL
+support:                              239,535
+ZERO_RETURN MSE:                      0.0000028404586671320294
+R2_CORE6_POOLED_LOCAL_RIDGE MSE:      0.000002841663414474555
+R2_CORE6_LOCAL_RIDGE MSE:             0.0000028481068080631273
+ordering:                             ZERO < CORE6_POOLED < CORE6_LOCAL
 ```
 
 A numerical tolerance may cover ordinary deterministic library representation differences only when
@@ -229,30 +238,68 @@ its cause is identified and it cannot change support, ordering or any candidate 
 authentication remains primary; aggregate reproduction cannot substitute for it. A material mismatch
 stops R4-P0 before candidate fitting.
 
-## 6. Residual foundation and chronology — BINDING
+### 5.5 Exact all-twenty linear controls
+
+The R4 all-twenty pooled linear comparator is `FULLY_POOLED_LOCAL_RIDGE`. It is not the original
+six-target R2 candidate named `POOLED_LOCAL_RIDGE`.
+
+R4 deterministically reconstructs row forecasts from the authenticated LAB-0 rows because LAB-S did
+not retain a complete row-level forecast dataset. The reconstruction uses the merged LAB-S semantics
+and this exact canonical configuration:
+
+```text
+configuration_id: c969d8a78d428aea24e848f3328341ac31efe54db04f1baae0173661fd80bffe
+universe: ALL_20
+horizon_minutes: 15
+feature_set: P0
+feature_semantic_sha256: 61b4955c8b1536e84c80a574a5a10924d6fd235a1e6b70da3b76de43c9b45282
+pooling: FULLY_POOLED_RIDGE
+hierarchical_instrument_penalty_ratio: null
+target_scale: RAW_RETURN
+calibration: RAW
+recency: EXPANDING
+ridge_alpha: 1.0
+rolling_history_days: 84
+decay_half_life_days: 42
+calibration_inner_days: 14
+evidence_label: EXPLORATORY_POST_HOC_ONLY
+source_class: IBKR_HISTORICAL_RESEARCH
+```
+
+Before any residual-model fit, reconstruction must reproduce LAB-S development support `771,140`,
+direct delta MSE versus zero `-1.822904030e-10` and skill versus zero
+`+0.00008337606938` within a frozen numerical tolerance. At terminal entry it must reproduce support
+`655,424`, direct delta MSE `+1.563834111e-9` and skill `-0.0008588639044` before those values are used
+in the final report. These are regression checks, not nomination evidence.
+
+The all-twenty local baseline is `LOCAL_RIDGE`, configuration
+`64124c5fdb3d66b01338688b3f8283ac663461fa87e3cb815b5a002b34bf6180`: the same canonical
+configuration except `pooling: LOCAL_RIDGE`. It is also reconstructed from LAB-0 and is the sole local
+forecast foundation used to form all-twenty residual labels. Original six-target retained forecasts may
+be checked for continuity but may not substitute for either all-twenty control.
+
+## 6. Residual foundation, chronology and terminal isolation — BINDING
 
 For target instrument `i` and decision time `t`, the graph label is:
 
 ```text
-local_residual[i,t] = realised_15m_return[i,t] - local_oof_forecast[i,t]
+local_residual[i,t] = realised_15m_return[i,t] - LOCAL_RIDGE_oof_forecast[i,t]
 ```
 
-Every residual consumed for fitting or evaluation must use a local forecast made without training on
-that target. In-sample fitted residuals are prohibited.
+Every residual consumed for fitting or evaluation uses a local forecast made without training on that
+target. In-sample fitted residuals are prohibited.
 
 ### 6.1 Local residual construction
 
-- Reuse the exact retained local OOF forecasts for the original six where the authenticated parent
-  supplies them.
-- For the remaining fourteen, generate local Ridge forecasts using the same causal P0 features,
-  fold-local preprocessing, deterministic Ridge policy and chronological LAB-0 blocks.
-- Training rows must have target availability and dependency intervals complete before the applicable
-  fit boundary.
-- Residual identity binds source, instrument, target, decision time, horizon, local-model configuration,
-  fold and local forecast identity.
-- Missing or failed local forecasts produce unavailable residual rows, not zero residuals.
-- Exact local-forecast and residual support by block and instrument is fixed before any residual-model
-  scientific fit.
+- Generate the exact all-twenty `LOCAL_RIDGE` forecasts under section 5.5 using causal P0 features,
+  fold-local preprocessing and chronological LAB-0 blocks.
+- Training rows have target availability and dependency intervals complete before the applicable fit
+  boundary.
+- Residual identity binds source, instrument, target, decision time, horizon, local configuration,
+  fold and forecast identity.
+- The structural eligibility set is determined independently of model success. `LOCAL_RIDGE` must
+  cover every structurally eligible row; a missing or failed local forecast fails the residual
+  foundation rather than shrinking support or becoming a zero residual.
 
 ### 6.2 Graph fit/evaluation schedule
 
@@ -271,20 +318,37 @@ development block, not a new holdout or confirmation.
 This schedule avoids a nested residual-generation framework: graph models never train on a local
 residual from a target that helped fit that local forecast.
 
-### 6.3 Terminal boundary
+### 6.3 Executable terminal boundary
 
-The release identity, candidate register, graph specifications, node/feature order, preprocessing,
-temporal lookback, seeds, optimiser policy, epoch/stopping policy and support schedule are frozen
-before terminal rows are loaded.
+`R4P0_G0` freezes the terminal eligibility predicate, expected authenticated parts, metadata schema,
+materialisation command and fail conditions. It does **not** freeze exact terminal row identities or
+counts and does not load terminal outcome values.
 
-Development and terminal execution are separate commands or equivalent explicit stages. The terminal
-stage authenticates the frozen release and complete development attempt register. It needs no
-promotion, verifier receipt, `OPENED` marker or irreversible lifecycle. Every predeclared candidate
-with a valid development disposition proceeds according to the frozen register; there is no
-terminal-driven finalist selection.
+After the complete development register closes and before any terminal scientific fit, prediction or
+metric, a separate outcome-blind step may authenticate terminal parts and read only this allowlist:
 
-Terminal rows, labels and metrics are unavailable to training, scheduling, checkpoint selection,
-early stopping and any configuration decision.
+```text
+row keys and block identity;
+target_valid, target_available_at and dependency interval metadata;
+source/feature timestamps and availability or missingness masks needed to apply the frozen sequence rule;
+LOCAL_RIDGE forecast existence and identity, without realised target values;
+manifest, part and closure identities needed to authenticate those fields
+```
+
+The step must not load or expose `target_return`, outcome prices, realised-return values, candidate
+predictions or candidate metrics. It writes one create-only `R4P0_TERMINAL_SUPPORT` capsule containing
+the exact eligible row keys, per-instrument counts, total count, ordered-sequence hash, input identities
+and predicate/configuration identity.
+
+The capsule must retain positive support for all twenty instruments and satisfy the frozen resource
+bounds. Failure closes the release as `RUN_FAILED`; it cannot change the universe, model configuration,
+lookback, graph, seed, denominator or eligibility rule. Once the capsule closes, terminal model fitting
+and prediction may use only its exact keys. Terminal outcome values are loaded only after predictions
+for an exact candidate/seed/slot are create-only and complete.
+
+Development and terminal execution remain separate commands or equivalent explicit stages. The
+terminal stage authenticates the unchanged release, complete development register and terminal-support
+capsule. There is no terminal-driven finalist selection.
 
 ## 7. Feature, tensor and eligibility contract — BINDING
 
@@ -303,14 +367,13 @@ All residual-model candidates use the same causal input tensor and target-row el
   manufacture simultaneous evidence.
 - Node, feature and target ordering is canonical and independent of map/dictionary iteration order.
 - Every residual model predicts a correction in raw 15-minute log-return units. Total forecast is the
-  exact local forecast plus that correction.
-- An evaluation row is eligible only when its mature target, local OOF forecast and complete causal
-  sequence satisfy the frozen policy. The pre-run capsule records exact eligible counts by
-  `DEV_2`, `DEV_3`, terminal block and instrument before any scientific fit.
-- Every fixed target must have positive eligible support in all three evaluation periods. Otherwise
-  the pre-run gate fails rather than shrinking the twenty-instrument denominator.
-- A candidate must forecast every frozen eligible row. Candidate-specific omissions are coverage
-  failures, not a smaller comparison sample.
+  exact all-twenty `LOCAL_RIDGE` forecast plus that correction.
+- A row is structurally eligible only when its target is valid and mature and its causal sequence is
+  complete under the frozen policy. Development eligibility is materialised before `R4P0_G0`; terminal
+  eligibility is materialised only through section 6.3.
+- Every fixed target has positive eligible support in `DEV_2`, `DEV_3` and terminal evaluation.
+- `LOCAL_RIDGE` and every residual candidate forecast every frozen eligible row. Candidate-specific
+  omissions are coverage failures, not a smaller comparison sample.
 
 The item owner may choose one numerically stable training-only residual scaling policy before the
 pre-run freeze, provided predictions are mapped back to raw return units and the same policy is
@@ -323,18 +386,18 @@ The register contains exactly these families:
 | ID | Role |
 | --- | --- |
 | `ZERO_RETURN` | exact zero total-return control |
-| `LOCAL_RIDGE` | exact local total-return baseline and zero-residual control |
-| `POOLED_LOCAL_RIDGE` | exact pooled linear total-return baseline |
+| `LOCAL_RIDGE` | exact all-twenty local linear total-return baseline and residual foundation |
+| `FULLY_POOLED_LOCAL_RIDGE` | exact LAB-S all-twenty fully pooled linear comparator from section 5.5 |
 | `LOCAL_TEMPORAL_RESIDUAL` | shared temporal backbone using only the target node |
 | `POOLED_NON_GRAPH_RESIDUAL` | shared temporal backbone plus permutation-invariant pooled node context; no edges or message passing |
 | `FIXED_ECONOMIC_GRAPH_RESIDUAL` | shared temporal backbone and one frozen economic adjacency |
 | `LEARNED_STATIC_GRAPH_RESIDUAL` | shared temporal backbone and one learned static structural adjacency |
-| `SHUFFLED_FIXED_GRAPH_RESIDUAL` | fixed-graph architecture with the frozen economic topology assigned to permuted market identities |
+| `SHUFFLED_FIXED_GRAPH_RESIDUAL` | fixed-graph architecture with the frozen economic topology assigned to materially permuted market identities |
 
 A family that cannot fit or forecast remains `FAILED`. It is not replaced with a nearby architecture,
 new seed, new graph or zero forecast.
 
-### 8.1 Shared temporal backbone and bounded structural capacity
+### 8.1 Shared temporal backbone, stopping and bounded structural capacity
 
 The five fitted residual families use:
 
@@ -347,7 +410,7 @@ The five fitted residual families use:
 - no best-seed selection and no hidden seed averaging; and
 - recorded trainable parameter counts for every family/seed/stage.
 
-The pooled non-graph control should use a reasonable bounded context projection, but exact parameter
+The pooled non-graph control uses a reasonable bounded context projection, but exact parameter
 matching is not required and must not be claimed. The final report distinguishes:
 
 - graph versus pooled non-graph: complete bounded graph mechanism, including extra parameters;
@@ -387,8 +450,8 @@ search and learned graph ensembles are excluded.
 ### 8.4 Shuffled fixed-graph control
 
 The pre-run configuration contains the canonical node order and one explicit fixed-point-free
-permutation `π`, chosen without outcome access and used for every model seed. Let `P` be its
-permutation matrix and `A_fixed` the exact fixed economic adjacency:
+permutation `π`, chosen without any R4 performance information and used for every model seed. Let `P`
+be its permutation matrix and `A_fixed` the exact fixed economic adjacency:
 
 ```text
 A_shuffled = P @ A_fixed @ P.T
@@ -403,9 +466,26 @@ This preserves exactly:
 - graph topology up to relabelling; and
 - in-degree and out-degree multisets.
 
-It deliberately changes which market receives which structural neighbourhood. The explicit
-permutation, adjacency bytes and hashes are frozen before scientific fitting. Tests prove the formula
-and invariants. No alternate permutation is selected or substituted after results.
+The frozen permutation must also pass all of these non-degeneracy conditions before `R4P0_G0`:
+
+```text
+A_shuffled != A_fixed
+
+off_diagonal_difference_fraction =
+  count(i != j and A_fixed[i,j] != A_shuffled[i,j])
+  / count(i != j and (A_fixed[i,j] != 0 or A_shuffled[i,j] != 0))
+  >= 0.50
+
+changed_neighbourhood_fraction =
+  count(nodes whose incoming or outgoing weighted neighbourhood differs) / 20
+  >= 0.50
+```
+
+A zero denominator is invalid. The explicit permutation, adjacency bytes, difference measures and
+hashes are frozen before scientific fitting. Tests prove the formula, preserved invariants and minimum
+difference. A permutation may be replaced before `R4P0_G0` solely because it fails those structural
+conditions; no alternate permutation is selected or substituted after outcomes or model performance
+are available.
 
 This is a direct structural null for the fixed economic graph. It is a required reference, but not
 misrepresented as an exact capacity-matched null for the learned-adjacency model.
@@ -414,28 +494,31 @@ misrepresented as an exact capacity-matched null for the learned-adjacency model
 
 ### 9.1 One exact-head pre-run acceptance gate
 
-After the causal foundation, tensor path and candidate implementations exist—but before any
-scientific development fit—the orchestrator accepts one `R4P0_G0` pre-run record for an exact
+After the causal foundation, development tensor path and candidate implementations exist—but before
+any scientific development fit—the orchestrator accepts one `R4P0_G0` pre-run record for an exact
 committed candidate head. It records:
 
 - code commit SHA and clean candidate state;
 - exact LAB-0 parent and consumed-child identities;
-- residual-foundation and tensor-capsule identities;
+- exact all-twenty linear-control configurations and reconstruction checks;
+- residual-foundation and development tensor-capsule identities;
+- frozen development support plus terminal eligibility predicate, allowlist and materialisation command;
 - frozen configuration and candidate-register hashes;
-- exact node/feature order, support schedule, graphs, permutation, seeds and epoch/stopping policy;
+- exact node/feature order, graphs, permutation, seeds and epoch/stopping policy;
 - Python, lockfile/application, PyTorch, CUDA, GPU/device and relevant numerical-library identity;
 - output root and create-only naming policy;
 - exact-path smoke results for every family;
 - elapsed-time, VRAM/RAM, row/partition and output-size projections with stated margins; and
-- independent approval of the residual/chronology boundary.
+- independent approval of the residual/chronology and terminal-support boundaries.
 
 The smoke uses a correctly shaped bounded sample and exercises the real training, serialisation,
-attempt and result paths. It must not use scientific development or terminal performance to choose a
-configuration. Scientific output destinations are absent or empty before acceptance.
+attempt, support-capsule and result paths. It must not use scientific development or terminal
+performance to choose a configuration. Scientific output destinations are absent or empty before
+acceptance.
 
 `R4P0_G0` is an execution acceptance record, not a promotion or reusable evidence receipt. Any change
-to scientific code, configuration, parent input, runtime policy or graph identity invalidates it and
-requires a fresh gate for the new exact head.
+to scientific code, configuration, parent input, terminal eligibility policy, runtime policy or graph
+identity invalidates it and requires a fresh gate for the new exact head.
 
 ### 9.2 Primary fit slots and attempt recording
 
@@ -445,7 +528,7 @@ The closed release contains 45 primary fit slots:
 5 fitted residual families × 3 model seeds × 3 chronological stages
 ```
 
-Baseline reconstructions and smoke fits are logged separately and are not scientific candidates.
+Linear-control reconstructions and smoke fits are logged separately and are not scientific candidates.
 
 Immediately before model initialisation/training, append a unique attempt record with at least release
 ID, slot ID, family, seed, stage, exact input/configuration/runtime identity, output destination and
@@ -455,17 +538,17 @@ unique create-only paths and identities. A retry never overwrites or adopts the 
 
 ### 9.3 Unchanged operational retries
 
-`R4P0_G0` freezes an aggregate unchanged-operational-retry budget between zero and five, with no
-more than one retry for any primary slot. The budget is chosen from smoke/resource evidence rather
-than after failures or model results. Total started substantive fits under one accepted release
-therefore cannot exceed 45 plus that frozen budget.
+`R4P0_G0` freezes an aggregate unchanged-operational-retry budget between zero and five, with no more
+than one retry for any primary slot. The budget is chosen from smoke/resource evidence rather than
+after failures or model results. Total started substantive fits under one accepted release therefore
+cannot exceed 45 plus that frozen budget.
 
 A retry is permitted only when all of the following hold:
 
 - failure was outcome-blind infrastructure or process interruption rather than model performance,
   deterministic numerical behaviour or scientific logic;
 - no candidate metric from the failed attempt was used for a decision;
-- code, configuration, parent, support, runtime policy, seed and scientific slot are unchanged;
+- code, configuration, parent, support policy, runtime policy, seed and scientific slot are unchanged;
 - the failed attempt remains recorded with its partial-output disposition; and
 - the retry uses a new create-only attempt and destination.
 
@@ -488,10 +571,10 @@ one corrected release under this plan when:
 A second corrected release, a performance-motivated change or any scientific configuration change
 requires fresh operator authority.
 
-Once terminal execution begins, any scientific code, configuration, graph, support or runtime-policy
-change closes the release as invalidated or failed and requires fresh operator authority for a new
-scientific release. An exact unchanged operational retry under section 9.3 remains permitted when its
-conditions hold.
+Once terminal execution begins, any scientific code, configuration, graph, support policy or
+runtime-policy change closes the release as invalidated or failed and requires fresh operator
+authority for a new scientific release. An exact unchanged operational retry under section 9.3
+remains permitted when its conditions hold.
 
 ### 9.5 Other compute controls
 
@@ -509,12 +592,13 @@ conditions hold.
 
 ### 10.1 Fixed support and weighting
 
-Every primary pairwise comparison uses the exact eligible support frozen in `R4P0_G0`. Every candidate
-must cover all of it. Missing candidate forecasts are coverage failures; a model cannot improve its
-reported metric by omitting difficult observations.
+Every primary development comparison uses the exact development support frozen in `R4P0_G0`. Every
+terminal comparison uses the exact terminal support frozen by `R4P0_TERMINAL_SUPPORT`. Every candidate
+must cover its complete period support. Missing candidate forecasts are coverage failures; a model
+cannot improve its reported metric by omitting difficult observations.
 
 The breadth denominator is exactly twenty instruments. Positive support for every instrument in
-`DEV_2`, `DEV_3` and terminal evaluation is a pre-run requirement.
+`DEV_2`, `DEV_3` and terminal evaluation is required.
 
 For a period and instrument, MSE is the mean row loss on exact common support. Period-level primary MSE
 is the equal-weighted mean of the twenty instrument MSEs. Combined-development MSE is calculated on
@@ -542,7 +626,7 @@ FIXED_ECONOMIC_GRAPH_RESIDUAL versus POOLED_NON_GRAPH_RESIDUAL
 LEARNED_STATIC_GRAPH_RESIDUAL versus FIXED_ECONOMIC_GRAPH_RESIDUAL
 FIXED_ECONOMIC_GRAPH_RESIDUAL versus SHUFFLED_FIXED_GRAPH_RESIDUAL
 LEARNED_STATIC_GRAPH_RESIDUAL versus SHUFFLED_FIXED_GRAPH_RESIDUAL
-each candidate versus LOCAL_RIDGE, POOLED_LOCAL_RIDGE and ZERO_RETURN
+each candidate versus LOCAL_RIDGE, FULLY_POOLED_LOCAL_RIDGE and ZERO_RETURN
 ```
 
 The learned-versus-shuffled-fixed result is reported as a reference, not as a capacity-matched learned
@@ -586,7 +670,7 @@ is positive. It counts as improved on terminal only when terminal delta is posit
 
 For every candidate and comparison report:
 
-- frozen eligible support and forecast coverage by period and instrument;
+- frozen support and forecast coverage by period and instrument;
 - total-forecast MSE and direct skill versus zero;
 - incremental MSE versus local Ridge and pooled non-graph;
 - Pearson and Spearman association;
@@ -619,12 +703,12 @@ on exact common support for the primary seed:
 4. at least 7 of the fixed 20 instruments improve on the pooled non-graph control in both combined
    development and terminal evaluation;
 5. best-instrument and best-period positive-contribution shares are each at most 0.8;
-6. at least two of the three fixed seeds agree in sign with the primary-seed graph-versus-pooled
-   result on combined development and terminal;
+6. at least two of the three exact seeds each have positive graph-versus-pooled delta on **both**
+   combined development and terminal evaluation;
 7. the fixed graph beats `SHUFFLED_FIXED_GRAPH_RESIDUAL`; the learned graph beats both
    `FIXED_ECONOMIC_GRAPH_RESIDUAL` and `SHUFFLED_FIXED_GRAPH_RESIDUAL`;
 8. calibration slope is positive on combined development and terminal and does not reverse sign; and
-9. forecast coverage is exactly the frozen eligible support in every required period.
+9. forecast coverage is exactly the frozen support in every required period.
 
 Each graph is assessed independently. If both fixed and learned graphs pass, both exact configurations
 are nominated without ranking or choosing between them. If neither passes, the result is
@@ -640,6 +724,7 @@ or native evidence.
 R4-P0 retains:
 
 - the exact `R4P0_G0` pre-run acceptance record;
+- the exact `R4P0_TERMINAL_SUPPORT` capsule;
 - one frozen configuration with source, parent, universe, chronology, feature/tensor, graph, candidate,
   seed, stopping, retry and compute identities;
 - one compact append-only release/attempt register covering primary slots, retries, failures and
@@ -668,7 +753,7 @@ Preferred large-output location is:
 
 These paths are advisory. The required content and evidence class are binding.
 
-Attempt and result IDs are simple boundary-local execution identities, not a generic verification
+Attempt, support and result IDs are boundary-local execution identities, not a generic verification
 service. R4-P0 creates no promotion, decision-grade receipt, database migration, production API or
 permanent neural infrastructure merely because outputs are retained. A final report may authenticate
 its immediate parent/configuration/result bytes with ordinary hashes; that does not make it
@@ -679,13 +764,17 @@ decision-grade.
 Validation is proportional to the exploratory class:
 
 1. Focused deterministic tests cover causal cut-offs, target maturity, OOF residual provenance,
-   canonical node order, exact masks, no forward fill, support freezing, graph permutation invariants,
-   stopping-data isolation, attempt/retry transitions, create-only outputs and terminal separation.
+   canonical node order, exact masks, no forward fill, support materialisation, graph permutation and
+   non-degeneracy, stopping-data isolation, attempt/retry transitions, create-only outputs and terminal
+   outcome isolation.
 2. A correctly shaped exact-path smoke exercises all fitted families, graph serialisation, attempt
-   recording and result loading without using scientific performance to change configuration.
-3. The residual/chronology boundary receives independent review before `R4P0_G0`.
+   recording, terminal-support materialisation and result loading without using scientific performance
+   to change configuration.
+3. The residual/chronology and terminal-support boundaries receive independent review before
+   `R4P0_G0`.
 4. `R4P0_G0` is accepted once for the exact scientific release head before development execution.
-5. The complete development register finishes before terminal execution.
+5. The complete development register finishes before terminal-support materialisation and terminal
+   execution.
 6. Ruff, formatting and strict typing cover changed code.
 7. Experimental implementation PRs use focused tests and static checks. Do not run the complete
    repository gate on every helper or work item merely because the experiment is retained.
@@ -705,18 +794,20 @@ The orchestrator may execute DIRECT, DELEGATED or PROGRAMME. A useful logical de
 ### R4.A — exact input capsule and residual foundation
 
 - authenticate the exact immediate exploratory parent;
-- reproduce the source-count and six-target baseline gates;
-- construct all-twenty local OOF forecasts and residual rows;
-- establish exact chronological memberships and support.
+- reproduce the distinct row-count and six-target anchor gates;
+- reconstruct the exact all-twenty local and fully pooled linear controls;
+- construct all-twenty OOF residual rows;
+- establish exact chronological memberships and development support.
 
 Immediate consumer: every residual-model family. This is the highest-value independent scientific
 review surface.
 
 ### R4.B — common tensor path and frozen graphs
 
-- materialise causal masked node sequences;
-- freeze canonical node/feature order and exact eligible support;
-- create the fixed graph and explicit shuffled adjacency;
+- materialise causal masked development node sequences;
+- freeze canonical node/feature order and development support;
+- create the fixed graph and non-degenerate shuffled adjacency;
+- implement and smoke the outcome-blind terminal-support path;
 - establish resource and output-shape projections.
 
 R4.B can proceed alongside the later portion of R4.A once the input schema is stable.
@@ -731,8 +822,9 @@ R4.B can proceed alongside the later portion of R4.A once the input schema is st
 
 ### R4P0_G0 — one pre-run acceptance gate
 
-The orchestrator confirms the exact candidate head, causal-boundary review, frozen input/configuration,
-successful smoke, resource/output projections, empty create-only destinations and runtime identities.
+The orchestrator confirms the exact candidate head, boundary review, frozen input/development support,
+terminal eligibility policy, successful smoke, resource/output projections, empty create-only
+destinations and runtime identities.
 
 ### R4.D — development execution
 
@@ -743,7 +835,9 @@ successful smoke, resource/output projections, empty create-only destinations an
 ### R4.E — terminal execution and synthesis
 
 - authenticate the unchanged release and complete development register;
-- execute every eligible predeclared terminal slot once, subject only to unchanged operational retry;
+- materialise and close `R4P0_TERMINAL_SUPPORT` without loading outcome values;
+- execute every eligible predeclared terminal slot, subject only to unchanged operational retry;
+- load terminal outcomes only after exact candidate predictions close;
 - produce exact-common-support metrics, breadth, concentration, seed stability and cost-adjacent
   diagnostics;
 - apply the historical nomination rule mechanically;
@@ -777,21 +871,24 @@ A promising R4-P0 result is a historical hypothesis for future data, not a reaso
 
 R4-P0 is complete when:
 
-1. the exact source/input authenticates and the source-count/baseline gates pass;
+1. the exact source/input authenticates and the distinct row-count, anchor and all-twenty linear-control
+   reconstruction gates pass;
 2. the all-twenty OOF residual foundation is causal and independently reviewed;
-3. every fixed target has frozen positive support in `DEV_2`, `DEV_3` and terminal evaluation;
+3. every fixed target has frozen positive development support and later positive terminal support under
+   the unchanged eligibility rule;
 4. the candidate register, release identity and `R4P0_G0` record are frozen before scientific fits;
-5. every primary slot has a successful, failed or invalidated disposition and every retry is within
+5. `R4P0_TERMINAL_SUPPORT` is materialised outcome-blindly only after development completes;
+6. every primary slot has a successful, failed or invalidated disposition and every retry is within
    section 9;
-6. development and terminal stages respect the declared chronology, stopping isolation and terminal
+7. development and terminal stages respect the declared chronology, stopping isolation and outcome
    boundary;
-7. all required exact-common-support comparisons, capacity disclosures and diagnostics are reported;
-8. the historical hypothesis-nomination rule is applied without post-result expansion or ranking;
-9. the final report is clearly `POST_HOC_HISTORICAL_EXPLORATORY` and states all nonclaims;
-10. focused checks, final exact-head complete verification and required independent reviews pass;
-11. no retained R2/R3 evidence, provider, collector, native protocol or broker boundary is mutated;
-12. `PLAN.md` and `docs/STATUS.md` record the actual accepted R4-P0 result; and
-13. each exact qualifying graph is recorded as `HYPOTHESIS_NOMINATED`, or the run closes
+8. all required exact-common-support comparisons, capacity disclosures and diagnostics are reported;
+9. the historical hypothesis-nomination rule is applied without post-result expansion or ranking;
+10. the final report is clearly `POST_HOC_HISTORICAL_EXPLORATORY` and states all nonclaims;
+11. focused checks, final exact-head complete verification and required independent reviews pass;
+12. no retained R2/R3 evidence, provider, collector, native protocol or broker boundary is mutated;
+13. `PLAN.md` and `docs/STATUS.md` record the actual accepted R4-P0 result; and
+14. each exact qualifying graph is recorded as `HYPOTHESIS_NOMINATED`, or the run closes
     `NO_HYPOTHESIS_NOMINATED`.
 
 Positive forecast skill is not required for completion. R4 graph retention remains unsatisfied until
