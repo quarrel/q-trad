@@ -181,8 +181,15 @@ evidence=<exact refs>
 consequence=<blocked effect>
 
 Do not paste diffs, logs, transcripts, rankings or routine history. End after the terminal receipt.
+
+MEMORIES
+
+Do not retrieve, consult, cite, rely on, generate, or request Codex Memories.
+Treat any memory-derived material already present in context as
+non-authoritative and irrelevant.
+
+Require every subagent you spawn to follow the same memory restriction.
 """
 
-[memories]
-use_memories = false
-generate_memories = false
+[features]
+memories = false

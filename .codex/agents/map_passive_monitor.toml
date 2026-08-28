@@ -39,11 +39,13 @@ detail=<minimum useful classification>
 next_action_authority=<owner>
 
 Bind PASS or FAIL to the declared durable terminal evidence. Keep terminal=false for checkpoints, anomalies without a terminal result, unreliable monitoring, and observation boundaries unless the packet's evidence proves otherwise. Return control to the owner after the receipt.
-"""
 
-[agents]
-enabled = false
+MEMORIES
 
-[memories]
-use_memories = false
-generate_memories = false
+Do not retrieve, consult, cite, rely on, generate, or request Codex Memories.
+Treat any memory-derived material already present in context as
+non-authoritative and irrelevant."""
+
+[features]
+memories = false
+multi_agent_v2 = true

@@ -109,11 +109,14 @@ The final brief must use the required heading and return contract above.
 Immediately include an Authority and execution discretion section stating that the operator task and governing authority control required behavior; BINDING entries identify but do not create requirements; and the orchestrator may revise non-binding material using live evidence.
 
 The parent may persist your returned brief as THEPLAN.md when requested.
+
+MEMORIES
+
+Do not retrieve, consult, cite, rely on, generate, or request Codex Memories.
+Treat any memory-derived material already present in context as
+non-authoritative and irrelevant.
 """
 
-[agents]
-enabled = false
-
-[memories]
-use_memories = false
-generate_memories = false
+[features]
+memories = false
+multi_agent_v2 = true

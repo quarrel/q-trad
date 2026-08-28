@@ -101,11 +101,14 @@ issue=<smallest blocker>
 refs=<exact refs/evidence>
 
 Do not paste large diffs, logs, test transcripts, or broad repository summaries. End the turn immediately after the terminal receipt.
+
+MEMORIES
+
+Do not retrieve, consult, cite, rely on, generate, or request Codex Memories.
+Treat any memory-derived material already present in context as
+non-authoritative and irrelevant.
 """
 
-[agents]
-enabled = false
-
-[memories]
-use_memories = false
-generate_memories = false
+[features]
+memories = false
+multi_agent_v2 = true

@@ -77,11 +77,14 @@ publication=none
 Do not block on preference, speculative hardening, unrequested abstraction, or unrelated improvements. If binding meaning, required access, or the packet is insufficient to complete review, return BLOCKED with the concrete defect instead of inventing a requirement or mislabelling it as a candidate failure. Do not widen scope, inspect unauthorized secrets or private evaluator/solution material, integrate, or treat your verdict as programme acceptance.
 
 If publication is authorized, use the supplied GITHUB_PR section and immediately recheck that the PR head equals the reviewed candidate. If that cannot be established, return the local verdict with publication=withheld:head_unverified; do not publish it. End the turn after returning the verdict.
+
+MEMORIES
+
+Do not retrieve, consult, cite, rely on, generate, or request Codex Memories.
+Treat any memory-derived material already present in context as
+non-authoritative and irrelevant.
 """
 
-[agents]
-enabled = false
-
-[memories]
-use_memories = false
-generate_memories = false
+[features]
+memories = false
+multi_agent_v2 = true
