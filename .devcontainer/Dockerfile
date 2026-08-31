@@ -6,6 +6,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG TILTH_VERSION=0.10.1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,64 +29,71 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash-completion \
         build-essential \
+        conntrack \
         dnsutils \
         docker-cli \
         docker-compose \
         fd-find \
         file \
+        gdb \
         git \
         gh \
+        inotify-tools \
         iproute2 \
+        iputils-ping \
         jq \
         less \
         libatomic1 \
         lsof \
         netcat-openbsd \
         openssh-client \
+        pandoc \
         postgresql-client \
         procps \
         ripgrep \
         rsync \
         shellcheck \
         socat \
+        strace \
         sudo \
+        sysstat \
         tcpdump \
         time \
         tmux \
         traceroute \
         unzip \
         vim \
+        xxd \
         zip \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && ln -s /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
-    && corepack enable \
     && groupadd --gid "${USER_GID}" "${USERNAME}" \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash "${USERNAME}" \
     && echo "${USERNAME} ALL=(root) NOPASSWD:ALL" >/etc/sudoers.d/"${USERNAME}" \
     && chmod 0440 /etc/sudoers.d/"${USERNAME}" \
     && rm -rf /var/lib/apt/lists/*
 
-COPY .devcontainer/codex-install /opt/codex-install
-
-RUN cd /opt/codex-install \
-    && corepack pnpm install --no-frozen-lockfile --ignore-scripts \
-    && case "$(dpkg --print-architecture)" in \
-        amd64) codex_target="x64"; tilth_target="x86_64-unknown-linux-musl" ;; \
-        arm64) codex_target="arm64"; tilth_target="aarch64-unknown-linux-musl" ;; \
-        *) echo "Unsupported development-container architecture" >&2; exit 1 ;; \
-    esac \
+RUN architecture="$(dpkg --print-architecture)" \
+    && if [ "${architecture}" != "amd64" ]; then \
+        echo "Unsupported development-container architecture: ${architecture} (amd64 required)" >&2; \
+        exit 1; \
+    fi \
     && codex_version="$(npm view @openai/codex@latest version)" \
     && npm install --global --prefix /opt/codex-latest --ignore-scripts \
         "@openai/codex@${codex_version}" \
-        "@openai/codex-linux-${codex_target}@npm:@openai/codex@${codex_version}-linux-${codex_target}" \
+        "@openai/codex-linux-x64@npm:@openai/codex@${codex_version}-linux-x64" \
     && /opt/codex-latest/bin/codex --version \
-    && mkdir -p node_modules/tilth/bin \
+    && install -d -m 0755 /opt/tilth/bin \
     && curl -fsSL \
-        "https://github.com/jahala/tilth/releases/download/v0.9.0/tilth-${tilth_target}.tar.gz" \
-        | tar xz -C node_modules/tilth/bin \
-    && chmod 0755 node_modules/tilth/bin/tilth \
+        -o /tmp/tilth.tar.gz \
+        "https://github.com/jahala/tilth/releases/download/v${TILTH_VERSION}/tilth-x86_64-unknown-linux-musl.tar.gz" \
+    && echo "3df16574ed9fc33e4d9c63107994c78d48f93ab0099a37232b4410223e2ad2ea  /tmp/tilth.tar.gz" \
+        | sha256sum -c - \
+    && tar xzf /tmp/tilth.tar.gz -C /opt/tilth/bin \
+    && chmod 0755 /opt/tilth/bin/tilth \
+    && /opt/tilth/bin/tilth --version \
+    && unlink /tmp/tilth.tar.gz \
     && ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex
 
 USER vscode

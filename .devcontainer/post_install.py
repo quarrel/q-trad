@@ -171,7 +171,7 @@ def configure_mcp_servers() -> None:
         "add",
         "tilth",
         "--",
-        "/opt/codex-install/node_modules/.bin/tilth",
+        "/opt/tilth/bin/tilth",
         "--mcp",
         "--edit",
     )
@@ -201,7 +201,7 @@ def configure_mcp_servers() -> None:
         raise RuntimeError("Context7 MCP registration does not match the reviewed command")
 
     tilth = by_name["tilth"]["transport"]
-    if tilth["command"] != "/opt/codex-install/node_modules/.bin/tilth" or tilth["args"] != [
+    if tilth["command"] != "/opt/tilth/bin/tilth" or tilth["args"] != [
         "--mcp",
         "--edit",
     ]:
