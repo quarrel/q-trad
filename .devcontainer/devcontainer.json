@@ -22,6 +22,9 @@
   "postCreateCommand": "uv run --no-project .devcontainer/post_install.py && uv sync --frozen",
   "postStartCommand": "uv run alembic upgrade head && codex remote-control stop && codex remote-control start",
   "waitFor": "postCreateCommand",
+  "mounts": [
+    "source=/mnt/wsl/data/q-trad-bulkdata,target=/data,type=bind"
+  ],  
   "customizations": {
     "vscode": {
       "settings": {
