@@ -65,6 +65,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
+      CODEX_ROLLOUT_TRACE_ROOT: /home/vscode/.codex/sessions/traces
       QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
       QTRAD_MIGRATION_DATABASE_URL: postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
       QTRAD_RESEARCH_ROOT: /workspace/data/research
