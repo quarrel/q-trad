@@ -27,8 +27,7 @@ def test_dev_container_separates_persistent_and_test_postgres() -> None:
         '"postStartCommand": "rm -f /home/vscode/.codex/state_5.sqlite '
         "/home/vscode/.codex/app-server-daemon/app-server-updater.pid "
         "&& uv run alembic upgrade head && codex remote-control stop "
-        '&& sh .devcontainer/start_remote_control.sh"'
-        in devcontainer
+        '&& sh .devcontainer/start_remote_control.sh"' in devcontainer
     )
     assert "/var/run/docker.sock" not in compose
 
