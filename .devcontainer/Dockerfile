@@ -70,6 +70,9 @@ RUN apt-get update \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && groupadd --gid "${USER_GID}" "${USERNAME}" \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash "${USERNAME}" \
+    && install -d -m 0755 -o "${USERNAME}" -g "${USERNAME}" \
+        "/home/${USERNAME}/.cache" \
+        "/home/${USERNAME}/.cache/uv" \
     && echo "${USERNAME} ALL=(root) NOPASSWD:ALL" >/etc/sudoers.d/"${USERNAME}" \
     && chmod 0440 /etc/sudoers.d/"${USERNAME}" \
     && rm -rf /var/lib/apt/lists/*

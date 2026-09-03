@@ -142,11 +142,6 @@ def forward_mcp_environment_variable(server_name: str, variable_name: str) -> No
 
 def configure_mcp_servers() -> None:
     """Replace project MCP registrations sequentially and verify safe identities."""
-    missing_environment = [name for name in ("CONTEXT7_API_KEY",) if not os.environ.get(name)]
-    if missing_environment:
-        missing = ", ".join(missing_environment)
-        raise RuntimeError(f"required MCP environment is missing: {missing}")
-
     configured = json.loads(
         subprocess.run(
             ["codex", "mcp", "list", "--json"],

@@ -20,7 +20,7 @@
     "mkdir -p .devcontainer/local && if [ -f \"$HOME/.codex/AGENTS.md\" ]; then cp \"$HOME/.codex/AGENTS.md\" .devcontainer/local/AGENTS.md; else : > .devcontainer/local/AGENTS.md; fi"
   ],
   "postCreateCommand": "uv run --no-project .devcontainer/post_install.py && uv sync --frozen",
-  "postStartCommand": "uv run alembic upgrade head && codex remote-control stop && codex remote-control start",
+  "postStartCommand": "rm -f /home/vscode/.codex/state_5.sqlite /home/vscode/.codex/app-server-daemon/app-server-updater.pid && uv run alembic upgrade head && codex remote-control stop && sh .devcontainer/start_remote_control.sh",
   "waitFor": "postCreateCommand",
   "mounts": [
     "source=/mnt/wsl/data/q-trad-bulkdata,target=/data,type=bind"
