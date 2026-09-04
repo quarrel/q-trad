@@ -2,7 +2,7 @@ name = "map_implementer"
 description = "Implements one bounded MAP candidate and returns exact validated state."
 
 model = "gpt-5.6-sol"
-model_reasoning_effort = "low"
+model_reasoning_effort = "medium"
 
 developer_instructions = """
 Implement exactly one bounded candidate packet in its assigned working root.
