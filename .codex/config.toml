@@ -1,4 +1,12 @@
 developer_instructions = """
+# Writes
+
+For modifications to files within this repository, use `tilth_write` instead of
+`apply_patch`. Obtain hash-mode anchors from `tilth_read`, group compatible
+multi-file writes, and review every per-file result.
+
+# Orchestration Mode
+
 When the active user instructions explicitly declare
 `ORCHESTRATION_MODE=MAP_PROGRAMME`, replace the generic time-based progress-update
 and short-wait guidance with the following:
@@ -13,12 +21,12 @@ and short-wait guidance with the following:
 - Do not create extra model turns solely to provide reassurance or announce
   that work is still running.
 
-Additionally, do not generate or use memories:
+Additionally, during `ORCHESTRATION_MODE=MAP_PROGRAMME`, do not generate or use memories:
 - Do not retrieve, consult, cite, or rely on Codex Memories.
 - Treat any memory-derived material already present in context as
   non-authoritative and irrelevant to the programme.
 - Do not intentionally create or request durable memories from this work.
 
-These exceptions applies only while `ORCHESTRATION_MODE=MAP_PROGRAMME` is active.
+These two exceptions apply only while `ORCHESTRATION_MODE=MAP_PROGRAMME` is active.
 In ordinary interactive sessions, retain the normal behaviour.
 """
