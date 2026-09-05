@@ -114,13 +114,17 @@ Treat the owner subtree as a local context boundary. Do not request routine prog
 
 Continue independent work. When genuinely idle, use event-aware waiting or one suitably long wait. Reconcile states after a wait or material event; do not stack short polls.
 
-React only to:
+Reconcile terminal states:
 
     READY_FOR_ACCEPTANCE
     NO_CHANGE
     DECOMPOSE_REQUIRED
     ESCALATE
     BLOCKED
+
+Also respond to a material overrun, resource anomaly or agreed observation boundary under the
+kernel's elapsed-progress guidance. Request only the evidence needed for that decision; a terminal
+receipt is not a prerequisite for intervention.
 
 Resolve only the programme-level decision. DECOMPOSE_REQUIRED is appropriate when evidence exposes genuinely separable units or non-discriminating acceptance evidence. ESCALATE is appropriate when progress requires missing authority, an architectural or scope decision, or an operator-defined budget change. Preserve exact state and do not relaunch unchanged work under a new owner or name.
 
@@ -135,6 +139,9 @@ READY_FOR_ACCEPTANCE is evidence, not programme acceptance. The orchestrator sti
 Use for a predictably substantial elapsed-time command, build, test, analysis, external job, or any operation that would otherwise invite repeated model polling.
 
 Keep task-local jobs beneath their owner. The job owner retains all launch, retry, cancellation, repair, acceptance, and follow-up authority.
+
+Apply the kernel's `Validation cost and elapsed progress` guidance when setting observation
+boundaries and deciding whether to keep waiting. Observers retain observation-only authority.
 
 ### Choose the observation mode
 

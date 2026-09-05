@@ -22,9 +22,8 @@ Read the minimum authority needed:
 5. Read `docs/EVIDENCE_GOVERNANCE.md` for identity-bearing contracts, immutable evidence,
    compatibility/migration, plan-classified consequential retained execution, verification, promotion
    or consequential research authority.
-6. Read `docs/DEVELOPMENT.md` for verification, PostgreSQL test and GitHub CI semantics. Read
-   `docs/ENGINEERING.md#performance-and-resource-use` when planning, implementing or reviewing
-   substantial data-processing changes.
+6. Read `docs/ENGINEERING.md` for implementation judgement, performance and testing proportionality;
+   read `docs/DEVELOPMENT.md` for test commands, database isolation and GitHub CI semantics.
 7. Read accepted ADRs and the task-specific runbook only when touching their decision or operation.
 8. When the operator invokes MAP, read `.codex/map/MAP_Orchestrator.md`; MAP owns generic
    multi-agent procedure, candidate search, monitoring, convergence and context rotation.
@@ -94,14 +93,21 @@ Prefer the smallest trustworthy experiment and the smallest clean current contra
 code when its replacement is authoritative. Add infrastructure, processes, dependencies,
 compatibility or abstraction only for a demonstrated current need.
 
-Performance is part of fitness for purpose. Main processing paths must be correct and practical at
-the intended scale in runtime, memory and disk use. Plan data flow and expensive-work reuse before
-implementation; validate material costs at representative scale before claiming completion. Apply
-`docs/ENGINEERING.md#performance-and-resource-use` proportionately and stop once the workload's
-acceptance criteria are met and obvious structural waste is addressed.
+Performance and iteration speed are part of fitness for purpose. Deliver correct, practical results
+at the intended scale with proportionate implementation, testing and coordination cost. Apply
+`docs/ENGINEERING.md` to choose sufficient evidence and stop when the required outcome is established.
 
 Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and application code.
 Unexpected required-field and computation failures propagate with context.
+
+## Execution judgement
+
+Within the authorised task, choose and revise implementation methods, decomposition and focused
+validation using engineering judgement. Resolve routine reversible choices without asking the operator;
+raise only a material ambiguity about the required outcome or a boundary outside existing authority.
+Project priorities and observable acceptance matter more than compliance with an advisory recipe.
+Explain a material departure briefly where it affects review, rather than creating another approval
+or record. This discretion preserves the scientific, evidence and operational boundaries above.
 
 ## Operational baseline
 
@@ -119,16 +125,15 @@ Merged ADRs, scientific invariants, immutable evidence, holdout boundaries and p
 scientific/evidence classes and controls are hard constraints. Tactical file lists, locations,
 implementation mechanisms and PR sequencing are soft unless expressly made binding.
 
-Make the narrowest necessary exception to a soft tactic when it prevents the smallest correct
-implementation, and record the reason. Never resolve a contradiction by silently weakening
-correctness or by preserving obsolete complexity without a current requirement.
+Revise a soft tactic when a simpler or better-supported approach meets the required outcome,
+and explain material changes in the existing review summary. Never resolve a contradiction by
+silently weakening correctness or preserving obsolete complexity without a current requirement.
 
 ## GPU Acceleration
 
-- GPU availability is not a requirement to use it. Choose CPU or GPU from meaningful measured
-  end-to-end benefit on the target hardware, including preparation, transfers and output handling;
-  compare against an appropriately batched/concurrent CPU path. See the engineering performance
-  guidance. Freeze the device and numerical policy before any plan-required execution release.
+- GPU use is an engineering choice under `docs/ENGINEERING.md#performance-and-resource-use`;
+  availability alone does not justify it. Preserve any plan-frozen device and numerical policy.
 - The Dev Container requests GPUs with `gpus: all`. `nvidia-smi` is available.
-- PyTorch or similar will need the correct CUDA wheel index. Consult the operator if there are issues.
+- PyTorch or similar needs a compatible CUDA installation. Resolve routine setup within authorised
+  environment changes; involve the operator only when access or a material decision is missing.
 - Code must check CUDA availability explicitly; CUDA-required work should fail clearly rather than silently run a materially different experiment on CPU.

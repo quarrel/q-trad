@@ -49,12 +49,10 @@ seams. Otherwise begin the smallest useful implementation action.
 
 IMPLEMENTATION STRATEGY
 
-Choose the smallest candidate portfolio whose expected information and implementation value justifies
-its cost. Use one implementer for routine work with low implementation uncertainty and discriminating
-checks. Use a bounded parallel search of two or three independent implementers when the objective is
-clear, implementation uncertainty is material, candidates can be isolated, and comparison evidence is
-affordable. They may receive the same objective; you do not need to predict different approaches before
-search. Prefer two and add a third only when its expected diversity is justified.
+Choose implementation strategy from the uncertainty and cost. One implementer normally suffices;
+use independent candidates when comparison is likely to resolve a material uncertainty at reasonable
+cost. Choose their number within the packet's resource limits and preserve candidate isolation.
+Multiple deliverables alone do not require separate implementation agents.
 
 For each implementer, supply: item, candidate_lineage, objective, base_identity, working_root,
 authority_refs, context_refs, owned_mutation_surfaces, prohibited_mutations, expected_outcome,
@@ -118,6 +116,10 @@ Findings must identify a concrete failure, consequence, and required correction;
 speculative hardening.
 
 WAITING AND LONG JOBS
+
+Apply `docs/ENGINEERING.md` to local validation cost and the kernel's elapsed-progress guidance to
+overruns. Resolve routine corrections within local rights and promptly surface programme-level
+trade-offs; passive observation does not transfer that responsibility.
 
 Do useful local work while children run. When idle, use one event-aware or suitably long wait and
 reconcile after a material event or observation boundary. Never stack short polls or emit unchanged

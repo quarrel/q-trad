@@ -509,21 +509,20 @@ committed candidate head. It records:
 - output root and create-only naming policy;
 - exact-path smoke results for every family;
 - elapsed-time, VRAM/RAM, row/partition and output-size projections with stated margins;
-- shared-preparation work counts and reuse boundaries across the 45 primary fit slots, plus bounded
-  tensor working sets and intermediate-storage lifetimes;
-- the CPU/GPU choice and supporting end-to-end timing evidence, including input preparation,
-  transfers, synchronisation and output handling, against a credible CPU baseline; and
+- evidence that shared preparation, tensor working sets and intermediate storage remain practical
+  across the 45 primary fit slots;
+- the CPU/GPU rationale, with a bounded end-to-end comparison when existing evidence leaves a
+  material device-choice uncertainty; and
 - independent approval of the residual/chronology and terminal-support boundaries.
 
 The smoke uses a correctly shaped bounded sample and exercises the real training, serialisation,
 attempt, support-capsule and result paths. It must not use scientific development or terminal
 performance to choose a configuration. Scientific output destinations are absent or empty before
-acceptance. Apply `docs/ENGINEERING.md#performance-and-resource-use` within this existing gate:
-use outcome-blind smoke/resource evidence to choose the device and establish practical runtime and
-memory/disk acceptance before freezing runtime policy. A bounded sample must exercise the intended
-batching and concurrency; label full-run projections and their assumptions. Reuse valid timing
-evidence when its workload and runtime assumptions still apply. This does not authorise additional
-scientific fits, outcome-based tuning or changes to an already accepted release.
+acceptance. Apply `docs/ENGINEERING.md#performance-and-resource-use` to the evidence needed within
+this gate. Choose the device from outcome-blind feasibility evidence before freezing runtime policy;
+reuse applicable measurements and state projection assumptions. The required exact-path smoke and
+resource projections remain mandatory. This does not authorise additional scientific fits,
+outcome-based tuning or changes to an already accepted release.
 
 `R4P0_G0` is an execution acceptance record, not a promotion or reusable evidence receipt. Any change
 to scientific code, configuration, parent input, terminal eligibility policy, runtime policy or graph
@@ -820,8 +819,8 @@ review surface.
 - share unchanged input preparation across families/seeds and the 45 fit slots where chronology
   permits; keep stage-specific training, residual and support semantics separate;
 - bound tensor batches, simultaneous host/device copies and intermediate-storage lifetimes;
-- establish preparation work counts and end-to-end runtime, resource and output-shape projections,
-  including the CPU/GPU comparison needed before runtime policy is frozen.
+- establish practical preparation cost, resource and output-shape projections; investigate a
+  material CPU/GPU uncertainty before runtime policy is frozen.
 
 R4.B can proceed alongside the later portion of R4.A once the input schema is stable.
 

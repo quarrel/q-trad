@@ -195,8 +195,9 @@ chronology ambiguity before those contracts are fixed.
 ## Completion and documentation rules
 
 - A milestone completes only with focused automated evidence and a concise retained reference.
-- Run the full clean PostgreSQL/static/test gate at code, schema, milestone or release boundaries,
-  not for a documentation-only edit.
+- Follow `docs/DEVELOPMENT.md` for the full clean PostgreSQL/static/test gate at milestone, schema,
+  evidence-boundary or release candidates. Ordinary code iteration uses focused checks; a
+  documentation-only edit does not require the application suite.
 - Keep `PLAN.md` forward-looking, `docs/STATUS.md` factual and `docs/TRADING_RESEARCH.md` stable.
 - Archive superseded chronology and source planning material outside the normal reading path.
 - Add an ADR for a durable costly-to-reverse decision, not a reversible model experiment.

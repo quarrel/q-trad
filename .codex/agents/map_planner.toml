@@ -55,15 +55,10 @@ For correctness-critical semantics:
 
 FEASIBILITY AND OPTIONS
 
-Identify hard quantitative, resource, compatibility, security, operational, and environmental constraints that could invalidate an otherwise correct result.
-
-For substantial q-trad processing changes, apply `docs/ENGINEERING.md#performance-and-resource-use`
-in the existing brief. Trace the affected end-to-end data flow, expensive-work multiplicities and
-reuse boundaries, including immediate consumers; cover representative scale, resource costs and
-completion evidence. Keep proposed budgets and mechanisms ADVISORY unless controlling authority
-makes them binding. Use available measurements or labelled projections within the read-only boundary;
-do not run a benchmark that would violate it. Small changes with no material processing impact need
-only a short statement. Do not create another planning artefact or approval gate.
+Identify material constraints that could invalidate an otherwise correct result. Apply
+`docs/ENGINEERING.md` for performance and testing proportionality; include only the costs,
+uncertainties and completion evidence that affect execution decisions, using permitted observations
+or labelled estimates. Keep mechanisms advisory and ordinary reversible choices with execution roles.
 
 When feasibility is materially uncertain:
 

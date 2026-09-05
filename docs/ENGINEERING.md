@@ -12,66 +12,40 @@
 
 ## Performance and resource use
 
-Correctness includes practical execution at the intended workload. Apply this section to substantial
-ingestion, transformation, verification, feature, fitting, evaluation and export changes, including
-their immediate producers and consumers. Ordinary small changes need engineering judgement; when
-there is no material processing impact, a short statement suffices without a benchmark or checklist.
+q-trad is a single-operator research system: useful results and fast iteration both matter.
+Processing paths must be practical at their intended scale in runtime, memory and disk use.
+Choose the simplest approach that meets the task, and address obvious structural waste.
 
-### Planning
+Before implementing substantial processing changes, give a brief performance argument in the
+existing plan or task notes and update it with the result for review:
+the relevant workload and baseline, dominant costs across stages, reuse boundaries, resource bounds
+and evidence sufficient to establish practical acceptance. Cover only dimensions that could change
+the decision. Use existing budgets or propose reasonable targets from evidence; distinguish estimates
+from measurements. Routine changes need no separate performance section or benchmark.
 
-Include a compact performance section in the existing implementation plan or execution brief:
+Inspect how expensive work scales across rows, partitions, folds, models and consumers. Avoid
+unnecessary scans, decoding, hashing, feature construction, copies and intermediate storage. Bound
+working sets and concurrency, including worker copies and queued work. Reuse unchanged preparation
+where semantics permit, preserving causal fold-specific fits and independent evidence claims.
+Evidence handoffs remain governed by `docs/EVIDENCE_GOVERNANCE.md`.
 
-- **Workload and acceptance:** expected rows, bytes, partitions, instruments, folds/models and target
-  hardware; the baseline and practical runtime, peak RAM/VRAM and temporary/output disk budgets.
-  Distinguish measured facts, projections and proposed targets. Use existing requirements or baseline
-  evidence; absence of a fixed numerical budget alone is not a reason to stop for operator input.
-- **Data flow and work counts:** what each stage reads, computes, retains and writes; how expensive
-  scans, decoding, hashing, feature preparation and fits scale across the affected end-to-end path.
-  Identify shared work, its owner and reuse lifetime, plus work that must remain separate.
-- **Resources and execution:** bound batch sizes, simultaneous representations, queued work, worker
-  copies and intermediate storage. Explain material concurrency and CPU/GPU choices, including data
-  preparation, serialisation and transfers, rather than assuming more workers or GPU use is faster.
-- **Evidence and stopping:** name the representative validation workload, result-equivalence checks,
-  useful work counts and resource measurements. State sufficient acceptance and the limit of tuning;
-  expose a material feasibility gap early rather than repeatedly launching expensive runs.
+Choose CPU or GPU for meaningful end-to-end benefit on the target hardware. When that choice is
+uncertain and material, use a bounded comparison against a credible CPU path, including preparation,
+transfers, synchronisation and output handling. Existing applicable evidence may settle it; do not
+build another backend just to complete a comparison. GPU utilisation alone is not evidence of speed.
+Preserve numerical requirements and any frozen scientific runtime policy.
 
-Keep mechanisms advisory unless an existing authority requires them. Do not invent numerical limits,
-additional approval gates or a line-by-line implementation recipe to fill this section.
+Select evidence to resolve the actual risk: existing measurements, deterministic work counts,
+focused timings, resource projections or a representative end-to-end benchmark. A small sample
+supports only the dimensions it exercises; test or project remaining scale risks with stated
+assumptions. Use elapsed-time and peak-resource measurements when proxies cannot settle feasibility.
+Identify the workload and relevant runtime conditions so evidence can be interpreted and reused.
 
-### Implementation and device choice
-
-Remove avoidable repeated work before adding acceleration. Reuse unchanged expensive preparation
-across consumers where semantics permit; avoid full-data copies, repeated format conversion and
-intermediate materialisation without a current consumer or recovery need. Bound reuse to the
-working set rather than introducing an unbounded cache. Preserve independent verification claims
-and causal fold/training boundaries: shared preparation must not leak future information or replace
-required fold-specific fits. Evidence reuse follows `docs/EVIDENCE_GOVERNANCE.md`.
-
-Choose the simplest execution that meets the workload's needs. When choosing or changing a backend,
-compare a credible CPU path on the operator's target CPU (currently an i9 285K) with GPU execution
-where a benefit is plausible. Include preparation, transfer, synchronisation and output costs in
-elapsed time; GPU utilisation or kernel time alone does not establish acceleration. Use bounded,
-appropriately shaped batches and reuse device-resident data where useful. Do not build a second
-backend merely to benchmark it when existing evidence settles the choice. Keep numerical equivalence
-within the experiment's declared tolerances and choose the device before freezing its runtime policy;
-performance work does not authorise a silent fallback or a change to a frozen scientific release.
-
-### Validation and restraint
-
-Use focused deterministic work-count checks for structural regressions, such as repeated ancestor
-replay, full scans or feature construction. Pair them with representative end-to-end elapsed time and
-peak resource evidence where costs materially change. A tiny fixture proves only the dimensions it
-exercises; use an additional scale point or a justified projection when scaling remains uncertain.
-Record workload, hardware, concurrency and cache state so comparisons are interpretable. Reuse valid
-measurements when the affected path and assumptions are unchanged.
-
-Fix obvious structural waste and stop when correctness and practical acceptance criteria are met.
-If they are missed, inspect the dominant cost and make a targeted correction; revise the plan when
-meeting them requires material redesign. Do not expand into unrelated tuning, generic benchmarking
-infrastructure, new caches, execution frameworks or speculative abstractions. A review finding must
-identify a concrete material cost, violated budget or missing required evidence; the existence of a
-potentially faster alternative alone is not a blocker. This guidance adds no automatic full-suite
-run, scientific execution, consequential-execution classification or independent approval gate.
+Stop when correctness and practical acceptance are established. Investigate the dominant cost if
+they are not; revise the approach when necessary instead of repeatedly launching expensive runs.
+Further optimisation, infrastructure or abstraction needs a concrete current benefit. Review findings
+must identify material waste, a violated requirement or an unresolved risk, rather than a merely
+possible faster alternative. This guidance creates no additional scientific execution or approval gate.
 
 ## Python
 
@@ -99,13 +73,10 @@ run, scientific execution, consequential-execution classification or independent
 
 ## Sprawl controls
 
-An ADR is required before adding:
-
-- a top-level package;
-- another deployable process or image;
-- another datastore, cache or message queue;
-- a web framework or large runtime library;
-- a second implementation of an existing port.
+Add infrastructure or abstraction only for a demonstrated current need. A new package, deployable
+process, datastore, framework or port implementation deserves scrutiny for the complexity it adds.
+Use an ADR when the decision is durable and costly to reverse or an existing authority requires one;
+a reversible local implementation choice does not need an ADR merely because it fits that list.
 
 Do not scaffold future strategy/execution packages until their phase begins.
 
@@ -119,6 +90,28 @@ Do not scaffold future strategy/execution packages until their phase begins.
 - Credential-gated and soak tests are never reported as passing when skipped.
 - Measure branch coverage against the PostgreSQL-backed suite; use it to find untested
   operational paths rather than as a substitute for scenario quality.
+
+### Testing proportionality
+
+Protect meaningful behaviour with the smallest discriminating test. Preserve the real integration,
+persistence, causal or scale boundary being tested; choose fixtures, parameter sets and test doubles
+accordingly. Reversible low-impact edits need no new test that merely mirrors the implementation.
+
+Treat test runtime, including setup/teardown and cumulative reruns, as an engineering cost. Use existing
+duration evidence or focused measurement to assess materially expensive additions. A test that adds
+30 minutes to a four-minute suite needs redesign or a justified separate invocation before acceptance.
+Genuinely necessary scale/endurance checks belong at a documented run boundary, with actual selection
+keeping them out of routine iteration. Preserve required claims and gates; never hide a slowdown by
+silently dropping coverage or report an interrupted/skipped check as passing.
+
+Choose focused checks during iteration and the complete gate at the boundaries in
+`docs/DEVELOPMENT.md`. Once sufficient evidence passes, repeat or broaden checks only for a change,
+failure or unresolved concern that affects it. Carry forward unaffected evidence with its provenance;
+required final-candidate checks still apply. Reviewers assess evidence rather than routinely rerunning
+it. Stop when required behaviour and practical validation cost are established.
+
+Owners account for validation cost and reassess unexpected slowdowns before equivalent reruns.
+MAP's `Validation cost and elapsed progress` section owns programme-level intervention.
 
 ## External connection lifecycle
 
@@ -146,9 +139,8 @@ Do not scaffold future strategy/execution packages until their phase begins.
 - `uv run pyright`
 - `uv run ty check`
 
-Run focused checks during iteration and the complete clean database/static/test gate at a milestone
-or release boundary. Credential-gated and endurance tests are required only when their behaviour is
-under change; never report a skipped gate as passing.
+Follow `docs/DEVELOPMENT.md` for complete-gate boundaries and invocation. Run credential-gated and
+endurance checks when required by the changed behaviour or active plan; report skipped checks accurately.
 
 ## Documentation budget
 
@@ -157,3 +149,7 @@ under change; never report a skipped gate as passing.
 - Update only documents whose claims changed; an ordinary code change does not require edits to
   every governance file.
 - Use an ADR for a durable, costly-to-reverse decision, not a reversible experiment detail.
+- Maintain one home for each engineering principle; role instructions should reference it and state
+  responsibility. After an incident, first determine whether an existing rule, a code regression
+  test or clearer project context addresses the cause. Consolidate overlapping guidance instead of
+  accumulating mandatory procedures. Keep model-specific tuning separate from durable project rules.

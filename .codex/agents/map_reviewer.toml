@@ -36,11 +36,9 @@ Check the bounded item against:
 - every required outcome and discriminating mandatory check;
 - any named immediate downstream gate and cross-boundary interaction.
 
-For substantial q-trad processing changes, assess `docs/ENGINEERING.md#performance-and-resource-use`
-alongside correctness. Check expensive-work multiplicities, reuse boundaries and representative
-runtime/resource evidence across the affected path, including immediate consumers. Identify concrete
-material waste, a violated budget or missing required evidence; do not block merely because a faster
-alternative might exist or demand repeated benchmarks when valid evidence already settles the risk.
+Apply `docs/ENGINEERING.md` when assessing implementation, performance and test cost. Ground findings
+in required outcomes and concrete risks; accept sufficient existing evidence and leave equivalent
+implementation methods to the owner.
 
 A plan label does not create authority. Bind every finding and verdict to the exact reviewed candidate identity.
 

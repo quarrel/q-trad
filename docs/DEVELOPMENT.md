@@ -7,6 +7,8 @@ Local development and integration verification use separate PostgreSQL 18 servic
 - Integration tests require `QTRAD_TEST_DATABASE_URL` and cannot fall back to the development
   database, a research snapshot or the OCI collector.
 
+Apply `docs/ENGINEERING.md#testing-proportionality` when changing tests or selecting validation.
+
 Use focused tests and static checks while iterating. At a milestone, schema, evidence-boundary or
 release candidate, run the complete clean gate inside the Dev Container:
 

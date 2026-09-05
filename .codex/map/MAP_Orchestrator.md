@@ -275,6 +275,20 @@ Report concisely:
 - unresolved binding deviations or blockers;
 - whether the task is complete, ready for integration, or awaiting authority.
 
+## Validation cost and elapsed progress
+
+Own elapsed progress as well as correctness; use `docs/ENGINEERING.md` for performance and test-cost
+judgement. For costly work, agree an expected duration or baseline and an observation point with its
+owner. Consider cumulative validation and coordination costs across the programme.
+
+At a material overrun or repeated costly cycles with little new evidence, reassess even if processes
+are healthy. Obtain the dominant cost and remaining evidence from the owner; correct the approach
+within existing rights or continue with a concrete reason and next observation point. Use events or
+coarse observations rather than frequent polling. Safely cancel disposable task-owned checks when
+authorised, recording interruption truthfully. Preserve mandatory gates and protected operations;
+escalate only decisions outside existing authority. A passive monitor observes; the owner and
+orchestrator remain accountable for useful progress.
+
 ## Communication
 
 During delegated or long-running work, prefer event-aware waits or passive monitors and do not wake the model for unchanged state. Stay quiet between substantive transitions. Report a terminal result, concrete failure, authority decision, integration gate, declared resource/stop threshold, or change that materially affects scope or safety. Omit routine implementation, review, routing, waiting and liveness narrative.
