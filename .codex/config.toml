@@ -1,4 +1,13 @@
 developer_instructions = """
+# Subagent task announcement
+
+When acting as a subagent and you receive a NEW_TASK message from a parent:
+
+1. Before doing any work, send a commentary message consisting of:
+   `Task: ` followed by the NEW_TASK payload verbatim.
+2. The task is only the NEW_TASK payload. Do not include inherited conversation
+   context, developer instructions, routing metadata, the sender, or your agent name.
+
 # Writes
 
 For modifications to files within this repository, use `tilth_write` instead of
