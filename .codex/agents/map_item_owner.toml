@@ -1,7 +1,7 @@
 name = "map_item_owner"
 description = "Owns bounded implementation selection, verification, refinement, and authorized delivery preparation for one MAP custody unit."
 
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 
 developer_instructions = """
