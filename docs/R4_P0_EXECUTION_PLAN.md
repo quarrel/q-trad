@@ -508,13 +508,22 @@ committed candidate head. It records:
 - Python, lockfile/application, PyTorch, CUDA, GPU/device and relevant numerical-library identity;
 - output root and create-only naming policy;
 - exact-path smoke results for every family;
-- elapsed-time, VRAM/RAM, row/partition and output-size projections with stated margins; and
+- elapsed-time, VRAM/RAM, row/partition and output-size projections with stated margins;
+- shared-preparation work counts and reuse boundaries across the 45 primary fit slots, plus bounded
+  tensor working sets and intermediate-storage lifetimes;
+- the CPU/GPU choice and supporting end-to-end timing evidence, including input preparation,
+  transfers, synchronisation and output handling, against a credible CPU baseline; and
 - independent approval of the residual/chronology and terminal-support boundaries.
 
 The smoke uses a correctly shaped bounded sample and exercises the real training, serialisation,
 attempt, support-capsule and result paths. It must not use scientific development or terminal
 performance to choose a configuration. Scientific output destinations are absent or empty before
-acceptance.
+acceptance. Apply `docs/ENGINEERING.md#performance-and-resource-use` within this existing gate:
+use outcome-blind smoke/resource evidence to choose the device and establish practical runtime and
+memory/disk acceptance before freezing runtime policy. A bounded sample must exercise the intended
+batching and concurrency; label full-run projections and their assumptions. Reuse valid timing
+evidence when its workload and runtime assumptions still apply. This does not authorise additional
+scientific fits, outcome-based tuning or changes to an already accepted release.
 
 `R4P0_G0` is an execution acceptance record, not a promotion or reusable evidence receipt. Any change
 to scientific code, configuration, parent input, terminal eligibility policy, runtime policy or graph
@@ -808,7 +817,11 @@ review surface.
 - freeze canonical node/feature order and development support;
 - create the fixed graph and non-degenerate shuffled adjacency;
 - implement and smoke the outcome-blind terminal-support path;
-- establish resource and output-shape projections.
+- share unchanged input preparation across families/seeds and the 45 fit slots where chronology
+  permits; keep stage-specific training, residual and support semantics separate;
+- bound tensor batches, simultaneous host/device copies and intermediate-storage lifetimes;
+- establish preparation work counts and end-to-end runtime, resource and output-shape projections,
+  including the CPU/GPU comparison needed before runtime policy is frozen.
 
 R4.B can proceed alongside the later portion of R4.A once the input schema is stable.
 

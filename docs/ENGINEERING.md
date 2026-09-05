@@ -10,6 +10,69 @@
 - Treat completed verification of immutable evidence as reusable evidence. Downstream boundaries independently verify their own claims rather than recursively replaying unchanged ancestors unless a confirmatory or revocation policy requires it.
 - Scope cache and verification identities to semantics capable of changing the protected claim. Logging, documentation and presentation changes must not invalidate data-scale work.
 
+## Performance and resource use
+
+Correctness includes practical execution at the intended workload. Apply this section to substantial
+ingestion, transformation, verification, feature, fitting, evaluation and export changes, including
+their immediate producers and consumers. Ordinary small changes need engineering judgement; when
+there is no material processing impact, a short statement suffices without a benchmark or checklist.
+
+### Planning
+
+Include a compact performance section in the existing implementation plan or execution brief:
+
+- **Workload and acceptance:** expected rows, bytes, partitions, instruments, folds/models and target
+  hardware; the baseline and practical runtime, peak RAM/VRAM and temporary/output disk budgets.
+  Distinguish measured facts, projections and proposed targets. Use existing requirements or baseline
+  evidence; absence of a fixed numerical budget alone is not a reason to stop for operator input.
+- **Data flow and work counts:** what each stage reads, computes, retains and writes; how expensive
+  scans, decoding, hashing, feature preparation and fits scale across the affected end-to-end path.
+  Identify shared work, its owner and reuse lifetime, plus work that must remain separate.
+- **Resources and execution:** bound batch sizes, simultaneous representations, queued work, worker
+  copies and intermediate storage. Explain material concurrency and CPU/GPU choices, including data
+  preparation, serialisation and transfers, rather than assuming more workers or GPU use is faster.
+- **Evidence and stopping:** name the representative validation workload, result-equivalence checks,
+  useful work counts and resource measurements. State sufficient acceptance and the limit of tuning;
+  expose a material feasibility gap early rather than repeatedly launching expensive runs.
+
+Keep mechanisms advisory unless an existing authority requires them. Do not invent numerical limits,
+additional approval gates or a line-by-line implementation recipe to fill this section.
+
+### Implementation and device choice
+
+Remove avoidable repeated work before adding acceleration. Reuse unchanged expensive preparation
+across consumers where semantics permit; avoid full-data copies, repeated format conversion and
+intermediate materialisation without a current consumer or recovery need. Bound reuse to the
+working set rather than introducing an unbounded cache. Preserve independent verification claims
+and causal fold/training boundaries: shared preparation must not leak future information or replace
+required fold-specific fits. Evidence reuse follows `docs/EVIDENCE_GOVERNANCE.md`.
+
+Choose the simplest execution that meets the workload's needs. When choosing or changing a backend,
+compare a credible CPU path on the operator's target CPU (currently an i9 285K) with GPU execution
+where a benefit is plausible. Include preparation, transfer, synchronisation and output costs in
+elapsed time; GPU utilisation or kernel time alone does not establish acceleration. Use bounded,
+appropriately shaped batches and reuse device-resident data where useful. Do not build a second
+backend merely to benchmark it when existing evidence settles the choice. Keep numerical equivalence
+within the experiment's declared tolerances and choose the device before freezing its runtime policy;
+performance work does not authorise a silent fallback or a change to a frozen scientific release.
+
+### Validation and restraint
+
+Use focused deterministic work-count checks for structural regressions, such as repeated ancestor
+replay, full scans or feature construction. Pair them with representative end-to-end elapsed time and
+peak resource evidence where costs materially change. A tiny fixture proves only the dimensions it
+exercises; use an additional scale point or a justified projection when scaling remains uncertain.
+Record workload, hardware, concurrency and cache state so comparisons are interpretable. Reuse valid
+measurements when the affected path and assumptions are unchanged.
+
+Fix obvious structural waste and stop when correctness and practical acceptance criteria are met.
+If they are missed, inspect the dominant cost and make a targeted correction; revise the plan when
+meeting them requires material redesign. Do not expand into unrelated tuning, generic benchmarking
+infrastructure, new caches, execution frameworks or speculative abstractions. A review finding must
+identify a concrete material cost, violated budget or missing required evidence; the existence of a
+potentially faster alternative alone is not a blocker. This guidance adds no automatic full-suite
+run, scientific execution, consequential-execution classification or independent approval gate.
+
 ## Python
 
 - Python 3.13, frozen dataclasses and strict typing in core packages.

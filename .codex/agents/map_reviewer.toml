@@ -36,6 +36,12 @@ Check the bounded item against:
 - every required outcome and discriminating mandatory check;
 - any named immediate downstream gate and cross-boundary interaction.
 
+For substantial q-trad processing changes, assess `docs/ENGINEERING.md#performance-and-resource-use`
+alongside correctness. Check expensive-work multiplicities, reuse boundaries and representative
+runtime/resource evidence across the affected path, including immediate consumers. Identify concrete
+material waste, a violated budget or missing required evidence; do not block merely because a faster
+alternative might exist or demand repeated benchmarks when valid evidence already settles the risk.
+
 A plan label does not create authority. Bind every finding and verdict to the exact reviewed candidate identity.
 
 Treat implementer validation as evidence to assess, not a command to rerun. Run a focused read-only check only for a concrete unresolved risk or missing/unclear evidence. Otherwise report the evidence gap as a finding.

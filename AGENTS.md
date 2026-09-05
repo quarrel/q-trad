@@ -22,7 +22,9 @@ Read the minimum authority needed:
 5. Read `docs/EVIDENCE_GOVERNANCE.md` for identity-bearing contracts, immutable evidence,
    compatibility/migration, plan-classified consequential retained execution, verification, promotion
    or consequential research authority.
-6. Read `docs/DEVELOPMENT.md` for verification, PostgreSQL test and GitHub CI semantics.
+6. Read `docs/DEVELOPMENT.md` for verification, PostgreSQL test and GitHub CI semantics. Read
+   `docs/ENGINEERING.md#performance-and-resource-use` when planning, implementing or reviewing
+   substantial data-processing changes.
 7. Read accepted ADRs and the task-specific runbook only when touching their decision or operation.
 8. When the operator invokes MAP, read `.codex/map/MAP_Orchestrator.md`; MAP owns generic
    multi-agent procedure, candidate search, monitoring, convergence and context rotation.
@@ -92,6 +94,12 @@ Prefer the smallest trustworthy experiment and the smallest clean current contra
 code when its replacement is authoritative. Add infrastructure, processes, dependencies,
 compatibility or abstraction only for a demonstrated current need.
 
+Performance is part of fitness for purpose. Main processing paths must be correct and practical at
+the intended scale in runtime, memory and disk use. Plan data flow and expensive-work reuse before
+implementation; validate material costs at representative scale before claiming completion. Apply
+`docs/ENGINEERING.md#performance-and-resource-use` proportionately and stop once the workload's
+acceptance criteria are met and obvious structural waste is addressed.
+
 Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and application code.
 Unexpected required-field and computation failures propagate with context.
 
@@ -117,6 +125,10 @@ correctness or by preserving obsolete complexity without a current requirement.
 
 ## GPU Acceleration
 
+- GPU availability is not a requirement to use it. Choose CPU or GPU from meaningful measured
+  end-to-end benefit on the target hardware, including preparation, transfers and output handling;
+  compare against an appropriately batched/concurrent CPU path. See the engineering performance
+  guidance. Freeze the device and numerical policy before any plan-required execution release.
 - The Dev Container requests GPUs with `gpus: all`. `nvidia-smi` is available.
 - PyTorch or similar will need the correct CUDA wheel index. Consult the operator if there are issues.
 - Code must check CUDA availability explicitly; CUDA-required work should fail clearly rather than silently run a materially different experiment on CPU.

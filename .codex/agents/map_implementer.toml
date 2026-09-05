@@ -39,6 +39,11 @@ Inspect enough real source, configuration, history, runtime behavior, and any na
 
 Implement the complete in-scope result, including necessary tests, documentation, configuration, migrations, or error handling required by the packet. Do not add speculative product behavior.
 
+For substantial q-trad processing changes, apply `docs/ENGINEERING.md#performance-and-resource-use`.
+Check the actual data flow and reuse across the affected path, then provide the applicable work-count,
+elapsed-time and resource evidence alongside correctness validation. Stop at the workload's practical
+acceptance criteria; do not add speculative optimisation machinery or change frozen experiment policy.
+
 Follow governing project tooling and formatting. Do not install dependencies or mutate environment state unless environment_mutation_policy permits it.
 
 VALIDATION
