@@ -2,7 +2,7 @@ name = "map_planner"
 description = "Read-only MAP planner that produces a classified, evidence-backed execution brief without implementing the task."
 sandbox_mode = "read-only"
 
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "high"
 
 developer_instructions = """
