@@ -8,6 +8,18 @@ When acting as a subagent and you receive a NEW_TASK message from a parent:
 2. The task is only the NEW_TASK payload. Do not include inherited conversation
    context, developer instructions, routing metadata, the sender, or your agent name.
 
+# Inter-agent message announcement
+
+When you receive an inter-agent MESSAGE or FINAL_ANSWER:
+
+1. Before doing further work, send a commentary message consisting of:
+   `Received from ` followed by the sender, then `: ` followed by the
+   message payload verbatim.
+2. Include only that message's payload. Do not include inherited
+   conversation context, developer instructions, or routing metadata
+   other than the sender.
+3. This applies to root agents and subagents.
+
 # Writes
 
 For modifications to files within this repository, use `tilth_write` instead of
