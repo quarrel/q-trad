@@ -1,6 +1,6 @@
 # R4-P0 execution plan — bounded residual structural graph historical screen
 
-- **Status:** DRAFT FOR OPERATOR REVIEW; no R4 execution authority yet
+- **Status:** OPERATOR-APPROVED R4-P0; stopped for hand-off, with restart preparation approved (2026-09-06)
 - **Milestone:** R4-P0 — historical residual-graph hypothesis screen
 - **Experiment class:** `POST_HOC_HISTORICAL_EXPLORATORY`
 - **Source class:** `IBKR_HISTORICAL_RESEARCH`
@@ -10,9 +10,12 @@
   production endpoint or real-capital path
 - **Planning base:** `8b82297c0c873964c66183d84878f3680ef7cc65`
 
-This document becomes active R4-P0 execution authority only after operator approval. Until then it is a
-review draft and does not change `PLAN.md`, `docs/STATUS.md` or the current statement that R4 is not
-started or authorised.
+The operator authorised this exploratory programme on 2026-08-28. Execution stopped for hand-off on
+2026-09-06; the operator subsequently approved the retrospective recommendations and changes to
+the governing guidance. See `docs/STATUS.md` for the recorded candidate, evidence and next transition.
+Read this plan together with applicable operator-approved scientific/numerical amendments referenced
+by the programme record; adopting current guidance does not revert them. These documentation changes
+do not record a resumed run or satisfy R4's held-out retention gate.
 
 ## 1. Authority and execution discretion
 
@@ -526,7 +529,17 @@ outcome-based tuning or changes to an already accepted release.
 
 `R4P0_G0` is an execution acceptance record, not a promotion or reusable evidence receipt. Any change
 to scientific code, configuration, parent input, terminal eligibility policy, runtime policy or graph
-identity invalidates it and requires a fresh gate for the new exact head.
+identity invalidates it and requires a fresh gate for the new exact head. Any other head change still
+requires acceptance bound to that head, with the changed assumptions assessed explicitly.
+Under `docs/EVIDENCE_GOVERNANCE.md#identity-classes`, a fresh acceptance may reference authenticated,
+unchanged preparation, boundary reviews and smoke evidence whose claims remain applicable. Repeat
+the affected checks; do not rebuild data-scale evidence solely to change documentation, operating
+guidance or an incidental output location. Retain original provenance and all mandatory G0 claims.
+
+G0 composition is a metadata operation over accepted inputs. Use bounded conventional execution and
+independent review of the required output content and identities. MAP `LONGRUN` governs observation
+and control-failure adjudication; it does not add scientific fits or an exhaustive temporary-directory
+inventory to this gate.
 
 ### 9.2 Primary fit slots and attempt recording
 
@@ -536,7 +549,9 @@ The closed release contains 45 primary fit slots:
 5 fitted residual families × 3 model seeds × 3 chronological stages
 ```
 
-Linear-control reconstructions and smoke fits are logged separately and are not scientific candidates.
+The stages comprise 30 development slots (`DEV_2` and `DEV_3`) and 15 separately gated terminal
+slots. Linear-control reconstructions and smoke fits are logged separately and are not scientific
+candidates.
 
 Immediately before model initialisation/training, append a unique attempt record with at least release
 ID, slot ID, family, seed, stage, exact input/configuration/runtime identity, output destination and
@@ -565,10 +580,21 @@ operational retry.
 
 ### 9.4 Correctness repair and release replacement
 
-Before terminal execution begins, a concrete implementation defect may be repaired without changing
-the authorised scientific question or candidate register. The affected release is marked
-`RUN_INVALIDATED_IMPLEMENTATION`; affected results remain retained. The orchestrator may authorise
-one corrected release under this plan when:
+Distinguish implementation iterations from scientific release replacement. Before the first
+substantive fit in a candidate release starts under section 9.2, outcome-blind implementation,
+preparation, smoke and
+controller failures do not consume a scientific retry or corrected-release allowance. Retain failed
+invocations and partial evidence, correct the owning mechanism, and update exact-head acceptance and
+affected checks. Explicit operation/resource limits still apply. This classification does not reset
+historical attempts or allowances, or authorise changes to the scientific question or frozen policy.
+
+After a substantive fit starts, an outcome-blind controller/reporting correction that leaves
+scientific code, configuration, inputs and numerical/runtime policy unchanged remains an
+implementation repair. It grants no additional fit; resuming or repeating a slot remains governed by
+its attempt state and section 9.3. If a concrete implementation defect invalidates started scientific
+work before terminal execution, preserve affected results and mark the affected release
+`RUN_INVALIDATED_IMPLEMENTATION`. The orchestrator may authorise one corrected scientific release
+under this plan when:
 
 - the defect and affected slots are identified independently of candidate performance;
 - the candidate register and scientific meaning remain unchanged;
@@ -576,8 +602,11 @@ one corrected release under this plan when:
 - all slots from the earliest affected stage are rerun consistently, not only favourable or failed
   candidates.
 
-A second corrected release, a performance-motivated change or any scientific configuration change
-requires fresh operator authority.
+A second corrected scientific release, a change motivated by observed model performance, or a
+scientific configuration/numerical/runtime-policy change requires fresh operator authority.
+Outcome-blind efficiency improvements within the unchanged scientific and numerical/runtime policy
+are implementation work; assess their evidence impact under section 9.1 rather than treating computing
+speed as model-performance selection.
 
 Once terminal execution begins, any scientific code, configuration, graph, support policy or
 runtime-policy change closes the release as invalidated or failed and requires fresh operator

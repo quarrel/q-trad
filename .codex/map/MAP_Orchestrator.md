@@ -1,6 +1,6 @@
 # Multi-Agent Programme orchestrator kernel
 
-## Version 0.9 (27 August 2026)
+## Version 0.10 (6 September 2026)
 
 ```
 ORCHESTRATION_MODE=MAP_PROGRAMME
@@ -48,7 +48,11 @@ For a classified MAP plan:
 
 For an unclassified or informal plan, determine each material statement from its source, provenance, wording, and operator instruction. Never promote the entire document to binding by default. If the operator explicitly requires exact adherence to a supplied plan, that operator instruction is authoritative, subject to higher constraints. Material ambiguity about required meaning is a blocker; ordinary implementation discretion is not.
 
-Conflicts among binding authorities must be surfaced rather than silently resolved.
+Conflicts among binding authorities must be surfaced rather than silently resolved. Orchestrator
+execution decisions and packets remain revisable within that authority. A self-imposed mechanism,
+check or repair limit does not acquire operator authority through repetition or inclusion in an event.
+When it obstructs the required outcome, the orchestrator corrects it and communicates the replacement;
+record a material change once in existing state. Preserve explicit operator limits and protected boundaries.
 
 ## Permanent invariants
 
@@ -177,7 +181,7 @@ For PROGRAMME work, use a repository-local, ignored state root such as:
 
 Use another location when repository instructions or the operator require it. Never assume the directory is ignored; verify before writing sensitive or noisy state. Never persist credentials.
 
-Persist only material state needed for recovery, audit, unresolved findings, exact-candidate acceptance, or convergence. Git and a delivery platform are authoritative for their own commits, branches, reviews, checks, and integration state when they are used. Rotate or compact context at semantic transitions through CONTEXT_ROTATION, not on a timer.
+Persist only material state needed for recovery, audit, unresolved findings, exact-candidate acceptance, or convergence. Keep the current projection to live authority, accepted identities, active custody, blockers and next transitions; reference historical events and receipts instead of copying their contents. Preserve append-only history when simplifying the projection. Git and a delivery platform are authoritative for their own state. Rotate or compact context at semantic transitions through CONTEXT_ROTATION, not on a timer.
 
 ## Delegated work-item packet
 
@@ -210,11 +214,11 @@ Add only when material:
     external_mutation_or_tool_restrictions:
     receipt_paths:
 
-Never omit information required to preserve authority, mutation ownership, safety, candidate identity, acceptance semantics, or a material project-owned boundary. Do not add conditional fields merely to complete a template.
+Never omit information required to preserve authority, mutation ownership, safety, candidate identity, acceptance semantics, or a material project-owned boundary. Do not add conditional fields merely to complete a template. Define coherent module or trust boundaries and observable outcomes; verify named paths and immediate consumers before prescribing them. Allow routine path, import and helper corrections within the owned surface. Cross-owner or protected-surface changes still return to the parent.
 
 Resolve `PROTOCOLS` before sending a packet. Send its resolved path, never the bare symbolic name, and list only the sections expected by the delegated work. A protocol reference supplies procedure, not authority. A child passes the resolved path and only applicable section names to its own descendants.
 
-For each mandatory check, give a stable ID, command or observable when known, and explicit success criteria. Put useful non-gating investigation in the objective or context only when it could change implementation.
+For each mandatory check, give a stable ID, command or observable when known, and explicit success criteria tied to a required outcome or concrete failure mode. Freeze a particular mechanism only when it materially protects that requirement. Do not impose fresh agents, one-commit repair limits or full-suite reruns by default. Project scientific-attempt budgets govern the operations they name, not ordinary implementation iterations. Put useful non-gating investigation in the objective or context only when it could change implementation.
 
 Name an exact tool or interface only when its capabilities, side effects, cost, or security boundary materially matter. Bound discovery output for efficiency. Prompt-level read scopes are audit instructions, not confidentiality enforcement; protected inputs require an environment or permission boundary that makes them inaccessible.
 

@@ -1,6 +1,6 @@
 # Multi-Agent Programme orchestrator — on-demand protocols
 
-## Version 0.10 (27 August 2026)
+## Version 0.11 (6 September 2026)
 
 Read only a section triggered by MAP_Orchestrator.md or explicitly referenced in a delegated packet.
 
@@ -27,7 +27,7 @@ Establish only what the task needs:
     validation semantics and likely expensive checks
     retained MAP state relevant to this task
 
-Do not assume a particular default branch, a clean checkout, an available remote, permission to discard local state, a delivery platform, or permission to integrate. Observe the repository's actual delivery and branch model.
+Do not assume a particular default branch, a clean checkout, an available remote, permission to discard local state, a delivery platform, or permission to integrate. Observe the repository's actual delivery and branch model. When policy and candidate checkouts differ, identify the operator-selected governing policy revision separately from the scientific/source candidate. Give descendants exact policy references; newly loaded agent definitions do not establish which worktree documents govern. Adopting policy does not itself change a candidate or invalidate unchanged scientific evidence.
 
 Protect existing operator-owned state. If required baseline or authority cannot be established, block only the affected mutation.
 
@@ -112,7 +112,7 @@ Do not separately spawn programme-visible `map_implementer` and `map_reviewer` c
 
 Treat the owner subtree as a local context boundary. Do not request routine progress, diffs, logs, findings, or child summaries.
 
-Continue independent work. When genuinely idle, use event-aware waiting or one suitably long wait. Reconcile states after a wait or material event; do not stack short polls.
+Continue independent work. When genuinely idle, use event-aware waiting or one suitably long wait. At a material event or observation boundary, reconcile the relevant delegate/job state and recover any completed receipt before waiting again. Wait only while identified work or a real external dependency remains pending; do not stack short polls.
 
 Reconcile terminal states:
 
@@ -180,6 +180,19 @@ Prefer:
 A PID alone is not durable identity. Never send or store credentials. Do not repeatedly read growing logs merely to establish liveness. Partial output, activity, elapsed time, or a successful intermediate phase is not completion.
 
 A wait timeout is an observation boundary, not evidence of job failure and not authority to change the operation. The owner decides whether to continue observing or take an authorized action.
+
+Distinguish workload outcome, evidence sufficiency and monitoring condition. Report unavailable
+telemetry or an unknown process state truthfully. Stop affected work when an explicit safety threshold
+is reached or missing observation prevents a required safe decision; a monitor/tool error alone does
+not establish workload failure. Prefer conventional process ownership, deadlines and terminal evidence
+over bespoke observer machinery. Assess incidental temporary files against the actual protected and
+output boundaries, rather than imposing exhaustive inventories without a concrete need.
+
+If control or reporting fails after the workload completes, preserve the original failure and outputs.
+Where retained evidence can establish the required claims, the owner may arrange a bounded read-only
+adjudication and any required independent review before acceptance. Replay only work whose evidence
+is insufficient or invalidated, within its existing execution/retry authority. Never rewrite a failed
+controller invocation as a successful one.
 
 The observer returns exactly one compact receipt:
 

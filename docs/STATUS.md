@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-08-26
-**Current milestone:** R3 — cost and portfolio baseline (COMPLETE); R4 is not started or authorised
+**Updated:** 2026-09-06 (R4-P0 only; earlier operational observations retain their original dates)
+**Current milestone:** R4-P0 historical exploratory screen — stopped for hand-off; restart preparation approved. R3 is complete; R4 held-out retention remains unsatisfied.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
 **Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md` and `docs/archive/r3/R3_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
@@ -26,6 +26,37 @@ R3.A–R3.G implement the deterministic cost, ordered-risk, persistent virtual-p
 The mandatory R3.H report is `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md` (SHA-256 `74a371a5f4481893be1608072a3ee641b2d347b13f447156bab75e8ca5034b4d`; semantic identity `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`). It is `HISTORICAL_EXPLORATORY`, uses `IBKR_HISTORICAL_RESEARCH` MIDPOINT OHLC and makes no effectiveness, executable-alpha, native-validity, profitability, order or promotion claim.
 
 Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0.584 bps, and the aggregate was negative at the first tested 5-bps cost. Gold and US-500 remained positive through 10 bps but not 20 bps; crude and EUR/USD were negative before costs. Pooled-local was the best quick diagnostic but inconclusive on support 12; nonlinear Huber failed; fixed and tiny learned graphs were negative. Nothing supports cancelling or promoting the future R4 graph experiment.
+
+## R4-P0 hand-off and restart preparation (2026-09-06)
+
+The operator authorised the `POST_HOC_HISTORICAL_EXPLORATORY` screen on 2026-08-28, stopped
+execution on 2026-09-06, and subsequently approved the retrospective recommendations and updates to
+the governing guidance. The recorded programme state remains `STOPPED_OPERATOR_HANDOFF`; no
+resumed execution or completed scientific result is claimed.
+
+- Candidate: `faef6462c6929da7e91eea12970a72e53a2647e6`, clean at the hand-off and retrospective check.
+- Generation-8 preparation/reference and five-family smoke have recorded acceptance (smoke event
+  358). Generation-8 G0 is not created or accepted; its scientific development execution has not started.
+- Earlier generation 6 did start one development slot and failed during persistence (event 149).
+  Preserve that attempt and all failed or invalidated evidence; no successful scientific slot or
+  terminal outcome access is recorded at the hand-off.
+- GPU/host instability interrupted earlier work. The operator reports recovery following external
+  environment/driver changes; the exact cause is unconfirmed. This is distinct from subsequent
+  controller and telemetry-classification defects and is not a current driver-remediation task.
+
+Recovery references are local retained records in
+`tmp/MAP_orchestrator/r4-p0-20260828-ddd66f9/`: `HANDOFF.md`, event 365 in `events.jsonl`,
+and the sole current `manifest.json`. The hand-off SHA-256 is
+`51f97bdbba7180f54ca763a68df002177152ec234e0f69828ee7fb363dbc85d7`.
+These records locate accepted evidence; they do not turn superseded packet mechanics into authority.
+
+The next execution transition is to adopt the revised governing policy separately from the retained
+scientific candidate, reconcile live state and supersede obsolete generated restrictions once in the
+existing programme record. Preserve accepted preparation/reference and smoke. Finish the bounded G0
+metadata operation and independently review its required outputs, then accept G0 before development.
+The frozen register remains 30 development plus 15 separately gated terminal slots, with zero
+unchanged operational retries for generation 8. Complete development before terminal support,
+terminal execution and the final report under the plan. Historical attempts and authority remain in force.
 
 ## Working now
 
@@ -52,8 +83,8 @@ Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
 - R3 completed the multi-horizon cost/risk, persistent sleeve, constrained physical portfolio and
-  independently reconciled offline path. The next programme decision is whether to authorise R4; no
-  R4 experiment, native protocol instantiation or continuous shadow-paper work is currently authorised.
+  independently reconciled offline path. R4-P0 is operator-approved and stopped as recorded above.
+  Native protocol instantiation and continuous shadow-paper work remain unauthorised.
 - R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
@@ -214,8 +245,10 @@ Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0
 ## Next actions
 
 1. Retain the final-authenticated R2 result and the completed R3 plan/report as provenance-distinct records.
-2. Complete the R3 process post-mortem, especially proportionality, retained-run escalation, reviewer loops and mandatory worktree closeout.
-3. Do not start R4 or instantiate the frozen native protocol without separate authority; any future design must preserve the negative/inconclusive R3.H result rather than treating it as alpha.
+2. Apply the approved R4-P0 retrospective changes and use the restart boundary above; preserve accepted
+   evidence and supersede obsolete generated mechanics without resetting scientific attempts or budgets.
+3. Complete R4-P0 under its exploratory plan; preserve the negative/inconclusive R3.H result.
+   Native protocol instantiation, held-out graph retention and R5 require their separate authority.
 4. Keep native IG and native IBKR conclusions provenance-distinct and fail closed pending their own qualifying foundations and untouched holdouts.
 5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 

@@ -73,7 +73,11 @@ Keep these classes separate:
 
 Include provenance in semantic identity only when it changes the scientific meaning or numerical
 policy. Paths, timestamps, formatting, layout, whole-application identity and child byte hashes are
-not semantic merely because they are easy to hash.
+not semantic merely because they are easy to hash. A new candidate requires an acceptance decision
+for that identity, not automatic reconstruction of unchanged ancestors. Establish the delta and which
+claims it affects; authenticate reusable evidence under its original identity and provenance. Rerun
+affected checks and any explicitly required final-candidate gate. Reuse does not relabel an old receipt
+as verification of new content or bypass a plan-frozen scientific/runtime policy.
 
 For a non-trivial identity-bearing contract change, classify every field as semantic,
 closure/physical, provenance, verifier or promotion/authority, and record that classification in the

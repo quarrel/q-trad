@@ -39,9 +39,11 @@ Keep discovery output bounded and narrow once after truncation.
 
 START
 
-Before implementation, confirm the packet against actual repository state. Record only a material
-boundary delta, unresolved authority, or recovery fact; do not create an owner-ready artifact merely
-to complete a template.
+Before implementation, confirm the packet against actual repository state. Exercise its local rights
+for routine corrections within the owned surface. If a parent-imposed mechanism or check obstructs
+the outcome, ask the parent to adjudicate that specific restriction under the kernel's Authority
+section; do not silently waive it or launch replacement lineages to work around it. Record only a
+material boundary delta, unresolved authority, or recovery fact, not an owner-ready template artifact.
 
 If binding meaning or authority is missing, return ESCALATE. If evidence exposes genuinely separable
 units that cannot be owned or accepted coherently together, return DECOMPOSE_REQUIRED with the exact
