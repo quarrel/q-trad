@@ -21,6 +21,7 @@ dependencies = [
     "trading-ig>=0.0.24,<0.1",
     "tzdata>=2026.2,<2027",
     "uvicorn>=0.35,<1",
+    "torch==2.13.0",
 ]
 
 [dependency-groups]

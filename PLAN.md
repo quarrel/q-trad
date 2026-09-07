@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R4-P0 historical exploratory screen — stopped for hand-off; restart preparation approved. R3 is complete; R4's held-out retention gate remains unsatisfied.
+**Current milestone:** R4-P0 historical exploratory screen — completed historical result, no hypothesis nominated. R3 is complete; R4's held-out retention gate remains unsatisfied.
 **Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and do not inherit that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -69,7 +69,7 @@ authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md`. This file selects the
 | R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
 | R2 — local and pooled baselines             | COMPLETE    | `R2-IBKR-HISTORICAL` reached `VALID_CONSUMED_RESULT`; locked local-vs-zero was NEGATIVE, pooled-vs-local POSITIVE, pooled-vs-zero INCONCLUSIVE (not frozen), and pooled cross-asset was rejected at OOF; coverage `0.9749187203016487`, support `202,709` |
 | R3 — cost and portfolio baseline            | COMPLETE    | R3.A–R3.G contracts and reconciliation are merged; the historical-exploratory report is published; the future native protocol is frozen but uninstantiated                                                |
-| R4 — residual structural graph experiment   | P0 STOPPED | operator-approved historical exploratory screen is in progress but stopped for hand-off; no completed P0 result or held-out graph retention |
+| R4 — residual structural graph experiment   | P0 COMPLETE | historical exploratory result nominates no hypothesis; held-out retention unsatisfied |
 | R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
 | R6 — continuous shadow paper                | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L                                                                                                                       |
 
@@ -168,9 +168,13 @@ chronology ambiguity before those contracts are fixed.
 ## R4 — residual structural graph experiment
 
 - R4-P0 is the operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` screen in
-  `docs/R4_P0_EXECUTION_PLAN.md`. It is stopped for hand-off; `docs/STATUS.md` records the current
-  candidate and restart boundary. Completion can reject families or nominate historical hypotheses,
-  but cannot satisfy the held-out graph-retention gate or authorise R5.
+  `docs/R4_P0_EXECUTION_PLAN.md`. Its completed computation returns `NO_HYPOTHESIS_NOMINATED`;
+  the negative result does not retain a graph. See `docs/R4_P0_FINDINGS.md`
+  and `docs/STATUS.md` for the result, authorised recovery, CUDA-policy deviation and one-case
+  control exception. Preserve original anchors, failures and unknown numerical effects.
+- Do not retain a graph or start R5 on this historical screen. Any further retention experiment needs
+  separately authorised untouched prospective or native evidence. Archive the execution plan only
+  after operator acceptance of the result.
 - Derive graph targets only from out-of-fold local residuals.
 - Compare local-only, pooled non-graph, fixed economic graph, learned structural GNN-LSTM and
   shuffled-graph controls.

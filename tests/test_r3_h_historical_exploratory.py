@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import runpy
+import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
@@ -227,6 +228,291 @@ def test_work_and_resource_limits_fail_closed() -> None:
             config,
             measurement=FixtureMeasurement(elapsed_seconds=1, memory_mb=1025),
         )
+
+
+@pytest.mark.parametrize(("platform", "raw"), (("linux", 2048), ("darwin", 2097152)))
+def test_process_peak_memory_platform_units(
+    monkeypatch: pytest.MonkeyPatch, platform: str, raw: int
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    observed: list[int] = []
+
+    def getrusage(who: int) -> SimpleNamespace:
+        observed.append(who)
+        return SimpleNamespace(ru_maxrss=raw)
+
+    monkeypatch.setattr(implementation, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(
+        implementation, "resource", SimpleNamespace(RUSAGE_SELF=0, getrusage=getrusage)
+    )
+    assert implementation._process_peak_memory_mb() == 2.0
+    assert observed == [0]
+
+
+def test_process_peak_fresh_interpreter_and_released_native_allocation(tmp_path: Path) -> None:
+    # The launcher may inherit pytest's high water through vfork/exec. Its ordinary
+    # fork/exec starts a stdlib-only helper before any native libraries create threads.
+    helper = tmp_path / "process_peak_probe.py"
+    helper.write_text(
+        """
+import json
+import math
+import mmap
+import os
+import resource
+import sys
+import time
+
+MIB = 1024 * 1024
+ALLOCATION_CAP = 256 * MIB
+TOTAL_CAP = 512 * MIB
+
+def fork_exec(mode, remaining=TOTAL_CAP):
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        os.dup2(write_fd, 1)
+        os.close(write_fd)
+        os.execv(sys.executable, [sys.executable, __file__, mode, str(remaining)])
+    os.close(write_fd)
+    with os.fdopen(read_fd) as output:
+        captured = output.read()
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, (mode, status, captured)
+    return json.loads(captured)
+
+def allocation_size(target_peak, remaining):
+    # Linux current RSS sizes the one attempt; enforcement still uses absolute peak.
+    with open("/proc/self/statm") as statm:
+        current = int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    size = math.ceil(max(64 * MIB, target_peak * MIB - current + 64 * MIB))
+    assert 0 < size <= ALLOCATION_CAP and size <= remaining, {
+        "target_peak_mb": target_peak, "current_rss_mb": current / MIB,
+        "requested_bytes": size, "allocation_cap": ALLOCATION_CAP,
+        "remaining_bytes": remaining,
+    }
+    return size, current / MIB
+
+def touch(allocation):
+    for offset in range(0, len(allocation), mmap.PAGESIZE):
+        allocation[offset] = 1
+
+mode = sys.argv[1]
+if mode == "bootstrap":
+    print(json.dumps(fork_exec("helper")))
+elif mode == "helper":
+    clean = fork_exec("clean")
+    before_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    size, current = allocation_size(max(clean["baseline"], before_peak), TOTAL_CAP)
+    with mmap.mmap(-1, size) as allocation:
+        touch(allocation)
+        parent_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    evidence = {
+        "clean": clean, "before_peak": before_peak, "current_rss_mb": current,
+        "parent_peak": parent_peak, "helper_allocation_bytes": size,
+    }
+    assert parent_peak > max(clean["baseline"], before_peak), evidence
+    # All uplift pages are unmapped before the later ordinary fork resets high water.
+    later = fork_exec("allocation", TOTAL_CAP - size)
+    evidence["later"] = later
+    assert later["baseline"] < parent_peak, evidence
+    assert size + later["allocation_bytes"] <= TOTAL_CAP, evidence
+    print(json.dumps(evidence))
+else:
+    assert mode in ("clean", "allocation"), mode
+    from qtrad.application import r3_historical_exploratory as implementation
+
+    started = time.monotonic()
+    baseline = implementation._runtime_measurement(started).memory_mb
+    limits = {"max_memory_mb": baseline + 16, "max_elapsed_seconds": 120}
+    implementation._check_hard_limits(limits, implementation._runtime_measurement(started))
+    evidence = {"baseline": baseline}
+    if mode == "allocation":
+        peaks = []
+        def require_breach():
+            measured = implementation._runtime_measurement(started)
+            peaks.append(measured.memory_mb)
+            try:
+                implementation._check_hard_limits(limits, measured)
+            except implementation.FreezeError as exc:
+                assert str(exc) == "fixture analysis exceeded max_memory_mb"
+            else:
+                raise AssertionError(("native process peak was not enforced", evidence, peaks))
+
+        size, current = allocation_size(baseline, int(sys.argv[2]))
+        evidence.update(allocation_bytes=size, current_rss_mb=current)
+        with mmap.mmap(-1, size) as allocation:
+            touch(allocation)
+            require_breach()
+        require_breach()
+        assert peaks[1] >= peaks[0] > baseline + 16, (evidence, peaks)
+        evidence["peaks"] = peaks
+    print(json.dumps(evidence))
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(helper), "bootstrap"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    evidence = json.loads(result.stdout)
+    assert evidence["clean"]["baseline"] < evidence["parent_peak"]
+    assert evidence["later"]["baseline"] < evidence["parent_peak"]
+    print(json.dumps(evidence, sort_keys=True))
+
+
+def test_process_peak_loader_is_represented_in_final_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    assert dict(config.document["compute_limits"])["max_memory_mb"] == 1024
+    assert dict(config.document["compute_limits"])["max_elapsed_seconds"] == 120
+    monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 1024.0)
+    rows, _metadata = implementation.load_fixture_rows(synthetic_fixture(), config)
+    report = analyse_fixture(rows, config).report
+    assert report["work"]["measurement"]["memory_mb"] == 1024.0
+    monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 1024.01)
+    with pytest.raises(FreezeError, match="native bounded scan exceeds memory bound"):
+        implementation.load_fixture_rows(rows, config)
+    with pytest.raises(FreezeError, match="fixture analysis exceeded max_memory_mb"):
+        analyse_fixture(rows, config)
+
+
+@pytest.mark.parametrize("elapsed_breach", (False, True))
+def test_aggregate_process_peak_and_elapsed_precedence(
+    monkeypatch: pytest.MonkeyPatch, elapsed_breach: bool
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    document = json.loads(config.canonical_json())
+    document["retained_loader"]["streaming_policy"]["max_elapsed_seconds"] = 1
+    config = FreezeConfig(document=document, semantic_identity=config.semantic_identity)
+    locators = {name: name for name in implementation._CHILD_WRAPPER_NAMES}
+
+    def open_document(path: Path, _limits: Any) -> Any:
+        record = (
+            {"manifest_id": "fixture"}
+            if path.name == "selection"
+            else {"state": "CONSUMED", "selection_manifest_id": "fixture"}
+        )
+        return {}, iter([({}, [record], 0)]), 0, "fixture"
+
+    monkeypatch.setattr(implementation, "_open_json_document", open_document)
+    monkeypatch.setattr(implementation, "_validate_child_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 1025.0)
+    ticks = iter((0.0, 2.0 if elapsed_breach else 0.0))
+    monkeypatch.setattr(implementation, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    match = "elapsed-time" if elapsed_breach else "memory"
+    with pytest.raises(FreezeError, match=f"retained aggregate {match} bound exceeded"):
+        implementation.load_retained_rows(config, locators=locators, _fixture=True)
+
+
+def test_native_and_analysis_elapsed_precedes_process_peak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import qtrad.application.r3_historical_exploratory as implementation
+
+    config = FreezeConfig.from_path(CONFIG)
+    monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 1025.0)
+    # Loader start, two inline marker opens, then the native state checkpoint.
+    ticks = iter((0.0, 0.0, 0.0, 121.0))
+    monkeypatch.setattr(implementation, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    with pytest.raises(FreezeError, match="native bounded scan exceeds elapsed-time bound"):
+        implementation.load_fixture_rows(synthetic_fixture(), config)
+    with pytest.raises(FreezeError, match="fixture analysis exceeded max_elapsed_seconds"):
+        implementation._check_hard_limits(
+            config.document["compute_limits"], FixtureMeasurement(121.0, 1025.0)
+        )
+    implementation._check_hard_limits(
+        config.document["compute_limits"], FixtureMeasurement(120.0, 1024.0)
+    )
+
+
+@pytest.mark.parametrize("failure_lane", ("none", "r3", "other", "postgres"))
+def test_verify_r3_lane_selection_and_failure_propagation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_lane: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    module = "tests/test_r3_h_historical_exploratory.py"
+    # A complete module selection belongs entirely to the non-PostgreSQL partition.
+    assert all(
+        item.get_closest_marker("postgres") is None
+        for item in request.session.items
+        if item.path == Path(__file__)
+    )
+    command_log = tmp_path / "commands"
+    shim = """#!/usr/bin/env bash
+set -euo pipefail
+tool="${0##*/}"
+printf '%s' "$tool" >> "$COMMAND_LOG"
+printf '\\t%s' "$@" >> "$COMMAND_LOG"
+printf '\\n' >> "$COMMAND_LOG"
+if [[ "$tool" == uv && "$1 $2" == 'run pytest' ]]; then
+  lane=none
+  case "$*" in
+    *'tests/test_r3_h_historical_exploratory.py -n 0'*) lane=r3 ;;
+    *'not postgres'*) lane=other ;;
+    *'-m postgres'*) lane=postgres ;;
+  esac
+  if [[ "$lane" == r3 || "$lane" == other ]]; then
+    [[ ! -v QTRAD_DATABASE_URL && ! -v QTRAD_TEST_DATABASE_URL ]]
+    [[ ! -v QTRAD_MIGRATION_DATABASE_URL ]]
+  fi
+  if [[ "$lane" != none && "$lane" == "$FAILURE_LANE" ]]; then exit 23; fi
+fi
+"""
+    for tool in ("uv", "psql", "shellcheck"):
+        executable = tmp_path / tool
+        executable.write_text(shim, encoding="utf-8")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setenv("COMMAND_LOG", str(command_log))
+    monkeypatch.setenv("FAILURE_LANE", failure_lane)
+    monkeypatch.setenv("QTRAD_TEST_POSTGRES_HOST", "localhost")
+    monkeypatch.setenv("QTRAD_TEST_POSTGRES_USER", "fixture")
+    monkeypatch.setenv("QTRAD_TEST_POSTGRES_PASSWORD", "fixture")
+    result = subprocess.run(
+        ["bash", "ops/dev/verify.sh"], capture_output=True, text=True, check=False, timeout=30
+    )
+    assert result.returncode == (0 if failure_lane == "none" else 23), result.stderr
+    commands = [line.split("\t") for line in command_log.read_text().splitlines()]
+    pytest_commands = [args[3:] for args in commands if args[:3] == ["uv", "run", "pytest"]]
+    durations = ["--durations=25", "--durations-min=0.5"]
+    expected = [
+        [
+            "-q",
+            "tests/test_postgres_integration.py::"
+            "test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run",
+        ],
+        ["-q", module, "-n", "0", *durations],
+        [
+            "-q",
+            "-m",
+            "not postgres",
+            f"--ignore={module}",
+            "-n",
+            "4",
+            "--dist",
+            "worksteal",
+            *durations,
+        ],
+        ["-q", "-m", "postgres", "-n", "0", *durations],
+    ]
+    count = {"none": 4, "r3": 2, "other": 3, "postgres": 4}[failure_lane]
+    assert pytest_commands == expected[:count]
+    assert commands[-1][0] == "psql"
+    assert commands[-1][-1].startswith('DROP DATABASE IF EXISTS "qtrad_test_')
 
 
 def _control(report: Mapping[str, Any], control_id: str) -> dict[str, Any]:
@@ -2780,13 +3066,9 @@ def test_native_loader_uses_exact_frozen_compute_limits(
             clock[0] += 1
             return 0.0 if clock[0] < 4 else 2.0
 
-        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(implementation, "time", SimpleNamespace(monotonic=fake_monotonic))
     else:
-        monkeypatch.setattr(
-            implementation.resource,
-            "getrusage",
-            lambda _resource: SimpleNamespace(ru_maxrss=2048),
-        )
+        monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 2.0)
 
     with pytest.raises(FreezeError, match=match):
         implementation.load_fixture_rows(synthetic_fixture(), config)
@@ -2825,13 +3107,9 @@ def test_native_scan_bound_is_checked_at_8192_rows_before_child_completion(
             clock[0] += 1
             return 0.0 if clock[0] == 1 else 2.0
 
-        monkeypatch.setattr(implementation.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(implementation, "time", SimpleNamespace(monotonic=fake_monotonic))
     else:
-        monkeypatch.setattr(
-            implementation.resource,
-            "getrusage",
-            lambda _resource: SimpleNamespace(ru_maxrss=2048),
-        )
+        monkeypatch.setattr(implementation, "_process_peak_memory_mb", lambda: 2.0)
 
     def mutate(target_rows: list[dict[str, Any]], _opportunity_rows: list[dict[str, Any]]) -> None:
         base = deepcopy(target_rows[0])

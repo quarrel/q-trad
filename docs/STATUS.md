@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-09-06 (R4-P0 only; earlier operational observations retain their original dates)
-**Current milestone:** R4-P0 historical exploratory screen — stopped for hand-off; restart preparation approved. R3 is complete; R4 held-out retention remains unsatisfied.
+**Updated:** 2026-09-07 (R4-P0 only; earlier operational observations retain their original dates)
+**Current milestone:** R4-P0 historical exploratory result — `NO_HYPOTHESIS_NOMINATED`. R3 is complete; R4 held-out retention remains unsatisfied.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
 **Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md` and `docs/archive/r3/R3_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
@@ -27,36 +27,55 @@ The mandatory R3.H report is `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.m
 
 Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0.584 bps, and the aggregate was negative at the first tested 5-bps cost. Gold and US-500 remained positive through 10 bps but not 20 bps; crude and EUR/USD were negative before costs. Pooled-local was the best quick diagnostic but inconclusive on support 12; nonlinear Huber failed; fixed and tiny learned graphs were negative. Nothing supports cancelling or promoting the future R4 graph experiment.
 
-## R4-P0 hand-off and restart preparation (2026-09-06)
+## R4-P0 result: no hypothesis nominated (2026-09-07)
 
-The operator authorised the `POST_HOC_HISTORICAL_EXPLORATORY` screen on 2026-08-28, stopped
-execution on 2026-09-06, and subsequently approved the retrospective recommendations and updates to
-the governing guidance. The recorded programme state remains `STOPPED_OPERATOR_HANDOFF`; no
-resumed execution or completed scientific result is claimed.
+The completed `POST_HOC_HISTORICAL_EXPLORATORY` screen returns
+`NO_HYPOTHESIS_NOMINATED`, `decision_grade=false` and promotion authority `NONE`.
+All 30 development and 15 terminal slots have closed PRIMARY attempt-0 records: 45 substantive
+fits, 90 journal records and no general retry. The 15 terminal bundles were verified and independently
+reviewed before authorised outcome evaluation. Reporting added zero primary-model fits.
+See [the findings, exact output hashes and independent review](R4_P0_FINDINGS.md).
 
-- Candidate: `faef6462c6929da7e91eea12970a72e53a2647e6`, clean at the hand-off and retrospective check.
-- Generation-8 preparation/reference and five-family smoke have recorded acceptance (smoke event
-  358). Generation-8 G0 is not created or accepted; its scientific development execution has not started.
-- Earlier generation 6 did start one development slot and failed during persistence (event 149).
-  Preserve that attempt and all failed or invalidated evidence; no successful scientific slot or
-  terminal outcome access is recorded at the hand-off.
-- GPU/host instability interrupted earlier work. The operator reports recovery following external
-  environment/driver changes; the exact cause is unconfirmed. This is distinct from subsequent
-  controller and telemetry-classification defects and is not a current driver-remediation task.
+The common terminal support has 655,424 rows across twenty instruments, giving 9,831,360
+forecast/outcome pairs across fifteen predictions. Primary seed-17 equal-instrument MSE is
+0.0191506 for local temporal, 0.0268526 for pooled non-graph, 0.0272213 for fixed graph,
+0.0271944 for learned graph and 0.0271738 for shuffled graph, versus 1.8208171e-6 for zero.
+Every primary family loses to zero/local/pooled ridge on all twenty instruments.
+Both graph candidates fail terminal/development improvement, direct skill, graph controls,
+breadth and concentration; fixed graph also fails seed stability. Auxiliary seeds do not rescue
+the nomination. Per-seed core-six views retain 205,145 rows and their own model/graph bindings.
 
-Recovery references are local retained records in
-`tmp/MAP_orchestrator/r4-p0-20260828-ddd66f9/`: `HANDOFF.md`, event 365 in `events.jsonl`,
-and the sole current `manifest.json`. The hand-off SHA-256 is
-`51f97bdbba7180f54ca763a68df002177152ec234e0f69828ee7fb363dbc85d7`.
-These records locate accepted evidence; they do not turn superseded packet mechanics into authority.
+**One-case control exception:** the mandatory separate full-LAB comparison originally failed.
+MSE and delta residuals of about `-9.91e-16` pass their `1e-12` thresholds; skill residual
+`+5.440850515e-10` exceeds `1e-10`. A single authorised CPU diagnostic established current
+feature parity and reproduced the discrepancy with the original reducer. Event 418 accepts only
+that retained reconstruction, with unknown historical cause, unchanged anchors/tolerances and the
+original failed closure preserved. Reporting authenticated its inputs and reused those exact
+scalars without another control fit; it did not declare the original assertion passing.
 
-The next execution transition is to adopt the revised governing policy separately from the retained
-scientific candidate, reconcile live state and supersede obsolete generated restrictions once in the
-existing programme record. Preserve accepted preparation/reference and smoke. Finish the bounded G0
-metadata operation and independently review its required outputs, then accept G0 before development.
-The frozen register remains 30 development plus 15 separately gated terminal slots, with zero
-unchanged operational retries for generation 8. Complete development before terminal support,
-terminal execution and the final report under the plan. Historical attempts and authority remain in force.
+**Numerical-policy deviation:** original terminal setup did not fully install the CUDA settings
+declared in G0. Historical live settings and effects are unmeasured. Prospective recovery and
+remaining-slot observations recorded deterministic algorithms and cuDNN determinism disabled,
+and cuDNN TF32 enabled. Event 405 authorised disclosed completion on the unchanged path.
+Neither historical G0 nor these observations establishes full deterministic compliance or
+CUDA equivalence. Both qualification companions are linked in the findings and worker provenance.
+
+A GPU-memory stop preserved the interrupted learned-graph model. Event 403 authorised inference-only
+recovery under its original attempt identity with no refit or new STARTED record; owner verification
+preceded four unopened fits. Missing context fields in an earlier reporting receipt failed before
+outcomes; its corrected invocation reached the post-outcome control failure. All failed invocation,
+model, closure, diagnostic and monitoring-correction evidence remains retained.
+
+The event-419 CPU-only reporting invocation completed in 4,890.976 seconds, with peak sampled
+aggregate RSS 39,240,028,160 bytes and a cleanly reaped child. Independent final-output review
+approved the three exact artefacts and both disclosures; root accepted them in event 422.
+Event 421 released the operator's GPU
+reservation without changing that reporting path. Final delivery source and complete guarded
+milestone verification are bound separately in the programme record.
+
+Current governing policy and unrelated R0–R3/native status are preserved separately from frozen
+execution provenance. No graph retention, R5, native experiment, executable profitability or
+real-capital authority follows. Execution-plan archival requires operator acceptance of the result.
 
 ## Working now
 
@@ -83,7 +102,8 @@ terminal execution and the final report under the plan. Historical attempts and 
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
 - R3 completed the multi-horizon cost/risk, persistent sleeve, constrained physical portfolio and
-  independently reconciled offline path. R4-P0 is operator-approved and stopped as recorded above.
+  independently reconciled offline path. R4-P0 completed its historical screen with no hypothesis
+  nominated; the qualified negative result and both numerical exceptions are retained above.
   Native protocol instantiation and continuous shadow-paper work remain unauthorised.
 - R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
   correction-maturity evidence, and a thin immutable bundle over independently manifested
@@ -245,10 +265,11 @@ terminal execution and the final report under the plan. Historical attempts and 
 ## Next actions
 
 1. Retain the final-authenticated R2 result and the completed R3 plan/report as provenance-distinct records.
-2. Apply the approved R4-P0 retrospective changes and use the restart boundary above; preserve accepted
-   evidence and supersede obsolete generated mechanics without resetting scientific attempts or budgets.
-3. Complete R4-P0 under its exploratory plan; preserve the negative/inconclusive R3.H result.
-   Native protocol instantiation, held-out graph retention and R5 require their separate authority.
+2. Retain the qualified negative R4-P0 result, original predictions, failed closures, exposure and
+   numerical-deviation disclosures. Archive its execution plan only after operator result acceptance.
+3. Keep final delivery and full milestone evidence bound to the selected source head; preserve the
+   negative/inconclusive R3.H result. Native protocol instantiation, held-out graph retention and R5
+   require separate authority.
 4. Keep native IG and native IBKR conclusions provenance-distinct and fail closed pending their own qualifying foundations and untouched holdouts.
 5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 

@@ -63,8 +63,17 @@ env \
   -u QTRAD_DATABASE_URL \
   -u QTRAD_TEST_DATABASE_URL \
   -u QTRAD_MIGRATION_DATABASE_URL \
+  uv run pytest -q tests/test_r3_h_historical_exploratory.py \
+  -n 0 \
+  --durations=25 \
+  --durations-min=0.5
+env \
+  -u QTRAD_DATABASE_URL \
+  -u QTRAD_TEST_DATABASE_URL \
+  -u QTRAD_MIGRATION_DATABASE_URL \
   uv run pytest -q \
   -m "not postgres" \
+  --ignore=tests/test_r3_h_historical_exploratory.py \
   -n 4 \
   --dist worksteal \
   --durations=25 \

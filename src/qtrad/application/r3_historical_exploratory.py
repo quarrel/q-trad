@@ -4551,7 +4551,7 @@ def _load_native_retained_rows(
         state_peak = max(state_peak, state_entries)
         if state_entries > max_rows:
             raise FreezeError("native bounded ID state exceeds frozen row bound")
-        memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        memory_mb = _process_peak_memory_mb()
         if memory_mb > max_memory_mb:
             raise FreezeError("native bounded scan exceeds memory bound")
 
@@ -5770,9 +5770,7 @@ def load_retained_rows(
             raise FreezeError("retained aggregate byte bound exceeded")
         if time.monotonic() - started > float(streaming.get("max_elapsed_seconds", 1e12)):
             raise FreezeError("retained aggregate elapsed-time bound exceeded")
-        if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 > float(
-            config.document["compute_limits"]["max_memory_mb"]
-        ):
+        if _process_peak_memory_mb() > float(config.document["compute_limits"]["max_memory_mb"]):
             raise FreezeError("retained aggregate memory bound exceeded")
         for record in part_rows:
             key = _canonical_join_key(record, mappings)
@@ -6601,10 +6599,16 @@ def _economic_views(
     }
 
 
-def _runtime_measurement(started: float) -> FixtureMeasurement:
+def _process_peak_memory_mb() -> float:
+    """Absolute process peak for the dedicated R3 invocation, including released allocations."""
     usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
-    return FixtureMeasurement(time.monotonic() - started, usage / divisor)
+    return usage / divisor
+
+
+def _runtime_measurement(started: float) -> FixtureMeasurement:
+    memory_mb = _process_peak_memory_mb()
+    return FixtureMeasurement(time.monotonic() - started, memory_mb)
 
 
 def _check_hard_limits(limits: Mapping[str, Any], measurement: FixtureMeasurement) -> None:
