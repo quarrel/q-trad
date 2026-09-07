@@ -1266,8 +1266,9 @@ def test_full_lab_terminal_regression_uses_full_population_and_preterminal_train
             "target_available_at": [cutoff - timedelta(minutes=30), cutoff + timedelta(minutes=15)],
         }
     )
-    parent = SimpleNamespace(
-        manifest={}, manifest_sha256="manifest", child_closure_sha256="closure"
+    parent = cast(
+        foundation_module.Lab0Capsule,
+        SimpleNamespace(manifest={}, manifest_sha256="manifest", child_closure_sha256="closure"),
     )
     monkeypatch.setattr(foundation_module, "_feature_frame", lambda _: features)
     monkeypatch.setattr(foundation_module, "_context_frame", lambda _: context)

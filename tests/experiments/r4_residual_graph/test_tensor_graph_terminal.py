@@ -960,7 +960,7 @@ def test_terminal_native_metadata_projection_preserves_masks_keys_and_part_bindi
     for offset in range(61):
         timestamp = cutoff - timedelta(minutes=60 - offset)
         for instrument_index, instrument in enumerate(ALL_INSTRUMENTS):
-            feature = {
+            feature: dict[str, object] = {
                 name: float(instrument_index + index + 1)
                 for index, name in enumerate(P0_FEATURE_NAMES)
             }
@@ -1028,7 +1028,7 @@ def test_terminal_native_metadata_projection_preserves_masks_keys_and_part_bindi
     ):
         path = tmp_path / f"{kind}.parquet"
         pl.DataFrame(rows).write_parquet(path)
-        part = {
+        part: dict[str, str | int] = {
             "kind": kind,
             "path": str(path),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -1078,7 +1078,7 @@ def test_terminal_native_metadata_projection_preserves_masks_keys_and_part_bindi
         native_rows = feature_rows[offset * 20 : (offset + 1) * 20]
         tensor = build_masked_sequence(
             native_rows,
-            native_rows[0]["decision_time"],
+            cast(datetime, native_rows[0]["decision_time"]),
             contract=TensorContract(lookback_minutes=0),
         )
         for node, (original, projection) in enumerate(
