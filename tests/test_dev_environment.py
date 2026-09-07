@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import runpy
 import subprocess
@@ -34,19 +33,13 @@ def test_dev_container_separates_persistent_and_test_postgres() -> None:
 
 def test_dev_container_has_one_image_codex_bootstrap() -> None:
     dockerfile = (REPOSITORY_ROOT / ".devcontainer" / "Dockerfile").read_text()
-    package = json.loads(
-        (REPOSITORY_ROOT / ".devcontainer" / "codex-install" / "package.json").read_text()
-    )
-
-    assert "@openai/codex" not in package["dependencies"]
-    assert 'amd64) codex_target="x64"' in dockerfile
-    assert 'arm64) codex_target="arm64"' in dockerfile
+    assert "codex-install" not in dockerfile
+    assert 'if [ "${architecture}" != "amd64" ]; then' in dockerfile
+    assert "amd64 required" in dockerfile
+    assert dockerfile.count("npm install --global --prefix /opt/codex-latest") == 1
     assert 'codex_version="$(npm view @openai/codex@latest version)"' in dockerfile
     assert '"@openai/codex@${codex_version}"' in dockerfile
-    assert (
-        '"@openai/codex-linux-${codex_target}@npm:@openai/codex@${codex_version}'
-        '-linux-${codex_target}"' in dockerfile
-    )
+    assert '"@openai/codex-linux-x64@npm:@openai/codex@${codex_version}-linux-x64"' in dockerfile
     assert "/opt/codex-latest/bin/codex --version" in dockerfile
     assert "ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex" in dockerfile
 

@@ -1606,7 +1606,7 @@ def _smoke_terminal_support(
     root: Path, config: FrozenRuntimeConfig, decision_time: datetime | None
 ) -> Any:
     from .graph import build_fixed_economic_graph
-    from .tensor import FEATURE_SEMANTIC_SHA256
+    from .tensor import FEATURE_SEMANTIC_SHA256, P0_FEATURE_NAMES
     from .terminal_support import TerminalSupportConfig, build_terminal_support
 
     graph = build_fixed_economic_graph()
@@ -1629,8 +1629,8 @@ def _smoke_terminal_support(
             "child_closure_sha256": config.child_closure_identity,
             "parent_identity": config.parent_identity,
             "feature_semantic_sha256": FEATURE_SEMANTIC_SHA256,
-            "feature_mask": True,
-            "availability_mask": True,
+            "feature_mask": (True,) * len(P0_FEATURE_NAMES),
+            "availability_mask": (True,) * len(P0_FEATURE_NAMES),
             "node_mask": True,
             "context_schema_identity": "SMOKE_CONTEXT_SCHEMA",
             "context_identity": "SMOKE_CONTEXT",

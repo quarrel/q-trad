@@ -58,7 +58,7 @@ def _input() -> Any:
 
 
 def _assembly(prediction_input: Any, keys: tuple[str, ...], dtype: Any) -> Any:
-    tree = ast.parse(inspect.getsource(execution._predict_prepared_authenticated_terminal_slot))
+    tree = ast.parse(inspect.getsource(execution._publish_prepared_terminal_prediction))
     assignments = [
         node
         for node in ast.walk(tree)
