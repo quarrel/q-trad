@@ -1,6 +1,6 @@
 # Remaining retained-data migration
 
-Date: 2026-09-08. Status: five approved roots copied and independently verified. The later worktree-retirement check observed all five original paths mounted and `samefile` with their `/data` destinations; underlying originals still contain files. Complete the remaining cutover checks below before source reclamation.
+Date: 2026-09-08. Status: COMPLETE. All five retained roots are served through canonical read-only mounts from `/data`; verified underlying originals have been emptied, retaining their mountpoint directories. The temporary cleanup mount configuration has been removed.
 
 ## Verified copies
 
@@ -22,25 +22,21 @@ Evidence is retained in `/workspace/tmp/storage-migration-20260908-remaining/`:
 | `destination-verification.json` | `c86c84ffd2af647461234a4b1a4af0af8098b45f5a598e3633cff63e0410a711` |
 | `verify_destination.py` | `98b9d730a29b1f0c2f94d7819cd7f389b2863d61e3fe953a8f74685525eafaed` |
 
-Source hashing took 10.63 seconds, copying 14.22 seconds and independent destination verification 3.96 seconds. The root reviewed the verifier and accepted the byte/metadata evidence; this is copy acceptance, not completed cutover.
+Source hashing took 10.63 seconds, copying 14.22 seconds and independent destination verification 3.96 seconds. The accepted byte verification was reused at cutover after both source and destination metadata matched the pinned inventory exactly.
 
-## Access and remaining cutover
+## Completed cutover
 
-Native Compose binds are prepared in `.devcontainer/compose.devcontainer.yaml`: exact original `/workspace/tmp/<basename>` targets, corresponding host `/mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/<basename>` sources, `read_only: true`, and `create_host_path: false`. The previous two R2 aliases are confirmed read-only after the latest rebuild.
+Native Compose binds in `.devcontainer/compose.devcontainer.yaml` preserve exact original `/workspace/tmp/<basename>` targets, corresponding host `/mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/<basename>` sources, `read_only: true`, and `create_host_path: false`. All five aliases were verified as canonical ordinary directories, actual read-only mountpoints and `samefile` with their `/data` destinations.
 
 R4 readers reject symlink roots and children; attempt identity requires a canonical absolute output root. LAB foundation identities include resolved paths. Canonical binds preserve those contracts without rewriting evidence. The remaining historical scripts/consumers examined revealed no bind incompatibility, but the audit does not establish that every historical consumer would accept symlinks. Preserve the original paths for all five roots.
 
-A temporary native Compose bind from `./tmp` to `/workspace-tmp-migration-source` exposes the underlying originals after the new aliases cover them. Its sole purpose is verified source cleanup; remove its configuration immediately after that cleanup. The running temporary mount then expires on the next normal rebuild.
+The temporary native Compose bind from `./tmp` to `/workspace-tmp-migration-source` exposed underlying originals for cleanup. Checks confirmed distinct workspace-device source directories, no nested mounts and no process users by source inode across working directories, executables, open descriptors and memory mappings. Root-owned processes were checked with their required access privileges.
 
-After rebuilding:
+Both complete metadata inventories matched the pinned source records, excluding only SHA fields already covered by accepted byte verification. Only the five named source roots' contents were removed. A subsequent destination inventory remained identical, and original-path identity and read-only mount checks passed again.
 
-1. Confirm all five original aliases are canonical ordinary directories, actual read-only mountpoints and `samefile` with their `/data` destinations. Check there are no unexpected nested mounts.
-2. Run the retained metadata inventory against `/data/q-trad/retained-workspace-tmp` and `/workspace-tmp-migration-source`, with distinct create-only output filenames. Compare complete records and hardlink groups with the pinned source inventory, excluding only its SHA fields. Reuse accepted byte verification if there is no evidence of change; do not rerun scientific verification.
-3. Confirm cleanup roots are distinct workspace-device directories, not destination aliases/mountpoints, and have no observed process users. Preserve every original if there is a mismatch or unresolved ownership.
-4. Remove only the contents of these five exact cleanup roots, retaining empty mountpoint directories and all destination data. Record exact deletion scope, completed roots, failures and space measurements in a create-only receipt. Never delete through the original mounted paths or `/data`.
-5. Recheck destination metadata and original-path identity; remove the temporary Compose entry and record completion. No additional operator permission is needed for this already-authorised cleanup.
+Create-only receipts in the audit directory are `cutover-accepted.json`, five `reclaimed-<basename>.json` records and `cutover-complete.json`; the before/after metadata inventories and `finish_cutover.py` preserve verification and deletion scope. The first privileged process-scan attempt stopped on a permission error before acceptance or deletion; the completed scan used ordinary-user access plus bounded privileged checks for root-owned processes.
 
-Original-path mounts are now present. Do not delete underlying originals before the complete mounted-access and source-inventory checks above pass. Other evidence, external authority siblings, caches and runtime environments remain outside this deletion scope.
+The source allocation fell from 11,823,468 KiB to 28 KiB (empty mountpoint directories), reclaiming about 11.28 GiB. Destination data and scientific identities were unchanged. The temporary mount has been removed from Compose configuration; its current runtime instance expires on the next normal rebuild. No further rebuild is needed to complete data reclamation.
 
 ## Worktree cleanup completed
 
@@ -58,3 +54,5 @@ The seven remaining source/runtime worktrees were subsequently archived and remo
 ## Interpreting disk usage
 
 `du -ks tmp` follows retained-data mounts and therefore includes data physically stored on `/data`. Use `du -xks tmp` to measure only the workspace filesystem, noting that mounted paths can hide underlying originals. The earlier pre-cutover measurements were 79,592,344 KiB including mounts and 20,142,496 KiB on the workspace filesystem. After the subsequent seven-worktree retirement and mount activation, `du -xks tmp` reported 2,895,856 KiB; this excludes underlying originals exposed through `/workspace-tmp-migration-source` and is not proof of their reclamation.
+
+After verified source reclamation, `du -xsk /workspace-tmp-migration-source` measured 2,900,352 KiB (about 2.77 GiB). This directly measures the underlying workspace tmp tree, including the retained empty mountpoint directories, rather than counting the `/data` aliases.

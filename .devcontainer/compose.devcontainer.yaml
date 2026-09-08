@@ -134,12 +134,6 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      # Temporary access to underlying originals; remove after verified source cleanup.
-      - type: bind
-        source: ./tmp
-        target: /workspace-tmp-migration-source
-        bind:
-          create_host_path: false
     networks:
       - qtrad-dev
     gpus: all

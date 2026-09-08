@@ -1,6 +1,6 @@
 # Workspace tmp storage relocation proposal
 
-Date: 2026-09-08. Status: first two roots migrated; the remaining five roots are copied and independently verified, with original-path mounts now observed. Their underlying originals still await verified source reclamation. See [first migration](TMP_R2_STORAGE_MIGRATION.md) and [remaining migration and worktree cleanup](TMP_REMAINING_STORAGE_MIGRATION.md).
+Date: 2026-09-08. Status: COMPLETE for all seven approved retained-data roots. Verified copies on `/data` are available through canonical read-only original-path mounts; original bulk files have been reclaimed. See [first migration](TMP_R2_STORAGE_MIGRATION.md) and [remaining migration and worktree cleanup](TMP_REMAINING_STORAGE_MIGRATION.md).
 
 ## Completed administrative cleanup
 
@@ -77,5 +77,5 @@ The seven remaining R4-P0 worktrees have now been retired under explicit operato
    compatibility bridge must have a named consumer and a removal trigger; do not accumulate permanent
    unexplained symlinks. Deleting the sole original before copy validation is not part of the proposal.
 
-The first batch and all nine completed R4-P0 worktree removals are complete. The five further evidence roots have verified copies and original-path mounts, but underlying source reclamation remains pending. See the remaining-migration runbook for current access and measurement qualifications.
+Both data migration batches and all nine completed R4-P0 worktree removals are complete. The five further evidence roots retained their verified copies and original-path mounts; underlying source reclamation recovered about 11.28 GiB. The temporary cleanup bind was removed from Compose configuration and expires on the next normal rebuild.
 The R4-P0 worktree/environment cleanup is complete. Other cache and scratch cleanup remains outside this operation.

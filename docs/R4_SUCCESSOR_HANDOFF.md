@@ -9,7 +9,7 @@ R4-P0 is complete and integrated. On 2026-09-08 its seven remaining worktrees an
 - Generation-8 retained evidence: `/data/q-trad/r4-p0/r4-p0-development-g8-faef646/`.
 - Earlier R4 evidence, including failed generation-6 history: `/workspace/tmp/qtrad-r4/`.
 - Programme acceptance, monitoring and diagnostic records: `/workspace/tmp/MAP_orchestrator/r4-p0-20260828-ddd66f9/`. Paths inside these records describe historical execution; they do not require permanent working checkouts.
-- The five-root data migration is separate: all five original paths now mount their `/data` counterparts, but underlying originals still contain files. Source reclamation remains under [its runbook](TMP_REMAINING_STORAGE_MIGRATION.md); this worktree retirement did not remove them.
+- The five-root data migration is complete: canonical original paths are read-only mounts to verified `/data` copies, and underlying originals have been reclaimed. See [the completion record](TMP_REMAINING_STORAGE_MIGRATION.md).
 
 ## R4-P1 boundary
 
