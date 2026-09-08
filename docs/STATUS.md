@@ -1,11 +1,11 @@
 # Current status
 
-**Updated:** 2026-09-08 (R4-P1 only; earlier operational observations retain their original dates)
-**Current milestone:** R4-P1 learnability triage — computation, independent owner review and local committed delivery complete; parent acceptance remains separate. Corrected training capability passed, but the current graph is deprioritised. R4-P0 remains accepted; R4 held-out retention remains unsatisfied.
-**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
-**Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md` and `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`
+**Updated:** 2026-09-08 (R4-P1 acceptance; earlier operational observations retain their original dates)
+**Current milestone:** R4-P0 and R4-P1 historical work are accepted and complete. P1 establishes corrected training capability but finds no useful corrected temporal or fixed-graph development improvement; the current graph expected-return hypothesis is deprioritised. R4 held-out retention remains unsatisfied. The next programme decision is whether and how to authorise a separate universe, regime and opportunity-discovery lane.
+**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct and their histories continue accumulating.
+**Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md`, `docs/archive/r4/R4_P0_EXECUTION_PLAN.md` and `docs/R4_P1_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
-**State:** R0–R3 are complete. `R2-IBKR-HISTORICAL` is `VALID_CONSUMED_RESULT`; R3 delivered the cost/portfolio baseline, historical-exploratory report and frozen future native protocol. `capture-v4` remains live with 23/23 channels ready, and paper research remains offline/replay.
+**State:** R0–R3 are complete. `R2-IBKR-HISTORICAL` is `VALID_CONSUMED_RESULT`; R3 delivered the cost/portfolio baseline, historical-exploratory report and frozen future native protocol. R4's historical P0/P1 line is complete without graph retention or R5 authority. `capture-v4` remains live with 23/23 channels ready, and paper research remains offline/replay.
 
 ## Terminal `R2-IBKR-HISTORICAL` result (2026-08-23)
 
@@ -27,7 +27,7 @@ The mandatory R3.H report is `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.m
 
 Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0.584 bps, and the aggregate was negative at the first tested 5-bps cost. Gold and US-500 remained positive through 10 bps but not 20 bps; crude and EUR/USD were negative before costs. Pooled-local was the best quick diagnostic but inconclusive on support 12; nonlinear Huber failed; fixed and tiny learned graphs were negative. Nothing supports cancelling or promoting the future R4 graph experiment.
 
-## R4-P1 learnability triage (2026-09-08)
+## Accepted R4-P1 learnability triage (2026-09-08)
 
 The operator-approved historical exploratory diagnostic completed one successful capability policy,
 eight fixed Ridge probes and four mandatory seed-17 local/pooled neural fits. Planted mechanisms and
@@ -37,11 +37,22 @@ gate, so no graph neural fit runs. See [the methods, results and attempt account
 
 The completed run took 113.63 seconds with 5.39 GiB peak process RSS and 1.43 GiB peak CUDA allocation.
 One earlier same-policy invocation failed only in quantile reporting; its failure remains retained.
-Independent owner review approved `d70ced08f0b187ed4d99a63eb22a8934e3dcae54`, and local committed
-delivery is complete; parent acceptance remains separate. No terminal former-holdout rows were loaded, and no P0 result,
-held-out retention, native validity, economic claim, R5 or trading authority changes.
+Independent owner review approved `d70ced08f0b187ed4d99a63eb22a8934e3dcae54`, local committed
+delivery completed, and the operator accepted the result on 2026-09-08.
 
-## R4-P0 result: no hypothesis nominated (2026-09-07)
+P1 establishes that the corrected temporal and graph mechanisms are trainable; it therefore prevents
+P0's catastrophic residual magnitudes from being generalised into a claim that those model families
+cannot learn. Its empirical result is nevertheless negative for the current information set and
+bounded policy: corrected local and pooled temporal models lose to zero and Ridge in both development
+blocks, and the fixed linear graph loses to pooled and shuffled controls. The present static economic
+graph expected-return hypothesis is deprioritised. P1's contemporaneous edge relationships may remain
+useful for covariance, exposure or universe-diversification work, but do not establish causal return
+information.
+
+No terminal former-holdout rows were loaded. P1 changes no P0 artefact or conclusion and creates no
+held-out retention, native validity, economic claim, R5 or trading authority.
+
+## Accepted R4-P0 result: no hypothesis nominated (2026-09-07)
 
 The completed `POST_HOC_HISTORICAL_EXPLORATORY` screen returns
 `NO_HYPOTHESIS_NOMINATED`, `decision_grade=false` and promotion authority `NONE`.
@@ -87,10 +98,12 @@ Event 421 released the operator's GPU
 reservation without changing that reporting path. Final delivery source and complete guarded
 milestone verification are bound separately in the programme record.
 
-Current governing policy and unrelated R0–R3/native status are preserved separately from frozen
-execution provenance. No graph retention, R5, native experiment, executable profitability or
-real-capital authority follows. The operator accepted the qualified result and authorised merging
-`724e2e0` on 2026-09-08; the completed execution and remediation plans are archived under `docs/archive/r4/`.
+P0 remains the authoritative record of its exact frozen candidates and qualifications. P1 does not
+rewrite that record; it establishes prospectively that a corrected training path can learn and supplies
+the more useful current interpretation of the graph-return hypothesis. No graph retention, R5,
+native experiment, executable profitability or real-capital authority follows. The operator accepted
+the qualified P0 result and authorised merging `724e2e0` on 2026-09-08; the completed execution and
+remediation plans are archived under `docs/archive/r4/`.
 
 ## Working now
 
@@ -117,9 +130,10 @@ real-capital authority follows. The operator accepted the qualified result and a
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
 - R3 completed the multi-horizon cost/risk, persistent sleeve, constrained physical portfolio and
-  independently reconciled offline path. R4-P0 completed its historical screen with no hypothesis
-  nominated; the qualified negative result and both numerical exceptions are retained above.
-  Native protocol instantiation and continuous shadow-paper work remain unauthorised.
+  independently reconciled offline path. R4-P0/P1 completed the current historical graph-return line:
+  P0 nominates no hypothesis, while P1 establishes trainability but finds no useful corrected
+  temporal or fixed-graph development improvement. Native protocol instantiation, held-out graph
+  retention, R5 and continuous shadow-paper work remain unauthorised.
 - R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
@@ -268,6 +282,9 @@ real-capital authority follows. The operator accepted the qualified result and a
   evidence, and the ingest service was restarted at 17:02:04 UTC; the new run is healthy at 23/23
   with zero drops. Future restore checks need an explicitly accepted low-load window.
 - Native forward history is still short for native-source model selection or an effectiveness claim.
+- No U-lane authority yet defines the candidate catalogue, data provenance, prospective selector,
+  control cohorts, hypothesis families, acquisition budget or success/stop conditions. Those are the
+  next programme decisions rather than implementation assumptions.
 - Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
   qualified a quote-imbalance feature. It is not evidence of executed trade volume or CVD.
 - China A50 and Taiwan session/data-quality qualification remains part of the native coverage audit.
@@ -279,12 +296,9 @@ real-capital authority follows. The operator accepted the qualified result and a
 
 ## Next actions
 
-1. Retain the final-authenticated R2 result and the completed R3 plan/report as provenance-distinct records.
-2. Retain the qualified negative R4-P0 result, original predictions, failed closures, exposure and
-   numerical-deviation disclosures alongside the archived plans in `docs/archive/r4/`.
-3. Keep final delivery and full milestone evidence bound to the selected source head; preserve the
-   negative/inconclusive R3.H result. Native protocol instantiation, held-out graph retention and R5
-   require separate authority.
+1. Retain the final-authenticated R2 result and completed R3 plan/report as provenance-distinct records.
+2. Retain the accepted P0 result, original predictions, failed closures and disclosed numerical qualifications; retain P1 as the accepted capability-corrected development finding without altering P0.
+3. Decide and, if approved, authorise the separate U-lane's objective, universe, data sources, prospective selection/control design, hypothesis families, acquisition budget and stop conditions. Do not infer R5 authority from P0/P1 completion.
 4. Keep native IG and native IBKR conclusions provenance-distinct and fail closed pending their own qualifying foundations and untouched holdouts.
 5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 
@@ -298,6 +312,8 @@ real-capital authority follows. The operator accepted the qualified result and a
 - IBKR normative historical implementation plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`
 - Completed IBKR native collector programme: `docs/archive/R2_LANEB_IMPLEMENTATION_PLAN.md`
 - IBKR native operational interfaces: `ops/ibkr/README.md`
+- R4-P0 findings and archived plans: `docs/R4_P0_FINDINGS.md`, `docs/archive/r4/`
+- R4-P1 execution and findings: `docs/R4_P1_EXECUTION_PLAN.md`, `docs/R4_P1_FINDINGS.md`
 - Independent IBKR source decision: `docs/adr/0028-independent-ibkr-market-data-source.md`
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
