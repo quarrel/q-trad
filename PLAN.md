@@ -1,8 +1,8 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R4-P1 learnability triage — computation, independent owner review and local committed delivery complete; parent acceptance remains separate. Capability established, current graph deprioritised. R4-P0 remains accepted and R4's held-out retention gate remains unsatisfied.
-**Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and do not inherit that conclusion
+**Current milestone:** R4 historical P0/P1 work is accepted and complete. Corrected training capability is established, but the current static graph expected-return hypothesis is deprioritised; R4's held-out retention gate remains unsatisfied. The next programme decision is whether and how to authorise a separate universe, regime and opportunity-discovery lane.
+**Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and continue accumulating without inheriting that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
@@ -48,6 +48,7 @@ authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md`. This file selects the
 - The terminal `R2-IBKR-HISTORICAL` run is `VALID_CONSUMED_RESULT`. Scope is `IBKR_HISTORICAL_RESEARCH`, historical MIDPOINT OHLC, declared provider-history delay, primary 15-minute horizon, six fixed targets and three fixed groups. Locked `LOCAL_RIDGE` versus `ZERO_RETURN` was **NEGATIVE**; `POOLED_LOCAL_RIDGE` versus `LOCAL_RIDGE` was **POSITIVE**; pooled beyond zero is **INCONCLUSIVE** because no pooled-versus-zero question was frozen; and pooled cross-asset was rejected at OOF. Both locked questions had coverage `0.9749187203016487` and support `202,709`.
 - This result is source-specific. It does not establish native IG predictability, live IBKR predictability, executable bid/ask performance, post-cost profitability, portfolio performance or production readiness.
 - R3 is complete. R3.A–R3.G implement the cost, ordered-risk, persistent sleeve, physical target and independently reconciled evaluation path; R3.I freezes but does not authorise a future native experiment. The mandatory R3.H historical-exploratory report is archived with semantic identity `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`.
+- R4-P0 and R4-P1 are accepted and complete as historical exploratory work. P0 returns `NO_HYPOTHESIS_NOMINATED` for its exact frozen release, while retaining its control-regression and CUDA-policy qualifications. P1 establishes corrected training capability, but corrected local and pooled temporal models still lose to zero and Ridge in both development blocks; the fixed linear graph gate fails, so no corrected graph neural fit is justified. The present graph expected-return hypothesis is deprioritised, not universally disproved.
 - The evidence-handoff simplification programme converged the Stage 6 through R2 boundaries before the terminal run on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
 - PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
@@ -63,15 +64,15 @@ authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md`. This file selects the
 
 ## Milestones
 
-| Milestone                                   | Status      | Exit evidence                                                                                                                                                                                                                           |
-| ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R0 — alignment, coverage and data readiness | COMPLETE    | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
-| R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
-| R2 — local and pooled baselines             | COMPLETE    | `R2-IBKR-HISTORICAL` reached `VALID_CONSUMED_RESULT`; locked local-vs-zero was NEGATIVE, pooled-vs-local POSITIVE, pooled-vs-zero INCONCLUSIVE (not frozen), and pooled cross-asset was rejected at OOF; coverage `0.9749187203016487`, support `202,709` |
-| R3 — cost and portfolio baseline            | COMPLETE    | R3.A–R3.G contracts and reconciliation are merged; the historical-exploratory report is published; the future native protocol is frozen but uninstantiated                                                |
-| R4 — residual structural graph experiment   | P0 COMPLETE | historical exploratory result nominates no hypothesis; held-out retention unsatisfied |
-| R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
-| R6 — continuous shadow paper                | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L                                                                                                                       |
+| Milestone                                   | Status              | Exit evidence                                                                                                                                                                                                                           |
+| ------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R0 — alignment, coverage and data readiness | COMPLETE            | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
+| R1 — causal multi-asset research foundation | COMPLETE            | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
+| R2 — local and pooled baselines             | COMPLETE            | `R2-IBKR-HISTORICAL` reached `VALID_CONSUMED_RESULT`; locked local-vs-zero was NEGATIVE, pooled-vs-local POSITIVE, pooled-vs-zero INCONCLUSIVE (not frozen), and pooled cross-asset was rejected at OOF; coverage `0.9749187203016487`, support `202,709` |
+| R3 — cost and portfolio baseline            | COMPLETE            | R3.A–R3.G contracts and reconciliation are merged; the historical-exploratory report is published; the future native protocol is frozen but uninstantiated                                                |
+| R4 — residual structural graph experiment   | HISTORICAL COMPLETE | P0 nominates no hypothesis; P1 establishes trainability but finds no useful corrected temporal or fixed-graph development improvement; held-out graph retention remains unsatisfied |
+| R5 — integrated offline MVP                 | NOT STARTED         | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
+| R6 — continuous shadow paper                | NOT STARTED         | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L                                                                                                                       |
 
 ## R0 — alignment, coverage and data readiness
 
@@ -141,7 +142,7 @@ chronology ambiguity before those contracts are fixed.
 - The account-gated exact-contract capability review, matched read-only host deployment and Stage 5
   canary are complete. The canary passed all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases,
   and the 300-second request profile is frozen.
-- The full Stage 6 closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 invalidation record `3610c94...` documents the scientific divergence and superseded promotion; replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the terminal result.
+- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 invalidation record `3610c94...` documents the scientific divergence and superseded promotion; replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the terminal result.
 - Current Stage 7/8 runtime is v3-only: construction and deep verification use explicit immediate-parent receipts, ordinary authentication is cheap and selected-child bounded, and promotion is authority-only without semantic replay. The historical result is complete but cannot be generalised to native IG or native IBKR predictability.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Exact-main controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
 - The qualifying backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`. Continuous capture initially resumed 20/20 on application commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but stopped receiving at the 2026-08-10 22:30 UTC Gateway auto-restart and later failed closed. Preserve that gap. PR #116 restored socket-death detection and canonical Gateway ownership; its 2026-08-12 rollout exposed a second explicit gap when concurrent restore work saturated persistence. PR #117 then completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily Gateway restarts on 2026-08-12 and 2026-08-13 each replaced the collector process and reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops. This is the applicable lifecycle gate for the current paper account, which has no distinct weekly 2FA expiry.
@@ -167,26 +168,25 @@ chronology ambiguity before those contracts are fixed.
 
 ## R4 — residual structural graph experiment
 
-- R4-P0 is the operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` screen in
-  `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`. Its completed computation returns `NO_HYPOTHESIS_NOMINATED`;
-  the negative result does not retain a graph. See `docs/R4_P0_FINDINGS.md`
-  and `docs/STATUS.md` for the result, authorised recovery, CUDA-policy deviation and one-case
-  control exception. Preserve original anchors, failures and unknown numerical effects.
-- Do not retain a graph or start R5 on this historical screen. Any further retention experiment needs
-  separately authorised untouched prospective or native evidence. The operator accepted the qualified
-  result and merged the reviewed delivery on 2026-09-08; the completed plans are archived under `docs/archive/r4/`.
-- R4-P1's operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` execution is in
-  `docs/R4_P1_EXECUTION_PLAN.md`; computation, focused validation and independent owner review are
-  complete for `d70ced08f0b187ed4d99a63eb22a8934e3dcae54`. Local committed delivery is complete;
-  parent acceptance remains separate. `docs/R4_P1_FINDINGS.md` establishes corrected training capability but no
-  useful bounded neural development improvement. The fixed linear graph gate failed, so graph neural
-  fits were skipped. The current graph hypothesis is deprioritised without changing R4-P0 or
-  satisfying held-out retention.
-- Derive graph targets only from out-of-fold local residuals.
-- Compare local-only, pooled non-graph, fixed economic graph, learned structural GNN-LSTM and
-  shuffled-graph controls.
-- Complete the experiment even if simpler forecasts are weak; retain the graph only on incremental
-  held-out evidence. Dynamic adjacency and session experts remain deferred.
+- **Accepted P0 result:** the operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` screen in
+  `docs/archive/r4/R4_P0_EXECUTION_PLAN.md` returns `NO_HYPOTHESIS_NOMINATED` for its exact frozen
+  candidates. See `docs/R4_P0_FINDINGS.md` and `docs/STATUS.md` for the authorised recovery,
+  CUDA-policy deviation and one-case control exception. Preserve its anchors, failures and unknown
+  numerical effects; do not generalise its catastrophic neural magnitudes into a claim about every
+  trainable temporal or graph model.
+- **Accepted P1 result:** `docs/R4_P1_EXECUTION_PLAN.md` and `docs/R4_P1_FINDINGS.md` establish corrected
+  training capability on planted mechanisms and a tiny real batch. The corrected local and pooled
+  temporal models nevertheless lose to zero and Ridge in both development blocks. The fixed linear
+  graph probe loses to pooled and shuffled controls and fails direct skill, so the gated graph neural
+  fits are correctly skipped.
+- **Programme position:** the present twenty-instrument, 15-minute, P0-information, static economic
+  graph expected-return hypothesis is deprioritised. P1's contemporaneous edge relationships may be
+  useful for covariance, exposure or universe-diversification work, but do not establish causal
+  expected-return information.
+- Do not retain a graph or start R5 from these historical screens. R4's held-out retention gate remains
+  unsatisfied. Any future graph-return experiment requires a distinct mechanism supported by the
+  U-lane, native information or another separately authorised hypothesis, followed by untouched
+  prospective or native evidence.
 
 ## R5 — integrated offline MVP
 
@@ -196,6 +196,7 @@ chronology ambiguity before those contracts are fixed.
   parameter sensitivities.
 - Require attributable constraint/fallback decisions and independently reconciled accounting.
 - Treat a trustworthy negative conclusion as successful completion.
+- R5 remains unauthorised because no forecast or graph component has passed the required evidence gate.
 
 ## R6 — continuous shadow paper
 
