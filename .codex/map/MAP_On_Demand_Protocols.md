@@ -177,9 +177,13 @@ Prefer:
     delivery-platform checks or an equivalent terminal-state mechanism
     coarse status polling only when no safe wait or event mechanism exists
 
+Keep three cadences distinct: autonomous process/resource sampling, tool wait/yield limits, and model observation boundaries. A supervisor may sample every 30 seconds without waking any model. An idle owner with a delegated observer waits for that observer's event, rather than polling the observer or job in parallel. For healthy multi-hour work, explicitly request the longest supported interruptible agent wait (currently `wait_agent(timeout_ms=3600000)`), shortened only for an earlier agreed decision boundary. Incoming events or user input return early; generic advice against long uninterruptible sleeps does not require a short event-wait timeout.
+
+Set durations at every tool layer: a long process wait wrapped by an execution cell with short outer continuation yields still creates repeated model turns. Use supported long waits at both layers; if a platform limit prevents this, report the concrete limit rather than manufacture heartbeat checkpoints. On an unchanged timeout/yield, continue the wait without a liveness read. This does not defer an actual safety alarm, terminal event, unreliable-monitor report or scheduled cost review.
+
 A PID alone is not durable identity. Never send or store credentials. Do not repeatedly read growing logs merely to establish liveness. Partial output, activity, elapsed time, or a successful intermediate phase is not completion.
 
-A wait timeout is an observation boundary, not evidence of job failure and not authority to change the operation. The owner decides whether to continue observing or take an authorized action.
+A tool timeout alone is neither a declared observation boundary nor evidence of job failure or authority to change the operation. When the agreed observation boundary is actually reached, the owner decides whether to continue observing or take an authorized action.
 
 Distinguish workload outcome, evidence sufficiency and monitoring condition. Report unavailable
 telemetry or an unknown process state truthfully. Stop affected work when an explicit safety threshold

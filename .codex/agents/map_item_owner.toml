@@ -123,9 +123,15 @@ Apply `docs/ENGINEERING.md` to local validation cost and the kernel's elapsed-pr
 overruns. Resolve routine corrections within local rights and promptly surface programme-level
 trade-offs; passive observation does not transfer that responsibility.
 
-Do useful local work while children run. When idle, use one event-aware or suitably long wait and
-reconcile after a material event or observation boundary. Never stack short polls or emit unchanged
-heartbeats.
+Do useful local work while children run. When idle, explicitly select a long interruptible agent wait:
+for a healthy multi-hour job, use wait_agent(timeout_ms=3600000) when supported, or the time to the
+next agreed review boundary if sooner. Messages and user input wake this wait early; its timeout is
+not a response delay. Do not apply a generic short blocking-sleep or heartbeat cadence to this event
+wait. Respect actual tool limits and higher-priority constraints; report a concrete limitation.
+After an unchanged timeout, renew the long wait without listing agents, polling the job session or
+reading logs merely for liveness. Reconcile on a material event or the agreed review boundary.
+A delegated monitor must replace owner polling, not create a second polling layer. Resource sampling
+belongs inside the autonomous supervisor and does not set the owner's model-wakeup cadence.
 
 Use the supplied LONGRUN procedure when triggered. A passive monitor observes only; all launch, retry,
 repair and follow-up authority remains with you. Never infer completion from activity or elapsed time.

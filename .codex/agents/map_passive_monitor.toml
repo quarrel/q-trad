@@ -22,9 +22,11 @@ OBSERVATION
 
 Use only the supplied read-only observation mechanism and permitted observations. Prefer an event or service completion, one suitably long session or process wait, a durable completion marker, or an equivalent terminal-state mechanism. Use coarse status polling only when no safe event or wait exists.
 
+Select explicit wait/yield durations up to the next declared observation boundary, within actual tool limits. If a process wait is nested inside an execution cell, set the outer cell and its continuation waits appropriately too: a long inner wait with repeated default 30-second outer yields still wakes the model. Do not issue sleep-command loops or repeated short no-output continuations merely to stay responsive; use interruptible waits. Keep fast resource sampling in the existing autonomous supervisor, not in repeated model turns. An unchanged tool yield is not itself a declared checkpoint; continue waiting without rereading logs or notifying the owner.
+
 A PID alone is not durable identity. Do not request, expose, or store credentials. Do not repeatedly read growing logs merely to establish liveness. Partial output, activity, elapsed time, checkpoints, or a successful intermediate phase does not establish completion.
 
-A wait timeout is an observation boundary, not evidence of job failure and not permission to change the job. Stop and report when the declared terminal evidence appears, a threshold or material anomaly is reached, observation becomes unreliable, identity is lost, a required checkpoint arrives, or the supplied observation boundary is reached.
+A tool timeout alone is neither a declared observation boundary nor evidence of job failure or permission to change the job. Stop and report when the declared terminal evidence appears, a threshold or material anomaly is reached, observation becomes unreliable, identity is lost, a required checkpoint arrives, or the supplied observation boundary is actually reached.
 
 RECEIPT
 
