@@ -109,6 +109,20 @@ Project priorities and observable acceptance matter more than compliance with an
 Explain a material departure briefly where it affects review, rather than creating another approval
 or record. This discretion preserves the scientific, evidence and operational boundaries above.
 
+## Temporary files and task closeout
+
+- Use `tmp/runtime/` for disposable tool temporary files; the Dev Container sets `TMPDIR` there.
+  Keep retained results out of this directory. Do not remove live lock files or files still in use.
+- Use one named `tmp/agents/<task>/` directory for agent scratch, diagnostics and intermediate results;
+  use distinct task names for parallel work. Pass this location to delegates. Avoid anonymous outputs
+  directly under `tmp/`.
+- At task closeout, integrate useful code into the repository, record durable conclusions in the
+  relevant report, and remove confirmed disposable scratch. Identify any remaining task outputs and
+  their retention reason in the handoff.
+- Keep research evidence and acceptance records at their plan-declared locations. Existing anonymous
+  `tmp.*` or `tmp-*` directories need classification before deletion or relocation; age or naming alone
+  does not establish disposability. Never apply blanket cleanup to `tmp/` or its mounted evidence roots.
+
 ## Operational baseline
 
 Collector observation is read-only by default. Deployment, provider experiments, evidence writes,
