@@ -1,6 +1,6 @@
 # Workspace tmp storage relocation proposal
 
-Date: 2026-09-08. Status: first two roots migrated, verified and original workspace contents removed. Other rows remain proposals. See [completed migration and mount disposition](TMP_R2_STORAGE_MIGRATION.md).
+Date: 2026-09-08. Status: first two roots migrated and read-only mounts confirmed; the remaining five roots are now approved, copied and independently verified, awaiting rebuild and source reclamation. See [first migration](TMP_R2_STORAGE_MIGRATION.md) and [remaining migration and worktree cleanup](TMP_REMAINING_STORAGE_MIGRATION.md).
 
 ## Completed administrative cleanup
 
@@ -47,7 +47,7 @@ access, now supplied by bind mounts. Redundant workspace contents were removed a
 
 | Location under tmp | Approximate size after cleanup | Reason |
 | --- | ---: | --- |
-| `worktrees/` | 10.29 GiB | Accepted environment/source dependencies and two unresolved dirty worktrees; see below. |
+| `worktrees/` | About 5.2 GiB | Seven retained source/environment checkouts; superseded dirty drafts archived and their two worktrees removed. |
 | `pytest-of-vscode/` | 1.60 GiB | Potential disposable test output, but age alone is insufficient: check active users and retained failure references before deleting exact obsolete runs. Do not migrate blindly as evidence. |
 | `r3f-base.Uv7C6r/` | 0.64 GiB | Mostly an editable Python environment; source/ownership and continuing dependency audit remains. |
 | `MAP_orchestrator/` | 0.047 GiB | Small programme journals, receipts, failure diagnostics and absolute-path control scripts. Keep available at the original locations. |
@@ -56,9 +56,9 @@ access, now supplied by bind mounts. Redundant workspace contents were removed a
 Retain `r4-p0-remediation-7` (about 5.1 GiB): it supplies the accepted environment, its editable install
 points to its source, and final-delivery's environment links depend on it. Retain original scientific,
 terminal, recovery and metrics checkouts because evidence names those paths. Their source trees are small.
-Retain final-delivery for its validation/document references. Retain `r4-p0-milestone-static` because it
-has modified PLAN/STATUS and an untracked differing findings draft, and `r4base2` because it has a modified
-test plus a roughly 5.1 GiB environment. None should be force-removed or moved as an ordinary directory.
+Retain final-delivery for its validation/document references. The formerly dirty `r4-p0-milestone-static`
+and `r4base2` drafts are now preserved in separate local archive branches with verified file hashes;
+both checkouts were removed without force. See the remaining-migration record for exact commits.
 
 If these runtime environments are relocated later, audit editable `.pth`/distribution records, interpreter
 links and script shebangs. Do not copy a virtual environment and assume it remains functional or has the
@@ -79,13 +79,15 @@ is actually needed. Use Git-aware worktree operations for any future source relo
    `Path(output_root) == Path(output_root).resolve()` and hash that output root into identity
    (`experiments/r4_residual_graph/attempt_artifacts.py:138–151`). A replacement symlink can fail that rule.
    For the first two R2 roots, actual Stage 6/7 and R3 consumers independently require canonical/nonsymlink
-   original paths. Mounted compatibility was accepted before source deletion. Actual aliases are currently
-   writable; native Compose read-only configuration takes effect next rebuild. Other roots require their own audit.
+   original paths. Mounted compatibility was accepted before source deletion. Both original aliases are now
+   confirmed read-only. The five remaining roots use the same native Compose arrangement, pending rebuild.
    Never rewrite immutable path fields to make a check pass.
 5. Record source-to-destination provenance, verification evidence and the tested access arrangement.
    Remove original bulk files only after acceptance and a clear rollback/retention decision. Any temporary
    compatibility bridge must have a named consumer and a removal trigger; do not accumulate permanent
    unexplained symlinks. Deleting the sole original before copy validation is not part of the proposal.
 
-The first batch is complete. The next normal rebuild applies corrected native Compose read-only mounts
-and drops the temporary cleanup alias. Further batches, cache deletion and runtime relocation remain unperformed.
+The first batch and two additional worktree removals are complete. All five remaining evidence roots have
+verified copies; rebuild to activate their mounts before reclaiming originals. `du -xks tmp` currently measures
+about 19.2 GiB on the workspace filesystem; plain `du -ks tmp` also includes 56.7 GiB already on `/data`.
+Cache deletion and accepted-runtime relocation remain unperformed.

@@ -104,6 +104,42 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/qtrad-r4
+        target: /workspace/tmp/qtrad-r4
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/r2-confirmatory-ibkr-historical-20260816T090943Z
+        target: /workspace/tmp/r2-confirmatory-ibkr-historical-20260816T090943Z
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/qtrad-r2-lab
+        target: /workspace/tmp/qtrad-r2-lab
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/capture-snapshot-20260717T044430Z
+        target: /workspace/tmp/capture-snapshot-20260717T044430Z
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/ibkr-run-20260806T035300Z
+        target: /workspace/tmp/ibkr-run-20260806T035300Z
+        read_only: true
+        bind:
+          create_host_path: false
+      # Temporary access to underlying originals; remove after verified source cleanup.
+      - type: bind
+        source: ./tmp
+        target: /workspace-tmp-migration-source
+        bind:
+          create_host_path: false
     networks:
       - qtrad-dev
     gpus: all

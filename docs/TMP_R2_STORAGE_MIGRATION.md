@@ -53,9 +53,8 @@ The rejected receipt is preserved and never relabelled as successful.
 
 The two permanent aliases now use native Compose `read_only: true` in
 [compose.devcontainer.yaml](../.devcontainer/compose.devcontainer.yaml), with `create_host_path: false`.
-Their duplicate Dev Containers entries were removed. **The current aliases remain writable; the
-corrected read-only configuration applies at the next normal container rebuild.** No immediate
-additional rebuild is required to complete this migration.
+Their duplicate Dev Containers entries were removed. After the operator's subsequent rebuild,
+both actual mounts are confirmed read-only and still identify the corresponding `/data` directories.
 
 ## Original cleanup and retention
 
@@ -67,9 +66,10 @@ mountpoint directories, destinations and all audit evidence remain.
 
 `source-removal.json` records PASS at 2026-09-08T06:41:17Z and a contemporaneous workspace free-space
 increase of 60,876,877,824 bytes (about 56.70 GiB). This is a filesystem observation, not a guarantee
-of host VHD compaction. The temporary source-alias configuration was removed; its running mount
-disappears at the next normal rebuild.
+of host VHD compaction. The temporary source-alias configuration was removed and its old mount
+is confirmed absent after rebuilding. A new temporary alias is now prepared solely for the
+[remaining five-root migration](TMP_REMAINING_STORAGE_MIGRATION.md).
 
 Keep both permanent original-path aliases while frozen R2/R3 consumers require them. The external
 `r2-confirmatory-ibkr-historical-20260820T051751Z-authority/` sibling remains in workspace tmp.
-Other proposed batches, worktree/runtime relocations and cache cleanup were not performed.
+Subsequent worktree cleanup and remaining-batch preparation are recorded in that separate migration document.
