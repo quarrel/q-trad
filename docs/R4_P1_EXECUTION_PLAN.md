@@ -75,6 +75,7 @@ binding_controls:
   exact source and development chronology remain explicit;
   all empirical features and labels respect their availability and target-maturity times;
   capability-policy choices use only synthetic data and a fixed DEV_1 fit sample, never DEV_2/DEV_3 metrics;
+  no DEV_1–DEV_3 diagnostic or forecast metric is exposed while the capability policy remains revisable;
   DEV_2/DEV_3 results cannot trigger unrecorded schedule, architecture or feature changes;
   every attempted empirical configuration and result is reported, including failures;
   negative or inconclusive completion is valid;
@@ -180,8 +181,8 @@ Missing local forecasts fail the affected row/foundation construction; they do n
 
 ## 5. R4-P1.A — training-capability investigation — BINDING OUTCOMES
 
-This stage establishes whether the proposed training path can learn before any DEV_2 or DEV_3 metric
-is inspected.
+This stage establishes whether the proposed training path can learn before any DEV_1–DEV_3 diagnostic
+or forecast metric is exposed.
 
 ### 5.1 Corrected training properties
 
@@ -196,7 +197,7 @@ The capability candidate must satisfy all of these observable properties:
    cannot be described only by epochs when it performs one update over the complete dataset.
 4. **Fixed empirical policy.** Optimiser, learning rate, update schedule, batch/accumulation policy,
    epoch or step ceiling, initialisation, scaling and device are frozen after capability work and
-   before any DEV_2/DEV_3 outcome metric is calculated.
+   before any DEV_1–DEV_3 diagnostic or forecast metric is calculated.
 5. **Numerical policy installed.** The chosen CPU/CUDA policy is applied before the relevant runtime is
    initialised and is recorded from actual settings. There is no silent device fallback.
 6. **Learning diagnostics.** Record initial/final loss, optimiser updates, target RMS, correction RMS,
@@ -225,20 +226,40 @@ All outputs must remain finite and comparator-preserving before training.
 
 The item owner may revise the training policy at most three times using only these fixtures and the
 fixed DEV_1 overfit sample. Record each attempted policy and why it failed or was selected. Do not use
-DEV_2/DEV_3 outcomes to choose among policies.
+DEV_1–DEV_3 diagnostic outputs or DEV_2/DEV_3 forecast outcomes to choose among policies.
 
-### 5.3 Capability gate
+### 5.3 Capability decision and empirical-policy freeze
 
-If the capability cases do not pass within the three-policy budget, close R4-P1 with
-`TRAINING_CAPABILITY_NOT_ESTABLISHED`. Do not run the empirical neural screen.
+At the end of capability work, write one compact `R4P1_POLICY_FREEZE` entry in the ordinary run
+register. It is not a promotion, receipt or scientific gate. It records exactly one of:
+
+```text
+CAPABILITY_ESTABLISHED
+  selected empirical training policy and configuration identity
+
+TRAINING_CAPABILITY_NOT_ESTABLISHED
+  no empirical neural policy selected; empirical neural screen prohibited
+```
+
+No residual-structure correlation, lead-lag result, linear-probe forecast metric or neural empirical
+metric for `DEV_1`, `DEV_2` or `DEV_3` may be calculated or exposed before this entry exists. Code,
+metadata-only support preparation and tests for R4-P1.B may proceed in parallel while capability work
+runs.
+
+If capability is not established within the three-policy budget, record
+`TRAINING_CAPABILITY_NOT_ESTABLISHED` and skip R4-P1.C. R4-P1.B still executes after that final decision
+because its fixed diagnostics and linear probes remain required and cannot alter a neural policy that
+was not selected.
 
 Passing capability proves only that the mechanism can learn known or memorisable relationships. It is
 not evidence of market predictability.
 
 ## 6. R4-P1.B — residual-structure diagnostics and linear probes — BINDING
 
-This stage is deliberately cheap and may proceed in parallel with late capability work once the exact
-residual foundation is stable.
+R4-P1.B is deliberately cheap. Its implementation, exact residual joins, fixed edge sets, matched
+non-edge construction and output schemas may be prepared while capability work runs. Calculation or
+exposure of empirical `DEV_1`–`DEV_3` results begins only after `R4P1_POLICY_FREEZE`, whether that entry
+records capability success or final capability failure.
 
 ### 6.1 Descriptive residual structure
 
@@ -262,7 +283,62 @@ feature cut-off. Compare fixed economic edges, shuffled edges and matched non-ed
 Report breadth and stability; do not select the best lag and present it as though predeclared. All
 three lags remain visible.
 
-### 6.3 Closed linear residual probes
+### 6.3 Fixed evaluation reducers
+
+All R4-P1 empirical forecast gates use the R4-P0 equal-instrument convention explicitly defined here.
+Candidate and comparator use identical row support; a candidate-specific omission is a failed result,
+not a reduced comparison set.
+
+For model `m`, instrument `i` and block `p`:
+
+```text
+MSE[m,i,p] = mean_row((forecast[m] - realised_return)^2)
+```
+
+Block aggregate MSE is the equal-weighted mean of the twenty instrument MSEs:
+
+```text
+MSE[m,p] = mean_i(MSE[m,i,p])
+```
+
+Combined-development MSE is calculated on the union of `DEV_2` and `DEV_3` rows within each
+instrument, then equal-weighted across the twenty instruments:
+
+```text
+MSE[m,i,DEV_COMBINED] = mean_row_union_DEV2_DEV3((forecast[m] - realised_return)^2)
+MSE[m,DEV_COMBINED]   = mean_i(MSE[m,i,DEV_COMBINED])
+```
+
+For candidate `c` and comparator `b`:
+
+```text
+delta[c,b,i,p] = MSE[b,i,p] - MSE[c,i,p]
+delta[c,b,p]   = MSE[b,p]   - MSE[c,p]
+```
+
+Positive delta favours the candidate. Direct skill versus zero is:
+
+```text
+skill[c,p] = 1 - MSE[c,p] / MSE[ZERO_RETURN,p]
+```
+
+For a breadth or concentration gate against comparator `b`, an instrument improves only when
+`delta[c,b,i,DEV_COMBINED] > 0`. Positive contribution and concentration are:
+
+```text
+positive_contribution[c,b,i] = max(0, delta[c,b,i,DEV_COMBINED])
+
+best_instrument_share[c,b] =
+  max_i(positive_contribution[c,b,i])
+  / sum_i(positive_contribution[c,b,i])
+```
+
+If the positive-contribution sum is zero, `best_instrument_share` is defined as `1.0` and the gate
+fails. Clipping is used only for the concentration share; signed deltas remain unchanged elsewhere.
+Group and row-weighted summaries may be reported descriptively but cannot determine whether a graph
+fit is allowed or recommended.
+
+### 6.4 Closed linear residual probes
 
 Fit exactly four Ridge probes with `alpha = 1.0`, training-only standardisation and identical support:
 
@@ -284,19 +360,20 @@ No additional feature engineering, alpha search, lag selection or nonlinear lear
 Predicted residuals are added to the exact all-twenty `LOCAL_RIDGE` forecast and evaluated as total
 forecasts.
 
-Use the two chronological evaluations in section 4.2. Report total-forecast MSE and direct skill
-versus zero, residual MSE, fixed-versus-pooled and fixed-versus-shuffled deltas, results by instrument
-and group, and positive-contribution concentration.
+Use the two chronological evaluations in section 4.2 and the reducers in section 6.3. Report
+total-forecast MSE and direct skill versus zero, residual MSE, fixed-versus-pooled and
+fixed-versus-shuffled deltas, results by instrument and group, and positive-contribution concentration.
 
-### 6.4 Graph empirical gate
+### 6.5 Graph empirical gate
 
-The fixed graph passes the lightweight empirical structure gate only when all are true:
+The fixed graph passes the lightweight empirical structure gate only when all are true under section
+6.3:
 
-1. `FIXED_GRAPH_LINEAR_RESIDUAL` improves on `POOLED_LINEAR_RESIDUAL` in both DEV_2 and DEV_3;
+1. `FIXED_GRAPH_LINEAR_RESIDUAL` improves on `POOLED_LINEAR_RESIDUAL` in both `DEV_2` and `DEV_3`;
 2. it improves on `SHUFFLED_GRAPH_LINEAR_RESIDUAL` in both blocks;
-3. its total forecast has positive direct skill versus zero in both blocks;
-4. at least 7 of 20 instruments improve on the pooled probe on the combined DEV_2+DEV_3 support; and
-5. no one instrument supplies more than 0.8 of positive fixed-versus-pooled contribution.
+3. its total forecast has positive direct skill versus `ZERO_RETURN` in both blocks;
+4. at least 7 of 20 instruments improve on `POOLED_LINEAR_RESIDUAL` on `DEV_COMBINED`; and
+5. `best_instrument_share[FIXED_GRAPH_LINEAR_RESIDUAL, POOLED_LINEAR_RESIDUAL] <= 0.8`.
 
 Failure does not prove that every graph is useless. It means the present fixed graph and information
 set do not justify even a small neural graph follow-on in this work item.
@@ -311,7 +388,7 @@ Before calculating any empirical neural metric, select and record a deterministi
 sample of structurally eligible decision timestamps:
 
 - up to 5,000 training timestamps for each chronological stage;
-- up to 2,000 evaluation timestamps from each of DEV_2 and DEV_3;
+- up to 2,000 evaluation timestamps from each of `DEV_2` and `DEV_3`;
 - include every eligible target row at each selected timestamp;
 - choose keys from chronology/support metadata only, not outcomes.
 
@@ -319,7 +396,7 @@ This is a triage sample, not a retained-scale result. Full-development fitting r
 
 ### 7.2 Candidate budget
 
-After R4-P1.A passes, always run:
+After R4-P1.A records `CAPABILITY_ESTABLISHED`, always run:
 
 ```text
 LOCAL_TEMPORAL_RESIDUAL
@@ -328,9 +405,9 @@ POOLED_NON_GRAPH_RESIDUAL
 
 using:
 
-- one frozen training policy from R4-P1.A;
+- the one frozen training policy from `R4P1_POLICY_FREEZE`;
 - one seed, `17`;
-- DEV_1 -> DEV_2 and DEV_1+DEV_2 -> DEV_3;
+- `DEV_1 -> DEV_2` and `DEV_1 + DEV_2 -> DEV_3`;
 - fixed sample keys and exact common support.
 
 This is four empirical neural fits.
@@ -347,7 +424,7 @@ fits. `LEARNED_STATIC_GRAPH_RESIDUAL` is excluded.
 
 ### 7.3 Interpretation controls
 
-For every fit report:
+For every fit report, using section 6.3 where applicable:
 
 - actual optimiser-update count;
 - initial and final training loss;
@@ -363,20 +440,21 @@ If training loss does not decline materially, gradients are absent/non-finite, o
 more than ten times training residual RMS, classify the fit as `TRAINING_FAILURE` and do not interpret
 its forecast metrics as evidence against the model family.
 
-The training policy cannot be changed in response to DEV_2/DEV_3 results. A changed policy is another
-exploratory configuration and requires fresh operator authority under this plan's closed budget.
+The training policy cannot be changed in response to `DEV_2`/`DEV_3` results. A changed policy is
+another exploratory configuration and requires fresh operator authority under this plan's closed
+budget.
 
 ### 7.4 Recommendation threshold
 
 A fixed graph may be recommended for a separately authorised full-scale or prospective investigation
-only if it:
+only if, under section 6.3, it:
 
 1. passes the R4-P1.B linear graph gate;
-2. beats the corrected pooled non-graph neural control in both DEV_2 and DEV_3;
-3. beats the corrected shuffled-fixed neural control in both blocks;
-4. has positive total-forecast skill versus zero in both blocks;
-5. improves at least 7 of 20 instruments on combined development; and
-6. is not dominated by one instrument above the 0.8 contribution threshold.
+2. beats `POOLED_NON_GRAPH_RESIDUAL` in both `DEV_2` and `DEV_3`;
+3. beats `SHUFFLED_FIXED_GRAPH_RESIDUAL` in both blocks;
+4. has positive total-forecast skill versus `ZERO_RETURN` in both blocks;
+5. improves at least 7 of 20 instruments versus `POOLED_NON_GRAPH_RESIDUAL` on `DEV_COMBINED`; and
+6. has `best_instrument_share[FIXED_ECONOMIC_GRAPH_RESIDUAL, POOLED_NON_GRAPH_RESIDUAL] <= 0.8`.
 
 This recommendation is not `HYPOTHESIS_NOMINATED`, graph retention or promotion. It is a go/no-go
 recommendation for designing another experiment on untouched or prospectively acquired evidence.
@@ -386,7 +464,7 @@ recommendation for designing another experiment on untouched or prospectively ac
 R4-P1 uses ordinary exploratory run discipline:
 
 - one compact configuration per attempted capability or empirical policy;
-- one append-only JSONL or equivalent run register;
+- one append-only JSONL or equivalent run register, including the single `R4P1_POLICY_FREEZE` entry;
 - a new output directory for a rerun rather than overwriting an earlier result;
 - failed and superseded attempts remain listed in the final summary;
 - no release journal, G0 gate, promotion, reusable receipt, immutable support capsule or process
@@ -436,14 +514,15 @@ Preferred untracked output root:
 The final output contains:
 
 - the selected capability/training policy and all rejected policy attempts;
+- the `R4P1_POLICY_FREEZE` decision;
 - synthetic capability results and tiny-batch overfit evidence;
 - descriptive residual-edge diagnostics;
 - causal lead-lag diagnostics;
-- the complete linear-probe table;
+- the complete linear-probe table under the fixed reducers;
 - corrected neural-control results or the exact gate that skipped them;
 - every attempted empirical configuration and failure;
 - a concise explanation of what R4-P0 can and cannot be taken to show after this investigation; and
-- one of these recommendations:
+- one or more of these recommendations:
 
 ```text
 TRAINING_CAPABILITY_NOT_ESTABLISHED
@@ -453,7 +532,7 @@ CORRECTED_GRAPH_SCREEN_NEGATIVE
 CONSIDER_SEPARATE_PROSPECTIVE_GRAPH_EXPERIMENT
 ```
 
-Multiple statements may apply; they are findings categories, not promotion states.
+These are findings categories, not promotion states.
 
 ## 10. Validation and review — BINDING
 
@@ -462,18 +541,21 @@ Use proportionate validation:
 1. Focused tests prove comparator-preserving initial output, actual optimiser-step counting,
    training-only target scaling, planted-signal recovery, fixed-versus-shuffled discrimination,
    target-maturity checks and terminal-loader rejection.
-2. Focused tests cover linear context construction, exact graph/shuffle use, common support and metric
-   sign conventions.
-3. Run formatting, Ruff and strict typing for changed experimental code.
-4. Run one correctly shaped end-to-end smoke covering capability, diagnostics, one linear probe and
-   one bounded neural fit.
-5. Do not run `ops/dev/verify.sh` solely because this exploratory investigation completes. Run the
+2. Focused tests cover linear context construction, exact graph/shuffle use, common support, the fixed
+   equal-instrument reducers, combined-block calculations, contribution concentration and metric sign
+   conventions.
+3. Focused tests prove that empirical B/C metric execution rejects a missing `R4P1_POLICY_FREEZE` and
+   that B remains executable after a recorded `TRAINING_CAPABILITY_NOT_ESTABLISHED` decision.
+4. Run formatting, Ruff and strict typing for changed experimental code.
+5. Run one correctly shaped end-to-end smoke covering capability, policy freeze, diagnostics, one
+   linear probe and one bounded neural fit.
+6. Do not run `ops/dev/verify.sh` solely because this exploratory investigation completes. Run the
    complete gate only if the candidate changes active `src/`, schemas, shared runtime/dependency
    policy, or another governing milestone/release boundary requires it.
-6. Use one independent final review of the exact candidate and findings. The reviewer checks the
-   capability gates, chronology/terminal exclusion, empirical calculations, complete attempt account
-   and claim boundary. The reviewer does not rerun every fit or create review handoffs for helper
-   functions.
+7. Use one independent final review of the exact candidate and findings. The reviewer checks the
+   capability gates, policy-freeze ordering, chronology/terminal exclusion, empirical reducers,
+   complete attempt account and claim boundary. The reviewer does not rerun every fit or create review
+   handoffs for helper functions.
 
 A reviewer must cite a binding requirement or concrete current-investigation failure path. Preferences,
 speculative production hardening, future R5/U-lane requirements, generic evidence infrastructure and
@@ -482,27 +564,29 @@ unrequested compatibility are not blockers.
 ## 11. Advisory MAP execution shape — ADVISORY
 
 The investigation is small enough for one delegated item owner. The orchestrator may instead use a
-small programme when parallelising the independent capability and diagnostic work saves material time.
-Useful logical seams are:
+small programme when parallelising preparation saves material time. Useful logical seams are:
 
 ### R4-P1.A — learnability owner
 
 - implement the corrected training path in a new experimental namespace;
 - pass the synthetic and tiny-batch capability gates;
-- freeze one empirical training policy.
+- record `R4P1_POLICY_FREEZE` with either capability success and one policy or final capability failure.
 
 ### R4-P1.B — diagnostic owner
 
-- consume the exact development residual foundation;
-- run edge/shuffle/non-edge and causal lead-lag diagnostics;
-- execute the four linear probes and apply the graph empirical gate.
+- prepare the residual joins, fixed edge sets, matched non-edges, linear design and reducers while A
+  runs;
+- do not calculate or expose any empirical block result before `R4P1_POLICY_FREEZE`;
+- after that entry, run edge/shuffle/non-edge and causal lead-lag diagnostics;
+- execute the four linear probes and apply the graph empirical gate even when A closed
+  `TRAINING_CAPABILITY_NOT_ESTABLISHED`.
 
 ### R4-P1.C — conditional empirical owner
 
-- select the outcome-blind bounded sample;
+- after `CAPABILITY_ESTABLISHED`, select the outcome-blind bounded sample;
 - run the four mandatory temporal-control fits;
 - add the four fixed/shuffled graph fits only when R4-P1.B passes;
-- produce the complete result table.
+- produce the complete result table under section 6.3.
 
 ### R4-P1.Z — synthesis
 
@@ -510,10 +594,11 @@ Useful logical seams are:
 - produce `docs/R4_P1_FINDINGS.md`;
 - obtain one independent final review.
 
-These are custody/consumer seams, not mandatory branches or PRs. A and B may run concurrently once
-the common residual input is established. C depends on A and partially on B. The orchestrator may
-combine all work under one owner, change file placement, or omit a separate synthesis agent while
-preserving the binding gates and mutation ownership.
+These are custody/consumer seams, not mandatory branches or PRs. A and B preparation may run
+concurrently once the common residual input is established. B empirical execution waits for A's final
+policy-freeze entry. C depends on capability success and, for its graph fits, the B graph gate. The
+orchestrator may combine all work under one owner, change file placement, or omit a separate synthesis
+agent while preserving the binding gates and mutation ownership.
 
 ## 12. Completion conditions — BINDING
 
@@ -523,15 +608,17 @@ R4-P1 is complete when:
 2. no terminal-former-holdout row or outcome is loaded;
 3. the capability policy either passes every required capability case within three revisions or closes
    `TRAINING_CAPABILITY_NOT_ESTABLISHED`;
-4. descriptive, causal lead-lag and all four linear-probe results are reported for DEV_2 and DEV_3;
-5. the graph empirical gate is applied mechanically;
-6. the mandatory corrected local/pooled neural screen runs only after capability passes;
-7. fixed/shuffled neural fits run only after the linear graph gate passes;
-8. no more than eight empirical neural fits and one empirical seed are used;
-9. all attempted policies/configurations and failures are retained in the compact account;
-10. the final findings distinguish training failure, lack of signal and lack of graph increment;
-11. focused checks and one independent final review pass; and
-12. the final recommendation states whether any further graph work is justified, without changing the
+4. one `R4P1_POLICY_FREEZE` entry precedes every empirical B/C metric;
+5. descriptive, causal lead-lag and all four linear-probe results are reported for `DEV_2` and `DEV_3`
+   using the fixed reducers;
+6. the graph empirical gate is applied mechanically;
+7. the mandatory corrected local/pooled neural screen runs only after capability passes;
+8. fixed/shuffled neural fits run only after the linear graph gate passes;
+9. no more than eight empirical neural fits and one empirical seed are used;
+10. all attempted policies/configurations and failures are retained in the compact account;
+11. the final findings distinguish training failure, lack of signal and lack of graph increment;
+12. focused checks and one independent final review pass; and
+13. the final recommendation states whether any further graph work is justified, without changing the
     accepted R4-P0 result or claiming held-out/native/economic validity.
 
 Positive forecast skill is not required for completion. The expected successful outcome may simply be
