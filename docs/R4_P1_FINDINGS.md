@@ -162,11 +162,12 @@ No fixed-graph neural result exists or is inferred from the skip.
 The completed output root is
 `/workspace/tmp/qtrad-r4-p1/r4-p1-20260908-repair1`. It contains:
 
-- `input.json`, `numerics.json` and `tiny-capacity-sample.json`;
+- `input.json`, `numerical-policy.json` and `tiny-sample.json`;
 - `capability-policy-1.json` and the append-only `run-register.jsonl`;
 - `residual-diagnostics.json` and `linear-probes.json`;
-- `neural-sample-DEV_2.json`, `neural-sample-DEV_3.json` and `neural-screen.json`;
-- `resources.json` and `implementation-validation.json`, which binds exact output and source hashes.
+- `neural-sample-keys.json` and `neural-screen.json`;
+- `resources.json` and `implementation-validation.json`, which binds exact output and source hashes;
+- `focused-validation.json`, the retained command/outcome receipt for tests, Ruff, formatting and Pyright.
 
 The complete account is one distinct capability policy, seven completed capability fits and one
 earlier reporting-failed fit of that same policy, eight empirical Ridge fits, four empirical neural
@@ -197,6 +198,10 @@ Its successful-freeze fixture is explicitly a plumbing fixture, not research cap
 Actual planted recovery/discrimination and real-batch overfit are checked by the recorded capability
 execution and focused assertions over that exact retained result, without fit replay.
 Namespace-local strict Pyright, Ruff and formatting pass without shared policy changes.
+The retained summary receipt is
+`/workspace/tmp/qtrad-r4-p1/r4-p1-20260908-repair1/focused-validation.json`.
+It records the exact commands, 23-test result and static-check outcomes; raw command output remains
+in the implementation tool transcript rather than separate log files.
 
 - `P1-INPUT`, `P1-FREEZE`, `P1-CAP`, `P1-B` and `P1-C`: PASS; exact output/source hashes,
   register counts and reducer/common-support checks are in `implementation-validation.json`.
