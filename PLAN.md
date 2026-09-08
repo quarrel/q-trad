@@ -168,13 +168,13 @@ chronology ambiguity before those contracts are fixed.
 ## R4 — residual structural graph experiment
 
 - R4-P0 is the operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` screen in
-  `docs/R4_P0_EXECUTION_PLAN.md`. Its completed computation returns `NO_HYPOTHESIS_NOMINATED`;
+  `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`. Its completed computation returns `NO_HYPOTHESIS_NOMINATED`;
   the negative result does not retain a graph. See `docs/R4_P0_FINDINGS.md`
   and `docs/STATUS.md` for the result, authorised recovery, CUDA-policy deviation and one-case
   control exception. Preserve original anchors, failures and unknown numerical effects.
 - Do not retain a graph or start R5 on this historical screen. Any further retention experiment needs
-  separately authorised untouched prospective or native evidence. Archive the execution plan only
-  after operator acceptance of the result.
+  separately authorised untouched prospective or native evidence. The operator accepted the qualified
+  result and merged the reviewed delivery on 2026-09-08; the completed plans are archived under `docs/archive/r4/`.
 - Derive graph targets only from out-of-fold local residuals.
 - Compare local-only, pooled non-graph, fixed economic graph, learned structural GNN-LSTM and
   shuffled-graph controls.

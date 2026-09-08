@@ -222,4 +222,6 @@ held-out graph retention, R5, native-source, profitability or real-capital autho
 The final source candidate and complete guarded `ops/dev/verify.sh` milestone evidence are bound
 separately in the programme record. Current governing documents are preserved in delivery;
 original scientific checkouts and all retained failures remain unchanged.
-Execution-plan archival awaits operator acceptance of the result, as required by the execution plan.
+The operator accepted the qualified result and authorised merging `724e2e0` on 2026-09-08.
+The [execution and remediation plans](archive/r4/README.md) are archived as historical records;
+this administrative archival does not change the accepted scientific artefacts or their identities.

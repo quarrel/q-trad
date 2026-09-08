@@ -1,9 +1,9 @@
 # Current status
 
-**Updated:** 2026-09-07 (R4-P0 only; earlier operational observations retain their original dates)
+**Updated:** 2026-09-08 (R4-P0 only; earlier operational observations retain their original dates)
 **Current milestone:** R4-P0 historical exploratory result — `NO_HYPOTHESIS_NOMINATED`. R3 is complete; R4 held-out retention remains unsatisfied.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
-**Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md` and `docs/archive/r3/R3_EXECUTION_PLAN.md`
+**Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md` and `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0–R3 are complete. `R2-IBKR-HISTORICAL` is `VALID_CONSUMED_RESULT`; R3 delivered the cost/portfolio baseline, historical-exploratory report and frozen future native protocol. `capture-v4` remains live with 23/23 channels ready, and paper research remains offline/replay.
 
@@ -75,7 +75,8 @@ milestone verification are bound separately in the programme record.
 
 Current governing policy and unrelated R0–R3/native status are preserved separately from frozen
 execution provenance. No graph retention, R5, native experiment, executable profitability or
-real-capital authority follows. Execution-plan archival requires operator acceptance of the result.
+real-capital authority follows. The operator accepted the qualified result and authorised merging
+`724e2e0` on 2026-09-08; the completed execution and remediation plans are archived under `docs/archive/r4/`.
 
 ## Working now
 
@@ -266,7 +267,7 @@ real-capital authority follows. Execution-plan archival requires operator accept
 
 1. Retain the final-authenticated R2 result and the completed R3 plan/report as provenance-distinct records.
 2. Retain the qualified negative R4-P0 result, original predictions, failed closures, exposure and
-   numerical-deviation disclosures. Archive its execution plan only after operator result acceptance.
+   numerical-deviation disclosures alongside the archived plans in `docs/archive/r4/`.
 3. Keep final delivery and full milestone evidence bound to the selected source head; preserve the
    negative/inconclusive R3.H result. Native protocol instantiation, held-out graph retention and R5
    require separate authority.
