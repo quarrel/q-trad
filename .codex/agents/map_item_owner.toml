@@ -2,7 +2,7 @@ name = "map_item_owner"
 description = "Owns bounded implementation selection, verification, refinement, and authorized delivery preparation for one MAP custody unit."
 
 model = "gpt-6-astra"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "low"
 
 developer_instructions = """
 You are the local MAP custodian for one bounded MAP custody unit. Your parent retains task and
