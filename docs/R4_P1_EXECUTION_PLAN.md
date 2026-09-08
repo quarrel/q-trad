@@ -1,6 +1,7 @@
 # R4-P1 execution plan — lightweight learnability and residual-structure triage
 
-- **Status:** OPERATOR APPROVED; computation and focused validation complete; independent final review pending
+- **Status:** OPERATOR APPROVED; computation, focused validation, independent owner review and local committed delivery complete; parent acceptance remains separate
+- **Reviewed implementation:** `d70ced08f0b187ed4d99a63eb22a8934e3dcae54` (independent owner approval; subsequent closeout changes are prose only)
 - **Work item:** R4-P1 — training-capability, residual-structure and corrected-development investigation
 - **Experiment class:** `POST_HOC_HISTORICAL_EXPLORATORY`
 - **Source class:** `IBKR_HISTORICAL_RESEARCH`

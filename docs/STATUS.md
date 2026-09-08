@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-09-08 (R4-P1 only; earlier operational observations retain their original dates)
-**Current milestone:** R4-P1 learnability triage — computation complete; independent final review pending. Corrected training capability passed, but the current graph is deprioritised. R4-P0 remains accepted; R4 held-out retention remains unsatisfied.
+**Current milestone:** R4-P1 learnability triage — computation, independent owner review and local committed delivery complete; parent acceptance remains separate. Corrected training capability passed, but the current graph is deprioritised. R4-P0 remains accepted; R4 held-out retention remains unsatisfied.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
 **Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md` and `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
@@ -37,7 +37,8 @@ gate, so no graph neural fit runs. See [the methods, results and attempt account
 
 The completed run took 113.63 seconds with 5.39 GiB peak process RSS and 1.43 GiB peak CUDA allocation.
 One earlier same-policy invocation failed only in quantile reporting; its failure remains retained.
-Independent final review is pending. No terminal former-holdout rows were loaded, and no P0 result,
+Independent owner review approved `d70ced08f0b187ed4d99a63eb22a8934e3dcae54`, and local committed
+delivery is complete; parent acceptance remains separate. No terminal former-holdout rows were loaded, and no P0 result,
 held-out retention, native validity, economic claim, R5 or trading authority changes.
 
 ## R4-P0 result: no hypothesis nominated (2026-09-07)

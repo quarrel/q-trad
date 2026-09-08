@@ -185,7 +185,9 @@ The recommendation is to **deprioritise the current graph hypothesis**. Training
 separated from the absence of useful development improvement and from the missing graph increment.
 R4-P0 remains `NO_HYPOTHESIS_NOMINATED`; R4's held-out retention gate remains unsatisfied.
 There is no native, economic, prospective, promotion, R5 or real-capital conclusion.
-Independent final review of this candidate remains the owner's delivery gate.
+Independent owner review approved implementation candidate
+`d70ced08f0b187ed4d99a63eb22a8934e3dcae54`; local committed delivery is complete.
+Programme acceptance and integration remain separate parent decisions.
 
 ## Validation
 
@@ -212,8 +214,9 @@ in the implementation tool transcript rather than separate log files.
   zero errors and warnings in strict mode.
 - `P1-VALIDATE-LINT`: `uv run --no-sync ruff check experiments/r4_p1_learnability tests/experiments/r4_p1_learnability`.
 - `P1-VALIDATE-FORMAT`: `uv run --no-sync ruff format --check experiments/r4_p1_learnability tests/experiments/r4_p1_learnability`.
-- `P1-VALIDATE-REVIEW`: pending independent owner review of the exact committed candidate.
+- `P1-VALIDATE-REVIEW`: PASS; independent owner review approved
+  `d70ced08f0b187ed4d99a63eb22a8934e3dcae54` before this prose-only closeout.
 
 The complete retained result, including the failed invocation, remains under the two named P1 output
 roots for review and the experiment account. Disposable implementation scratch is removed at handoff;
-the worktree's fresh environment remains for independent review.
+the worktree's fresh environment remains available for parent delivery checks.
