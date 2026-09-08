@@ -23,10 +23,7 @@
   "postStartCommand": "rm -f /home/vscode/.codex/state_5.sqlite /home/vscode/.codex/app-server-daemon/app-server-updater.pid && uv run alembic upgrade head && codex remote-control stop && sh .devcontainer/start_remote_control.sh",
   "waitFor": "postCreateCommand",
   "mounts": [
-    "source=/mnt/wsl/data/q-trad-bulkdata,target=/data,type=bind",
-    "source=/mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/ibkr-historical-r2-20260810T081317Z,target=/workspace/tmp/ibkr-historical-r2-20260810T081317Z,type=bind,readonly",
-    "source=/mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/r2-confirmatory-ibkr-historical-20260820T051751Z,target=/workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z,type=bind,readonly",
-    "source=${localWorkspaceFolder}/tmp,target=/workspace-tmp-migration-source,type=bind"
+    "source=/mnt/wsl/data/q-trad-bulkdata,target=/data,type=bind"
   ],  
   "customizations": {
     "vscode": {

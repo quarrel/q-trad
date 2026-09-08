@@ -92,6 +92,18 @@ services:
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/ibkr-historical-r2-20260810T081317Z
+        target: /workspace/tmp/ibkr-historical-r2-20260810T081317Z
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/wsl/data/q-trad-bulkdata/q-trad/retained-workspace-tmp/r2-confirmatory-ibkr-historical-20260820T051751Z
+        target: /workspace/tmp/r2-confirmatory-ibkr-historical-20260820T051751Z
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - qtrad-dev
     gpus: all

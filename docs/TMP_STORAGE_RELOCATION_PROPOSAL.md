@@ -1,6 +1,6 @@
 # Workspace tmp storage relocation proposal
 
-Date: 2026-09-08. Status: first two roots approved and copied/independently verified; mount cutover and original removal pending. Other rows remain proposals. See [migration status and resume steps](TMP_R2_STORAGE_MIGRATION.md).
+Date: 2026-09-08. Status: first two roots migrated, verified and original workspace contents removed. Other rows remain proposals. See [completed migration and mount disposition](TMP_R2_STORAGE_MIGRATION.md).
 
 ## Completed administrative cleanup
 
@@ -20,7 +20,7 @@ includes top-level regular files; none appeared among the largest 30 entries. Me
 
 `/data` is an ext4 mount from `/dev/sde[/q-trad-bulkdata]`, with about 882 GiB available before this batch.
 Its existing 71.78 GiB under `/data/q-trad/r4-p0` remains separate and unchanged. The first two approved R2
-copies now occupy about 56.70 GiB under `/data/q-trad/retained-workspace-tmp`; originals are retained pending cutover.
+copies now occupy about 56.70 GiB under `/data/q-trad/retained-workspace-tmp`; redundant workspace contents have been removed.
 
 ## Recommended relocation: about 67.97 GiB
 
@@ -41,7 +41,7 @@ and verified-copy procedure below before cutover.
 
 The operator approved the two largest R2 roots, together **56.70 GiB**. Their copies match all 25,784 files
 and 1,261 directories, including SHA-256 and metadata. Actual consumers require original-path nonsymlink
-access, so prepared read-only binds need container recreation before source reclamation. No scientific replay occurred.
+access, now supplied by bind mounts. Redundant workspace contents were removed after exact mounted-baseline compatibility; no scientific replay occurred.
 
 ## Keep in place for now
 
@@ -79,13 +79,13 @@ is actually needed. Use Git-aware worktree operations for any future source relo
    `Path(output_root) == Path(output_root).resolve()` and hash that output root into identity
    (`experiments/r4_residual_graph/attempt_artifacts.py:138–151`). A replacement symlink can fail that rule.
    For the first two R2 roots, actual Stage 6/7 and R3 consumers independently require canonical/nonsymlink
-   original paths. Read-only path-preserving mounts have therefore been prepared, with metadata-only
-   post-mount acceptance before source deletion. Other proposed roots still require their own path audit.
+   original paths. Mounted compatibility was accepted before source deletion. Actual aliases are currently
+   writable; native Compose read-only configuration takes effect next rebuild. Other roots require their own audit.
    Never rewrite immutable path fields to make a check pass.
 5. Record source-to-destination provenance, verification evidence and the tested access arrangement.
    Remove original bulk files only after acceptance and a clear rollback/retention decision. Any temporary
    compatibility bridge must have a named consumer and a removal trigger; do not accumulate permanent
    unexplained symlinks. Deleting the sole original before copy validation is not part of the proposal.
 
-Next for the approved batch: host/container recreation, mounted-consumer acceptance and exact original
-cleanup, as detailed in the migration runbook. Further batches, cache deletion and runtime relocation remain unperformed.
+The first batch is complete. The next normal rebuild applies corrected native Compose read-only mounts
+and drops the temporary cleanup alias. Further batches, cache deletion and runtime relocation remain unperformed.
