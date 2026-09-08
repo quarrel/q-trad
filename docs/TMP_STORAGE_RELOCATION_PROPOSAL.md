@@ -1,6 +1,6 @@
 # Workspace tmp storage relocation proposal
 
-Date: 2026-09-08. Status: first two roots migrated and read-only mounts confirmed; the remaining five roots are now approved, copied and independently verified, awaiting rebuild and source reclamation. See [first migration](TMP_R2_STORAGE_MIGRATION.md) and [remaining migration and worktree cleanup](TMP_REMAINING_STORAGE_MIGRATION.md).
+Date: 2026-09-08. Status: first two roots migrated; the remaining five roots are copied and independently verified, with original-path mounts now observed. Their underlying originals still await verified source reclamation. See [first migration](TMP_R2_STORAGE_MIGRATION.md) and [remaining migration and worktree cleanup](TMP_REMAINING_STORAGE_MIGRATION.md).
 
 ## Completed administrative cleanup
 
@@ -47,23 +47,13 @@ access, now supplied by bind mounts. Redundant workspace contents were removed a
 
 | Location under tmp | Approximate size after cleanup | Reason |
 | --- | ---: | --- |
-| `worktrees/` | About 5.2 GiB | Seven retained source/environment checkouts; superseded dirty drafts archived and their two worktrees removed. |
+| `worktrees/` | Completed R4-P0 checkouts removed | Exact source retained in archive refs and a verified Git bundle under `/data`; see [successor handoff](R4_SUCCESSOR_HANDOFF.md). |
 | `pytest-of-vscode/` | 1.60 GiB | Potential disposable test output, but age alone is insufficient: check active users and retained failure references before deleting exact obsolete runs. Do not migrate blindly as evidence. |
 | `r3f-base.Uv7C6r/` | 0.64 GiB | Mostly an editable Python environment; source/ownership and continuing dependency audit remains. |
 | `MAP_orchestrator/` | 0.047 GiB | Small programme journals, receipts, failure diagnostics and absolute-path control scripts. Keep available at the original locations. |
 | Other probes and scratch directories | individually small | Several R4 calibration/oracle/memory probes contain about 13 MiB each; classify retained diagnostic evidence versus reproducible scratch before removal. Unnamed tmp directories are not assumed disposable. |
 
-Retain `r4-p0-remediation-7` (about 5.1 GiB): it supplies the accepted environment, its editable install
-points to its source, and final-delivery's environment links depend on it. Retain original scientific,
-terminal, recovery and metrics checkouts because evidence names those paths. Their source trees are small.
-Retain final-delivery for its validation/document references. The formerly dirty `r4-p0-milestone-static`
-and `r4base2` drafts are now preserved in separate local archive branches with verified file hashes;
-both checkouts were removed without force. See the remaining-migration record for exact commits.
-
-If these runtime environments are relocated later, audit editable `.pth`/distribution records, interpreter
-links and script shebangs. Do not copy a virtual environment and assume it remains functional or has the
-same execution provenance. Prefer retaining the accepted environment until a separately validated replacement
-is actually needed. Use Git-aware worktree operations for any future source relocation.
+The seven remaining R4-P0 worktrees have now been retired under explicit operator authority. Exact source commits, both earlier draft archives and runtime provenance are preserved under `/data/q-trad/source-archives/r4-p0-closeout-20260908/`. The old environment and its dependent links were removed after dependency checks. Historical execution paths remain unchanged in evidence; they do not require permanent checkouts. See [the successor handoff](R4_SUCCESSOR_HANDOFF.md) for restoration and new-work boundaries.
 
 ## Migration procedure and acceptance
 
@@ -87,7 +77,5 @@ is actually needed. Use Git-aware worktree operations for any future source relo
    compatibility bridge must have a named consumer and a removal trigger; do not accumulate permanent
    unexplained symlinks. Deleting the sole original before copy validation is not part of the proposal.
 
-The first batch and two additional worktree removals are complete. All five remaining evidence roots have
-verified copies; rebuild to activate their mounts before reclaiming originals. `du -xks tmp` currently measures
-about 19.2 GiB on the workspace filesystem; plain `du -ks tmp` also includes 56.7 GiB already on `/data`.
-Cache deletion and accepted-runtime relocation remain unperformed.
+The first batch and all nine completed R4-P0 worktree removals are complete. The five further evidence roots have verified copies and original-path mounts, but underlying source reclamation remains pending. See the remaining-migration runbook for current access and measurement qualifications.
+The R4-P0 worktree/environment cleanup is complete. Other cache and scratch cleanup remains outside this operation.

@@ -1,6 +1,6 @@
 # Remaining retained-data migration
 
-Date: 2026-09-08. Status: five approved roots copied and independently verified; original-path mount activation and source reclamation await a container rebuild. Original files remain intact.
+Date: 2026-09-08. Status: five approved roots copied and independently verified. The later worktree-retirement check observed all five original paths mounted and `samefile` with their `/data` destinations; underlying originals still contain files. Complete the remaining cutover checks below before source reclamation.
 
 ## Verified copies
 
@@ -40,7 +40,7 @@ After rebuilding:
 4. Remove only the contents of these five exact cleanup roots, retaining empty mountpoint directories and all destination data. Record exact deletion scope, completed roots, failures and space measurements in a create-only receipt. Never delete through the original mounted paths or `/data`.
 5. Recheck destination metadata and original-path identity; remove the temporary Compose entry and record completion. No additional operator permission is needed for this already-authorised cleanup.
 
-The current container cannot activate these host mounts. Do not delete originals before the rebuilt access arrangement is accepted. Other evidence, external authority siblings, caches and runtime environments remain outside this deletion scope.
+Original-path mounts are now present. Do not delete underlying originals before the complete mounted-access and source-inventory checks above pass. Other evidence, external authority siblings, caches and runtime environments remain outside this deletion scope.
 
 ## Worktree cleanup completed
 
@@ -53,8 +53,8 @@ Two superseded dirty worktrees were preserved as Git archives before ordinary, n
 
 All four changed/draft file blobs matched pre-archive hashes. Original bases remain reachable, and the original milestone branch is unchanged. The unused self-contained r4base2 environment and caches were removed with its checkout. `worktree-custody-closeout.json` retains the audit and exact hashes. Archives are local, not pushed or integrated.
 
-Seven evidence-bound source/runtime worktrees remain, including remediation-7's accepted environment and final-delivery's dependent links. Pytest outputs, `r3f-base.Uv7C6r` and unclassified diagnostics remain untouched.
+The seven remaining source/runtime worktrees were subsequently archived and removed; see [the successor handoff](R4_SUCCESSOR_HANDOFF.md). Their old environment and dependent links are retired. Retained scientific evidence, pytest outputs outside those worktrees, `r3f-base.Uv7C6r` and unclassified diagnostics remain untouched.
 
 ## Interpreting disk usage
 
-`du -ks tmp` follows the retained-data mounts and therefore includes data physically stored on `/data`. Use `du -xks tmp` to measure only the workspace filesystem. After this worktree cleanup, those commands respectively reported 79,592,344 KiB (75.9 GiB) and 20,142,496 KiB (19.2 GiB). Their 56.7 GiB difference is the first migrated batch, not a duplicate workspace copy. The five pending roots still contribute to the 19.2 GiB until source reclamation.
+`du -ks tmp` follows retained-data mounts and therefore includes data physically stored on `/data`. Use `du -xks tmp` to measure only the workspace filesystem, noting that mounted paths can hide underlying originals. The earlier pre-cutover measurements were 79,592,344 KiB including mounts and 20,142,496 KiB on the workspace filesystem. After the subsequent seven-worktree retirement and mount activation, `du -xks tmp` reported 2,895,856 KiB; this excludes underlying originals exposed through `/workspace-tmp-migration-source` and is not proof of their reclamation.

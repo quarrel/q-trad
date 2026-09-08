@@ -145,7 +145,7 @@ equal row counts do not collapse their separate contracts or establish populatio
 The frozen declaration is
 [G0 JSON](/data/q-trad/r4-p0/r4-p0-development-g8-faef646/config/R4P0_G0.json:1),
 at `frozen_configuration.deterministic_cuda_policy`.
-[The original setter](/workspace/tmp/worktrees/r4-p0-scientific-faef646/experiments/r4_residual_graph/grouped.py:20)
+[The original setter at commit `faef6462c6929da7e91eea12970a72e53a2647e6`](R4_SUCCESSOR_HANDOFF.md#retained-source), in `experiments/r4_residual_graph/grouped.py`,
 installs the settings when called; original terminal setup did not call it.
 
 | Setting | Frozen declaration | Observed recovery and remaining-slot path |
@@ -221,7 +221,8 @@ The experiment remains exploratory and `decision_grade=false`; it grants no prom
 held-out graph retention, R5, native-source, profitability or real-capital authority.
 The final source candidate and complete guarded `ops/dev/verify.sh` milestone evidence are bound
 separately in the programme record. Current governing documents are preserved in delivery;
-original scientific checkouts and all retained failures remain unchanged.
+original scientific source commits and all retained failures remain unchanged. Completed worktrees
+have been retired; [source archives and successor boundaries](R4_SUCCESSOR_HANDOFF.md) preserve access.
 The operator accepted the qualified result and authorised merging `724e2e0` on 2026-09-08.
 The [execution and remediation plans](archive/r4/README.md) are archived as historical records;
 this administrative archival does not change the accepted scientific artefacts or their identities.
