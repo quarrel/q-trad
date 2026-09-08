@@ -1,6 +1,6 @@
 # Workspace tmp storage relocation proposal
 
-Date: 2026-09-08. Status: proposal only; no bulk data has been moved.
+Date: 2026-09-08. Status: first two roots approved and copied/independently verified; mount cutover and original removal pending. Other rows remain proposals. See [migration status and resume steps](TMP_R2_STORAGE_MIGRATION.md).
 
 ## Completed administrative cleanup
 
@@ -14,13 +14,13 @@ and process use before removal. No retained scientific outputs or failure eviden
 
 `du -x` measured tmp at 87.356 GiB before and 80.968 GiB after cleanup, a 6.389 GiB reduction
 in attributed allocated space. These are directory measurements, not a physical block reclamation guarantee.
-One subtree, `/workspace/tmp/tmp.ywVMu1hpTZ/new`, was unreadable (permission denied); totals are lower
-bounds. Its permissions and contents were left unchanged. The inventory includes top-level regular files;
-none appeared among the largest 30 entries. Measurements are a snapshot, not ongoing capacity monitoring.
+The original inventory had an unreadable subtree, `/workspace/tmp/tmp.ywVMu1hpTZ/new`; those totals
+were lower bounds. The operator subsequently reported removing the empty chmod-000 subtree. The inventory
+includes top-level regular files; none appeared among the largest 30 entries. Measurements are snapshots.
 
-`/data` is an ext4 mount from `/dev/sde[/q-trad-bulkdata]`, with about 882 GiB available at inspection.
-It currently contains about 71.78 GiB under `/data/q-trad/r4-p0`. Keep those existing accepted objects
-separate from the proposed relocation; do not merge or overwrite similarly named artefacts.
+`/data` is an ext4 mount from `/dev/sde[/q-trad-bulkdata]`, with about 882 GiB available before this batch.
+Its existing 71.78 GiB under `/data/q-trad/r4-p0` remains separate and unchanged. The first two approved R2
+copies now occupy about 56.70 GiB under `/data/q-trad/retained-workspace-tmp`; originals are retained pending cutover.
 
 ## Recommended relocation: about 67.97 GiB
 
@@ -39,9 +39,9 @@ and verified-copy procedure below before cutover.
 | `capture-snapshot-20260717T044430Z` | 0.538 | Snapshot/import evidence cited in the historical ranking report. Relocate the retained snapshot, without altering live collectors. |
 | `ibkr-run-20260806T035300Z` | 0.076 | Historical run evidence; preserve original run layout and manifests. |
 
-Start with the two largest R2 roots: together they represent **56.70 GiB**. This is a proposed order,
-not a finding that their path contracts have already been cleared. No forecast/model recomputation is
-needed merely to copy bytes and authenticate retained evidence.
+The operator approved the two largest R2 roots, together **56.70 GiB**. Their copies match all 25,784 files
+and 1,261 directories, including SHA-256 and metadata. Actual consumers require original-path nonsymlink
+access, so prepared read-only binds need container recreation before source reclamation. No scientific replay occurred.
 
 ## Keep in place for now
 
@@ -78,14 +78,14 @@ is actually needed. Use Git-aware worktree operations for any future source relo
 4. Resolve old absolute paths explicitly. Some R4 attempt identities require
    `Path(output_root) == Path(output_root).resolve()` and hash that output root into identity
    (`experiments/r4_residual_graph/attempt_artifacts.py:138–151`). A replacement symlink can fail that rule.
-   An approved path-preserving mount may suit an archive consumer, but must be tested for its actual
-   device/inode/path contracts and container persistence. Otherwise use an explicit relocation map and
-   newly authenticated physical-location receipt while preserving original provenance. Neither strategy
-   is selected or installed by this proposal; never rewrite immutable path fields to make a check pass.
+   For the first two R2 roots, actual Stage 6/7 and R3 consumers independently require canonical/nonsymlink
+   original paths. Read-only path-preserving mounts have therefore been prepared, with metadata-only
+   post-mount acceptance before source deletion. Other proposed roots still require their own path audit.
+   Never rewrite immutable path fields to make a check pass.
 5. Record source-to-destination provenance, verification evidence and the tested access arrangement.
    Remove original bulk files only after acceptance and a clear rollback/retention decision. Any temporary
    compatibility bridge must have a named consumer and a removal trigger; do not accumulate permanent
    unexplained symlinks. Deleting the sole original before copy validation is not part of the proposal.
 
-The next decision is approval of a migration batch and its verified cutover method. Bulk migration,
-additional cache deletion, runtime relocation and remote publication have not been performed.
+Next for the approved batch: host/container recreation, mounted-consumer acceptance and exact original
+cleanup, as detailed in the migration runbook. Further batches, cache deletion and runtime relocation remain unperformed.
