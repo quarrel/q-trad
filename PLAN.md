@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R4-P0 historical exploratory screen — completed historical result, no hypothesis nominated. R3 is complete; R4's held-out retention gate remains unsatisfied.
+**Current milestone:** R4-P1 learnability triage — computation complete, independent final review pending; capability established, current graph deprioritised. R4-P0 remains accepted and R4's held-out retention gate remains unsatisfied.
 **Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and do not inherit that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -175,6 +175,12 @@ chronology ambiguity before those contracts are fixed.
 - Do not retain a graph or start R5 on this historical screen. Any further retention experiment needs
   separately authorised untouched prospective or native evidence. The operator accepted the qualified
   result and merged the reviewed delivery on 2026-09-08; the completed plans are archived under `docs/archive/r4/`.
+- R4-P1's operator-approved `POST_HOC_HISTORICAL_EXPLORATORY` execution is in
+  `docs/R4_P1_EXECUTION_PLAN.md`; computation and focused validation are complete, with independent
+  final review pending. `docs/R4_P1_FINDINGS.md` establishes corrected training capability but no
+  useful bounded neural development improvement. The fixed linear graph gate failed, so graph neural
+  fits were skipped. The current graph hypothesis is deprioritised without changing R4-P0 or
+  satisfying held-out retention.
 - Derive graph targets only from out-of-fold local residuals.
 - Compare local-only, pooled non-graph, fixed economic graph, learned structural GNN-LSTM and
   shuffled-graph controls.

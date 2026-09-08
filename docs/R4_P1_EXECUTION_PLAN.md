@@ -1,6 +1,6 @@
 # R4-P1 execution plan — lightweight learnability and residual-structure triage
 
-- **Status:** DRAFT FOR OPERATOR REVIEW; no R4-P1 execution authority yet
+- **Status:** OPERATOR APPROVED; computation and focused validation complete; independent final review pending
 - **Work item:** R4-P1 — training-capability, residual-structure and corrected-development investigation
 - **Experiment class:** `POST_HOC_HISTORICAL_EXPLORATORY`
 - **Source class:** `IBKR_HISTORICAL_RESEARCH`
@@ -10,7 +10,7 @@
 - **Safety boundary:** no provider access, collector/deployment mutation, terminal-former-holdout row access,
   broker operation, native-source claim, production endpoint or real-capital path
 
-This document becomes active R4-P1 authority only after operator approval. It does not alter the
+The operator approved and activated this R4-P1 authority on 2026-09-08. It does not alter the
 accepted R4-P0 result, reopen R4-P0, satisfy R4's held-out retention gate, authorise R5, or begin the
 separate universe/opportunity-selection lane.
 

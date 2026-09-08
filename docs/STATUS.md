@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-09-08 (R4-P0 only; earlier operational observations retain their original dates)
-**Current milestone:** R4-P0 historical exploratory result — `NO_HYPOTHESIS_NOMINATED`. R3 is complete; R4 held-out retention remains unsatisfied.
+**Updated:** 2026-09-08 (R4-P1 only; earlier operational observations retain their original dates)
+**Current milestone:** R4-P1 learnability triage — computation complete; independent final review pending. Corrected training capability passed, but the current graph is deprioritised. R4-P0 remains accepted; R4 held-out retention remains unsatisfied.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct.
 **Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md` and `docs/archive/r4/R4_P0_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
@@ -26,6 +26,19 @@ R3.A–R3.G implement the deterministic cost, ordered-risk, persistent virtual-p
 The mandatory R3.H report is `docs/archive/r3/R3_HISTORICAL_EXPLORATORY_REPORT.md` (SHA-256 `74a371a5f4481893be1608072a3ee641b2d347b13f447156bab75e8ca5034b4d`; semantic identity `ac43c8f474652e43e4994131ea8fa56e99799992607e3ff46439d65b3c4a16fc`). It is `HISTORICAL_EXPLORATORY`, uses `IBKR_HISTORICAL_RESEARCH` MIDPOINT OHLC and makes no effectiveness, executable-alpha, native-validity, profitability, order or promotion claim.
 
 Aggregate break-even was `0.000058401438` of notional per unit turnover, about 0.584 bps, and the aggregate was negative at the first tested 5-bps cost. Gold and US-500 remained positive through 10 bps but not 20 bps; crude and EUR/USD were negative before costs. Pooled-local was the best quick diagnostic but inconclusive on support 12; nonlinear Huber failed; fixed and tiny learned graphs were negative. Nothing supports cancelling or promoting the future R4 graph experiment.
+
+## R4-P1 learnability triage (2026-09-08)
+
+The operator-approved historical exploratory diagnostic completed one successful capability policy,
+eight fixed Ridge probes and four mandatory seed-17 local/pooled neural fits. Planted mechanisms and
+the tiny all-instrument DEV_1 capacity check pass; empirical optimisation also works, but both neural
+families lose to Ridge and zero in DEV_2 and DEV_3. The fixed graph fails its linear control/skill
+gate, so no graph neural fit runs. See [the methods, results and attempt account](R4_P1_FINDINGS.md).
+
+The completed run took 113.63 seconds with 5.39 GiB peak process RSS and 1.43 GiB peak CUDA allocation.
+One earlier same-policy invocation failed only in quantile reporting; its failure remains retained.
+Independent final review is pending. No terminal former-holdout rows were loaded, and no P0 result,
+held-out retention, native validity, economic claim, R5 or trading authority changes.
 
 ## R4-P0 result: no hypothesis nominated (2026-09-07)
 
