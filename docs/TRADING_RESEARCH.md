@@ -120,7 +120,12 @@ aligned-bar audit, bounded historical-data decision and successful independent r
 are retained in `docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain
 quarantined pending eligible exact evidence. R0–R3 are complete; `R2-IBKR-HISTORICAL` has its
 source-specific terminal result and R3 has its cost/portfolio implementation plus bounded historical
-exploration. R4 is not started or authorised, and native-source experiments remain provenance-distinct.
+exploration. The R4-P0 and R4-P1 historical screens are complete: no graph hypothesis was nominated,
+corrected training capability was established, corrected local and pooled temporal models still lost
+on both development blocks, and the fixed linear graph gate failed. The present graph
+expected-return hypothesis is therefore deprioritised; R4's held-out retention gate remains
+unsatisfied. Native-source experiments remain provenance-distinct, and no separate universe or
+opportunity-discovery lane is authorised by this document.
 
 ### R1 — causal multi-asset research foundation
 
@@ -154,19 +159,35 @@ results are deliberately lightweight and do not establish effectiveness, executa
 or profitability. The frozen future native authority remains `docs/R3_NATIVE_EXPERIMENT_PROTOCOL.md` and
 is not instantiated or authorised to run.
 
-### R4 — residual structural graph experiment
+### R4 — residual structural graph experiment (HISTORICAL P0/P1 COMPLETE)
 
-Train the cross-asset model only on residuals calculated from out-of-fold local forecasts. Compare:
+R4-P0 applied the frozen residual-graph comparison to the existing twenty-instrument, 15-minute,
+P0-information historical source. Its exact qualified result is `NO_HYPOTHESIS_NOMINATED`. That
+result and its disclosed numerical-policy/control qualifications remain accepted for the exact P0
+release; it does not retain a graph or authorise R5.
 
-- local models only;
-- pooled non-graph cross-asset model;
-- fixed economically specified graph;
-- learned structural graph with an LSTM temporal baseline; and
-- shuffled/permuted graph control.
+R4-P1 then tested the dominant training-capability concern without accessing the terminal former
+holdout. It established that the corrected temporal and graph mechanisms can recover planted local,
+pooled and fixed-graph signals and can overfit a small real development batch. On actual development
+data, however, both corrected local and pooled temporal models lost to zero and Ridge in both blocks.
+The fixed linear graph probe lost to pooled and shuffled controls and failed direct skill, so no
+corrected neural graph fit was justified.
 
-This experiment is completed even if simpler forecasts are weak. The graph is retained only if it
-adds stable held-out information beyond the simpler controls. State-dependent adjacency and session
-experts are not part of this milestone.
+The programme therefore distinguishes:
+
+- P0 is the accepted result for its exact frozen candidates, but its catastrophic neural magnitudes
+  are not broad evidence against trainable neural or graph models;
+- P1 establishes trainability and supplies the more useful current scientific conclusion: the
+  present information set, fixed economic graph and bounded temporal policy provide no useful
+  development improvement; and
+- the contemporaneous economic-edge relationships observed in P1 may inform covariance, exposure or
+  universe-diversification work, but they do not establish causal expected-return information.
+
+The current static economic-graph expected-return hypothesis is deprioritised. Future graph-return
+work requires a distinct mechanism supported by new prospective/native information or a separately
+authorised universe/opportunity investigation, followed by untouched evidence. R4's held-out
+retention gate remains unsatisfied. State-dependent adjacency and session experts remain deferred;
+they are not rescue configurations for the completed historical line.
 
 ### R5 — integrated offline MVP
 
@@ -176,7 +197,8 @@ chronological forecast, economic and portfolio reports with cost, feature, graph
 parameter sensitivities. Every forecast-to-position adjustment remains attributable.
 
 MVP completion means the framework can measure incremental forecast and portfolio value honestly.
-It does not require positive Sharpe, profitability or production readiness.
+It does not require positive Sharpe, profitability or production readiness. R5 is not authorised by
+the completed R4 historical screens because no forecast or graph component was retained.
 
 ### R6 — continuous shadow paper
 
