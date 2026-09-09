@@ -111,6 +111,8 @@ or record. This discretion preserves the scientific, evidence and operational bo
 
 ## Temporary files and task closeout
 
+- Follow [storage placement](docs/DEVELOPMENT.md#storage-placement) when choosing new output locations:
+  bulk data belongs under `/data/q-trad/`; small metadata and reports may live in `/workspace`.
 - Use `tmp/runtime/` for disposable tool temporary files; the Dev Container sets `TMPDIR` there.
   Keep retained results out of this directory. Do not remove live lock files or files still in use.
 - Use one named `tmp/agents/<task>/` directory for agent scratch, diagnostics and intermediate results;

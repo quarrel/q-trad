@@ -31,6 +31,19 @@ older local `qtrad` database is unselected legacy development state; do not auto
 delete it. Provider streaming/load experiments require their checked-in guarded scripts and current
 runbook; do not run them during ordinary development.
 
+## Storage placement
+
+Store bulk datasets, substantial derived outputs and large retained artefacts under `/data/q-trad/`.
+Prefer `/workspace` for source, small metadata, specifications, manifests and reports where SSD access
+is useful.
+
+Small immutable metadata may be checked into Git when its size and cumulative growth are reasonable,
+it contains no secrets or sensitive account information, and retention and redistribution terms permit
+it. Keep bulk data and mutable caches out of Git.
+
+Storage placement does not change evidence authority, retention requirements or access isolation.
+Preserve existing plan-declared locations and mounts until an authorised migration changes them.
+
 ## GitHub
 
 The authenticated `gh` CLI is available. Candidate-specific validation, review, PR state and merge
