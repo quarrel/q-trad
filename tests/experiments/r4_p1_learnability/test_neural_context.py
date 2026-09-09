@@ -4,19 +4,19 @@ import numpy as np
 import pytest
 import torch
 
-from experiments.r4_p1_learnability.training import Policy, TemporalModel
+from experiments.r4_p1_learnability.training import Family, Policy, TemporalModel
 from experiments.r4_residual_graph.graph import build_fixed_economic_graph, shuffle_economic_graph
 
 
 @pytest.mark.parametrize("family", ["local", "pooled", "fixed", "shuffled"])
-def test_zero_head_and_exact_graph(family: str) -> None:
+def test_zero_head_and_exact_graph(family: Family) -> None:
     model = TemporalModel(family, 3, Policy(device="cpu", hidden=8))
     values = torch.randn(2, 5, 20, 3)
     present = torch.ones((2, 20), dtype=torch.bool)
     assert torch.count_nonzero(model(values, present)).item() == 0
     graph = build_fixed_economic_graph()
     expected = shuffle_economic_graph(graph) if family == "shuffled" else graph
-    np.testing.assert_allclose(model.adjacency.numpy(), expected.normalized_adjacency)
+    np.testing.assert_allclose(model.get_buffer("adjacency").numpy(), expected.normalized_adjacency)
 
 
 def test_pooled_excludes_own_and_is_permutation_invariant() -> None:
