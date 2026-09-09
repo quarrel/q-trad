@@ -259,3 +259,71 @@ def test_decimal_risk_and_nonpositive_descriptor_domain(
     assert state.scale == expected
     assert state.scale is not None
     assert abs(float(state.scale) - float(expected)) < 1e-12
+
+
+def test_unavailable_entry_inputs_are_not_zero_and_do_not_resize_active_positions() -> None:
+    market, states = toy()
+    cutoff, end = instant(date(2019, 1, 6), 23), date(2019, 1, 18)
+    for scale in (None, Decimal(0), market.minimum_scale):
+        absent = {day: replace(state, scale=scale) for day, state in states.items()}
+        outcome = positions(market, absent, cutoff, end, "continuation")
+        assert outcome.score() is None
+        assert outcome.unavailable_reason == "ENTRY_INPUT_UNAVAILABLE"
+        assert len(outcome.sessions) == 10
+        assert all(s.entry_input_reason == "RISK_SCALE_UNAVAILABLE" for s in outcome.sessions)
+        assert outcome.summary()["payoff_coverage"] == 0
+    for probe in ("continuation", "reversal"):
+        absent = {day: replace(state, signal20=None, signal5=None) for day, state in states.items()}
+        outcome = positions(market, absent, cutoff, end, probe)
+        assert outcome.score() is None
+        assert all(s.entry_input_reason == "SIGNAL_UNAVAILABLE" for s in outcome.sessions)
+    # Only fresh decisions require today's prepared entry inputs. Existing positions
+    # retain the scale and signal fixed on Monday despite missing Tuesday-Friday inputs.
+    while_active = {
+        day: state
+        if day.weekday() == 0
+        else replace(state, scale=None, signal20=None, signal5=None, signal_at=None)
+        for day, state in states.items()
+    }
+    held = positions(market, while_active, cutoff, end, "continuation")
+    assert held.score() == 0.5
+    assert all(s.scale == Decimal(2) and s.entry_input_reason is None for s in held.sessions)
+
+
+def test_publication_delayed_signal_invalidates_real_preparation_and_comparisons(
+    invented: tuple[tuple[Market, ...], tuple[Bar, ...]],
+) -> None:
+    from experiments.universe_discovery.reducers import VintageScores, reduce
+
+    markets, bars = invented
+    market = markets[0]
+    rows = index_panel(bars)[market.family]
+    cutoff, end = instant(date(2018, 12, 31), 23), date(2019, 3, 31)
+    delayed = tuple(
+        replace(b, available_at=instant(date(2025, 1, 1))) if b.session == cutoff.date() else b
+        for b in rows
+    )
+    prepared = prepare(market, delayed)
+    first = prepared[date(2019, 1, 1)]
+    assert first.scale is not None  # Older risk history is still sufficient.
+    assert first.signal20 is None and first.signal5 is None
+    outcome = positions(market, prepared, cutoff, end, "continuation")
+    assert outcome.score() is None
+    assert outcome.sessions[0].entry_input_reason == "SIGNAL_UNAVAILABLE"
+    members = (market.family,)
+    scores = {market.family: outcome.score()}
+    result = reduce(
+        (
+            VintageScores(
+                "synthetic-quarter",
+                members,
+                members,
+                members,
+                (members,) * 100,
+                (members,) * 100,
+                scores,
+                {market.family: market.group},
+            ),
+        )
+    )
+    assert result["status"] == "INSUFFICIENT_EVIDENCE"

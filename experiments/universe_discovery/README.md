@@ -22,9 +22,11 @@ once. The 100 fixed broad and matched draws, original synthetic anchor cohort an
 anchor views reuse those outcomes, as do base and doubled variable-friction scenarios.
 The CLI writes the panel, catalogue, specification, past-only atlas, complete cohort/assignment
 register, physical position ledger, market tail/coverage diagnostics, reconciled reducers and
-measured CPU performance. Flat sessions contribute zero; missing required outcomes invalidate
-comparisons. A smaller selected cohort is explicitly flagged when frozen group/cluster constraints
-prevent the requested size.
+measured CPU performance. A valid zero signal contributes a flat zero. Missing or delayed signals
+and missing or too-small entry scales make that market/vintage unavailable, with session-level
+reasons and separate raw-data/payoff coverage. Existing positions retain their entry scale.
+A smaller selected cohort is explicitly flagged when frozen group/cluster constraints prevent
+the requested size.
 
 The primary reducer requires every predeclared comparison. Its matched-complete sensitivity is
 separate. Signed selected-slot contributions reconcile to the equal-vintage matched delta before

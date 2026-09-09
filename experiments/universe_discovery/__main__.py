@@ -151,6 +151,11 @@ def _batch(
             "allowed, no score matching"
         ),
         "entry": "next artificial UTC14 open after strictly available signal; no same-close fill",
+        "no_trade": (
+            "Only a valid zero signal is a scored flat zero. Missing/delayed signal or "
+            "missing/nonfinite/at-or-below-minimum entry scale makes the market/vintage "
+            "unavailable, with per-session reasons. Existing positions retain entry inputs."
+        ),
         "exit": (
             "UTC21 close at horizon/weekend/known contract last/quarter/listing "
             "end, whichever first"

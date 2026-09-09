@@ -103,8 +103,11 @@ class SessionPayoff:
     entry_at: datetime | None
     exit_reason: str | None
     adverse_gap: Decimal
+    entry_input_reason: str | None = None
 
     def normalised(self, friction: Decimal) -> float:
+        if self.entry_input_reason not in (None, "ZERO_SIGNAL"):
+            raise ValueError("Unavailable entry inputs have no normalised payoff")
         if self.scale is None:
             if self.intent != 0 or self.gross != 0:
                 raise ValueError("Active outcome lacks a positive entry risk scale")
@@ -128,8 +131,9 @@ class Outcome:
         return statistics.fmean(s.normalised(friction) for s in self.sessions)
 
     def summary(self, friction: Decimal = Decimal(1)) -> dict[str, object]:
-        values = [s.normalised(friction) for s in self.sessions]
         complete = self.score(friction)
+        valid_rows = self.sessions if complete is not None else ()
+        values = [s.normalised(friction) for s in valid_rows]
         total = 0.0
         high = 0.0
         drawdown = 0.0
@@ -138,7 +142,7 @@ class Outcome:
             high = max(high, total)
             drawdown = min(drawdown, total - high)
         trades: dict[int, float] = {}
-        for row, value in zip(self.sessions, values, strict=True):
+        for row, value in zip(valid_rows, values, strict=True):
             if row.trade_id is not None:
                 trades[row.trade_id] = trades.get(row.trade_id, 0.0) + value
         worst_count = max(1, (len(values) + 19) // 20)
@@ -152,7 +156,20 @@ class Outcome:
             else None,
             "required_sessions": self.required_sessions,
             "observed_sessions": self.required_sessions - len(self.missing_sessions),
-            "evaluated_sessions": len(self.sessions),
+            "evaluated_sessions": sum(
+                s.entry_input_reason in (None, "ZERO_SIGNAL") for s in self.sessions
+            ),
+            "payoff_coverage": sum(
+                s.entry_input_reason in (None, "ZERO_SIGNAL") for s in self.sessions
+            )
+            / self.required_sessions
+            if self.required_sessions
+            else None,
+            "unavailable_entry_sessions": [
+                (s.session, s.entry_input_reason)
+                for s in self.sessions
+                if s.entry_input_reason not in (None, "ZERO_SIGNAL")
+            ],
             "missing_sessions": self.missing_sessions,
             "coverage": (self.required_sessions - len(self.missing_sessions))
             / self.required_sessions
@@ -220,15 +237,31 @@ def positions(
             )
         turnover = 0
         entered = False
+        input_reason: str | None = None
         if direction == 0:
             signal = state.signal20 if probe == "continuation" else state.signal5
-            if signal is not None and signal != 0 and state.scale is not None:
-                if (
-                    state.signal_at is None
-                    or not cutoff < bar.open_at
-                    or not state.signal_at < bar.open_at
-                ):
-                    raise ValueError("Signal/cutoff must precede entry")
+            failures: list[str] = []
+            if (
+                state.scale is None
+                or not state.scale.is_finite()
+                or state.scale <= market.minimum_scale
+            ):
+                failures.append("RISK_SCALE_UNAVAILABLE")
+            if (
+                signal is None
+                or not signal.is_finite()
+                or state.signal_at is None
+                or state.signal_at >= bar.open_at
+            ):
+                failures.append("SIGNAL_UNAVAILABLE")
+            if failures:
+                input_reason = "|".join(failures)
+            elif signal == 0:
+                input_reason = "ZERO_SIGNAL"
+            else:
+                assert signal is not None
+                if not cutoff < bar.open_at:
+                    raise ValueError("Selection cutoff must precede entry")
                 direction = (1 if signal > 0 else -1) * (1 if probe == "continuation" else -1)
                 scale = state.scale
                 age = 0
@@ -278,10 +311,18 @@ def positions(
                 entry_at if intent else None,
                 reason,
                 gap,
+                input_reason,
             )
         )
         mark = bar.close
         if reason is not None:
             direction = 0
             scale = None
-    return Outcome(market.family, tuple(ledger), len(schedule), (), None)
+    unavailable = any(s.entry_input_reason not in (None, "ZERO_SIGNAL") for s in ledger)
+    return Outcome(
+        market.family,
+        tuple(ledger),
+        len(schedule),
+        (),
+        "ENTRY_INPUT_UNAVAILABLE" if unavailable else None,
+    )
