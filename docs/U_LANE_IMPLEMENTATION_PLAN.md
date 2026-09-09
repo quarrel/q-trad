@@ -2,6 +2,7 @@
 
 - **Status:** DRAFT FOR OPERATOR REVIEW. The operator accepted the scope defaults; this detailed plan still requires approval before execution.
 - **Planning base:** `5d358c9bad5648175e8742fa3d3b3bcc737ea0b8`.
+- **Review reconciliation:** current `main` at `cb0146d1310935cab06b73bdb09756cc02a7513a`, including merged PR #189.
 - **Immediate delivery:** U0 source/catalogue feasibility, U1 daily atlas and a first U2 daily selector laboratory.
 - **Conditional delivery:** bounded U3 intraday canaries after exact acquisition permission and hypothesis specification.
 - **Not authorised here:** historical-reserve evaluation, U4 prospective execution, collector changes, R5 integration or trading.
@@ -31,7 +32,7 @@ The immediate objective is a working, inexpensive feedback loop. A source limita
 
 R2 remains the source-specific historical baseline result. R4-P0 remains the qualified result of its exact frozen execution; R4-P1 established trainability but found no useful corrected temporal improvement, and its linear graph gate prevented further neural graph work. See `docs/R4_P0_FINDINGS.md` and `docs/R4_P1_FINDINGS.md`. No universal conclusion about market predictability follows.
 
-PR #189 separately records the accepted P0/P1 programme position. At this planning base it is still a draft; this plan does not assume it has merged or duplicate its edits. On activation, reconcile the current programme pointers once, preserve accepted findings and make clear that U is a separately authorised research lane. The old offline-MVP deferral of opportunity models does not silently prohibit this operator-approved laboratory, nor does U introduce a runtime strategy selector into the MVP.
+PR #189 merged on 2026-09-09 as `cb0146d1310935cab06b73bdb09756cc02a7513a` and records the accepted P0/P1 programme position. Preserve its accepted conclusions; this plan does not duplicate or reopen that work. On activation, update only the programme pointers needed to identify U as a separately authorised research lane. The old offline-MVP deferral of opportunity models does not silently prohibit this operator-approved laboratory, nor does U introduce a runtime strategy selector into the MVP.
 
 ## 2. Adopted operating envelope — BINDING
 
@@ -125,7 +126,13 @@ Before inspecting new market-return histories, record the catalogue snapshot, so
 
 **Reserved for U is not globally untouched.** Existing R2/R4 research already exposed portions of 2026. Record that overlap and any other prior exposure. A later historical reserve evaluation is a guarded replication on disclosed evidence, not automatically a decision-grade result. U4 uses newly accumulating outcomes after a separate freeze.
 
-Ordinary U loaders read development dates only. The reserve belongs in a separate path/partition selection with default-deny loading and a focused test that rejects an unauthorised request before decoding. No cryptographic vault or custom holdout lifecycle is needed. If a provider delivers an inseparable bulk archive, a bounded mechanical splitter may route reserved rows by date without exposing values to research code or agents; record this access distinction. Do not describe prompt-only instructions as hard access control.
+**Access precondition before data-dependent agent work:** expose only the approved development inputs. U reserve payloads, raw bulk archives containing them and derived reserve copies must be inaccessible through the research agents' actual filesystem, shell, connector and provider tools, including those of the orchestrator and reviewer. Prefer leaving the reserve unacquired and supplying development-only extracts. Otherwise keep the reserve and unsplit archives outside agent-visible mounts or behind permissions the research identity cannot override; do not supply credentials or another tool route that bypasses that boundary. A separate folder, read-only mount, prompt prohibition or default-deny application loader alone is not isolation.
+
+If acquisition delivers an inseparable archive, a separately authorised bounded mechanical splitter operates outside the research-access environment, routes rows by the frozen dates, and exposes only development extracts and non-value partition metadata. Its logs must not leak reserved values. Test the splitter on synthetic dates and payloads before use. Preserve the original archive under its existing retention authority; this plan does not authorise deleting or moving operator-owned evidence to establish isolation.
+
+Record the chosen access arrangement and a bounded check from the actual research role showing that protected locations/routes are absent or denied, without reading real reserve values. Repeat that check only if the relevant mounts, permissions, tools or input exposure change. If effective isolation cannot be established, block data-dependent work; U0 public documentation and fixture work can still proceed. This is an input-access precondition, not a new holdout platform or receipt hierarchy.
+
+Ordinary U loaders additionally read development dates only and reject an unauthorised reserve request before decoding. Keep that focused regression test as defence in depth, not as proof that direct agent access is impossible. No cryptographic vault or custom holdout lifecycle is needed.
 
 Neither source ranking, eligibility-threshold calibration, clustering, synthetic-realism choices, whole-panel normalisation, exploratory plots nor the U1 atlas may use reserve values. The existing, already-exposed R2 interval may be described separately from its retained evidence and compared against **development-only** historical window distributions; that exception does not permit reading a new broad-universe reserve.
 
@@ -203,6 +210,8 @@ Match only on past-observable nuisance variables, not on the mechanism score who
 
 For cheap daily evaluation, default to 100 fixed random draws per vintage. Average all draws for the primary random comparison and show their distribution; never select the weakest control. Within a cohort sample without replacement. Between selected/anchor/random cohorts overlap is legitimate, is reported and reduces acquisition work; do not force disjointness by excluding selected names from the null universe. A seed is an experiment input, not a result-selection knob.
 
+For the primary nuisance-matched comparison, each draw contains one distinct control assigned to each selected-market slot using the predeclared matching rule. Thus every draw has the same size as that vintage's selected cohort, and the equally weighted matched-slot mean equals the reported matched-cohort score. Retain these assignments for contribution accounting. Infeasible complete matching makes the comparison unavailable under the existing support rule; do not invent a match or change weights after outcomes.
+
 Daily anchor reporting uses all available original anchors plus size-matched views where needed. The U3 twelve-anchor subset is chosen by a recorded economic-diversity/canonical rule before outcomes, not by which original instruments looked strongest. Insufficient cohort size or absent groups produces a smaller explicitly labelled pilot or an ineligible vintage, never a fabricated member.
 
 ### 7.4 Feedback, not a one-shot research freeze
@@ -247,20 +256,36 @@ Do not pool all instrument rows or trades across quarters: that would give large
 
 Within a market, all selector/control uses share one outcome/position calculation. Missing post-selection data cannot improve a cohort by dropping its difficult member and reweighting the survivors. Retain the selected membership and missing fraction; a vintage without the predeclared complete required comparison support is unscorable for the primary comparison. Report matched-complete sensitivity and the excluded-vintage account separately. Distinguish genuine post-listing termination with settled positions from unexplained data loss.
 
-For a selected market matched to controls, define its incremental contribution from its score minus the mean of its predetermined matched controls. Average signed contributions over appearances before clipping for concentration:
+**Concentration must decompose the reported overall effect.** For the primary selected-minus-nuisance-matched comparison, let `V` be the paired scorable vintage set under the support rule, `K[v]` the recorded selected-cohort size, `D[v]` the number of predeclared matched draws, and `match[m,v,d]` the assigned control for selected market `m` in draw `d`. For each fixed hypothesis and cost scenario:
 
 ```text
-positive_contribution[m] = max(0, mean paired market contribution)
-best_market_share = max positive_contribution / sum positive_contribution
+d[m,v,h] = S[m,v,h] - mean_d S[match[m,v,d],v,h]
+c[m,v,h] = d[m,v,h] / (len(V) * K[v])
+
+C_market[m,h] = sum_v c[m,v,h]
+C_quarter[v,h] = sum_m c[m,v,h] = delta_matched[v,h] / len(V)
+
+sum_m C_market[m,h] = sum_v C_quarter[v,h] = overall_delta_matched[h]
+
+P_market[m,h] = max(0, C_market[m,h])
+P_quarter[v,h] = max(0, C_quarter[v,h])
+best_market_share = max_m P_market[m,h] / sum_m P_market[m,h]
+best_quarter_share = max_v P_quarter[v,h] / sum_v P_quarter[v,h]
 ```
 
-A zero positive sum is reported as no positive contribution, with share `1`. Keep signed effects, economic-group results and vintage concentration visible. Also report leave-one-market and leave-one-quarter effects where cheap. Descriptive uncertainty resamples whole quarters with cross-market dependence retained, not individual overlapping bars. Random-draw ranges and bootstrap intervals are not multiplicity-adjusted proof of alpha.
+The draw mean uses all `D[v]` draws. A non-selected market has zero contribution for that vintage; this is allocation bookkeeping, not permission to replace a missing outcome with zero. Sum signed weighted contributions before clipping, so losses offset gains for the same market and within the same quarter. The market attribution assigns each selected slot's uplift over its matched controls to that selected market; it is not the market's standalone P&L. Preserve selection frequency and variable cohort sizes. Mean contribution per appearance may be reported separately, but must not determine these concentration gates.
+
+For either share, a zero positive sum is reported as no positive contribution, with share `1`. With no scorable vintage, report `INSUFFICIENT_EVIDENCE` rather than a numerical effect or share. Reconcile both signed contribution totals to the reported matched-control overall delta. These market/quarter concentration gates concern that same matched comparison, not a different anchor or random-control effect.
+
+Required unequal-appearance fixture: across eight three-market cohorts, A has matched delta `+3` in every quarter and each quarter's two other, non-repeating markets has `+1`. The overall delta is `5/3`; A contributes `1`, so its positive share is `0.60`, and each quarter's share is `0.125`. The old appearance-mean share `3/19` (about `0.158`) must not pass as concentration. Also test unequal cohort sizes and signed cancellation before clipping.
+
+Keep signed effects and economic-group results visible. Also report leave-one-market and leave-one-quarter effects where cheap. Descriptive uncertainty resamples whole quarters with cross-market dependence retained, not individual overlapping bars. Random-draw ranges and bootstrap intervals are not multiplicity-adjusted proof of alpha.
 
 ### 8.3 Decision meaning
 
 The first daily result must answer separately whether the selector beats its controls and whether the selected hypothesis has positive scenario-net payoff. A selector can find 'less bad' markets without finding alpha. Positive selected payoff with no incremental control advantage supports investigating the broad hypothesis, not the selector.
 
-**ADVISORY advancement rule to record before scoring:** positive mean and median selected-minus-matched-control quarterly deltas, positive deltas in a majority of at least eight evaluable development quarters spanning multiple regimes, positive selected scenario-net payoff at base and doubled variable friction, contributions across at least three economic groups, and no single market or quarter supplying more than half of positive incremental contribution. Failure deprioritises that candidate; fewer observations gives `INSUFFICIENT_EVIDENCE`, not a fabricated negative or positive.
+**ADVISORY advancement rule to record before scoring:** positive mean and median selected-minus-matched-control quarterly deltas, positive deltas in a majority of at least eight evaluable development quarters spanning multiple regimes, positive selected scenario-net payoff at base and doubled variable friction, contributions across at least three economic groups, and no single market or quarter supplying more than half of positive incremental contribution under section 8.2's matched-control attribution. Failure deprioritises that candidate; fewer observations gives `INSUFFICIENT_EVIDENCE`, not a fabricated negative or positive.
 
 Those thresholds are triage choices, not universal scientific constants. The owner may propose a better-supported rule before results, recording the reason. They do not block U3 acquisition whose explicit purpose is testing a session/event mechanism daily data cannot score. Such a canary needs its own stated information-value rationale, not a made-up daily alpha pass.
 
@@ -308,18 +333,19 @@ Focused tests must discriminate:
 
 - listing/delisting and as-of source availability, including delayed settlements/open interest;
 - changing future rows cannot change earlier eligibility, rankings, clusters or cohorts;
-- terminal/reserve access is denied by default;
+- reserve/raw-archive inputs are absent or denied through the actual research role's tools, and loaders separately reject reserve requests before decoding;
 - no future roll selection, fabricated roll return or logarithm of a non-positive price;
 - signal precedes entry; no overlapping full-size five-day trades; weekend/delivery exits are explicit;
 - zero/no-trade, known-cost and planted-selector fixtures recover expected results;
 - controls use the same opportunity calculator, and overlap/deduplication does not change scores;
 - unequal instrument/quarter row counts cannot silently change the declared reductions;
+- unequal market appearances/cohort sizes and signed cancellation preserve section 8.2's contribution reconciliation and market/quarter concentration;
 - unavailable outcomes, failed matching and negative trials remain visible;
 - output sizes/work counts demonstrate reuse rather than repeated scans/fits.
 
 A synthetic no-edge case should show no systematic selector advantage across the declared random draws; a planted past-state/future-opportunity case should expose the planted advantage without future access. These are software checks, not empirical alpha selection.
 
-Use focused tests, formatting, Ruff and namespace-local strict typing. Do not run the full application suite for every experimental batch or helper. The complete gate remains required when changing active application/schema/shared dependency policy or at a separately governing release boundary under `docs/DEVELOPMENT.md`. One independent review of each meaningful delivered tranche checks causal selection, metrics, search accounting and conclusions; it need not replay every trial. No mandatory per-function handovers.
+Use focused tests, formatting, Ruff and namespace-local strict typing. Do not run the full application suite for every experimental batch or helper. The complete gate remains required when changing active application/schema/shared dependency policy or at a separately governing release boundary under `docs/DEVELOPMENT.md`. One independent review of each meaningful delivered tranche checks causal selection, metrics, search accounting and conclusions; the reviewer must not have modified the candidate being reviewed and need not replay every trial. No mandatory per-function handovers.
 
 ### Suggested deliverables — ADVISORY PATHS
 
@@ -334,20 +360,26 @@ Within one named ignored output root retain `catalogue`, `source_notes`, `data_s
 
 ## 12. Agent-ready launch and completion
 
+### Activation record — BINDING CONTENT
+
+At explicit operator activation, record the approved plan commit/revision and approval reference, working code base, permitted local input identities and date ranges, the section 5 access arrangement, and the required delivery endpoint (for example, branch/PR or local committed handoff). Use the existing task/run record; do not create another planning layer, G0 or receipt contract. If no empirical inputs are yet approved, record `NONE_APPROVED` and begin only U0 public documentation and fixture work. Add concrete input/acquisition permissions when granted rather than allowing MAP to infer them. The unspecified numerical acquisition/spend budget remains a U0 operator decision.
+
 ### Suggested execution seams — ADVISORY
 
 **U0 owner:** inspect available local sources and public catalogue/documentation, build the minimal family/source inventory, supply a source/permission decision and a usable sample or fixture. Do not purchase data or touch collectors.
 
-**U1/U2 owner:** implement the daily panel, reserve exclusion, past-only descriptors, cohort controls and one complete H-DAY experiment. Work on fixtures in parallel with U0; empirical work depends on approved inputs. Publish the first useful table before expanding universe coverage or adding another mechanism.
+**U1/U2 owner:** implement the daily panel, reserve exclusion, past-only descriptors, cohort controls and one complete H-DAY experiment. Work on fixtures in parallel with U0; empirical work depends on approved inputs and the section 5 access precondition. Publish the first useful table before expanding universe coverage or adding another mechanism.
 
 **U3 owner:** only when a canary is chosen and its acquisition is authorised, implement the hypothesis-specific intraday view and evaluate the recorded selected/control cohorts. Do not build U4.
 
-**Synthesis/reviewer:** consume the compact records, distinguish data feasibility, selector value and hypothesis value, identify what would change the next decision and review only consequential uncertainties. The orchestrator may combine all roles or omit separate synthesis when a single owner is more efficient.
+**Synthesis:** consume the compact records, distinguish data feasibility, selector value and hypothesis value, and identify what would change the next decision. The orchestrator may combine implementation and synthesis or omit a separate synthesis role when a single owner is more efficient.
+
+**Independent reviewer:** review the exact delivered candidate and findings under section 11. This reviewer must not have modified that candidate. Combining implementation/synthesis does not remove the independent-review requirement, but does not require separate reviewers for every stage or helper.
 
 Immediate acceptance of the first tranche requires:
 
 1. A truthful catalogue/source readiness result, including point-in-time and cost limitations.
-2. The development/reserve split recorded before broad outcome inspection, with known exposure disclosed.
+2. The development/reserve split and effective research-access boundary recorded before data-dependent agent work, with known exposure disclosed.
 3. A useful daily atlas on actual approved data, or a precise data blocker with fixture code rather than invented observations.
 4. At least one complete past-only selector/hypothesis comparison with all controls on approved data, or its explicit unavailable prerequisite.
 5. Complete variant/failure accounting and the declared metric/tail/coverage summaries.
@@ -356,7 +388,7 @@ Immediate acceptance of the first tranche requires:
 
 Use simple findings categories such as `DATA_LIMITED`, `DESCRIPTIVE_ONLY`, `NO_SELECTION_VALUE`, `HYPOTHESIS_WITHOUT_SELECTION_VALUE`, `CANDIDATE_FOR_INTRADAY_TEST` and `CANDIDATE_FOR_SEPARATE_PROSPECTIVE_PROTOCOL`. They are recommendations, not promotions. A blocked source audit is a completed feasibility task, not a completed empirical experiment.
 
-At acceptance update only the programme documents whose current claims changed. Do not merge automatically. Keep PR #189's R4 closure separate, keep the actual U execution state factual, and preserve all prior source-specific conclusions.
+At acceptance update only the programme documents whose current claims changed. Do not merge automatically. Preserve PR #189's merged R4 closure, update only the pointers needed for U activation/current state, and preserve all prior source-specific conclusions.
 
 ## 13. References and feasibility notes
 
