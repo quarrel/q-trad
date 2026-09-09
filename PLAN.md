@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R4 historical P0/P1 work is accepted and complete. Corrected training capability is established, but the current static graph expected-return hypothesis is deprioritised; R4's held-out retention gate remains unsatisfied. The next programme decision is whether and how to authorise a separate universe, regime and opportunity-discovery lane.
+**Current milestone:** U-lane is approved for source feasibility and fixture implementation under `docs/U_LANE_IMPLEMENTATION_PLAN.md`; empirical inputs and acquisition remain subject to its explicit permissions and reserve-access boundary. R4 historical P0/P1 work remains accepted and complete, with the current static graph expected-return hypothesis deprioritised and its held-out retention gate unsatisfied.
 **Parallel track:** `R2-IBKR-HISTORICAL` is complete with a valid consumed confirmatory result; native IG and IBKR capture tracks remain provenance-distinct and continue accumulating without inheriting that conclusion
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.

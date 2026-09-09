@@ -1,6 +1,6 @@
 # U-lane implementation plan — universe, regime and opportunity discovery
 
-- **Status:** DRAFT FOR OPERATOR REVIEW. The operator accepted the scope defaults; this detailed plan still requires approval before execution.
+- **Status:** APPROVED by the operator on 2026-09-09 through the instruction to execute this plan as the MAP orchestrator. Initial activation is U0 public documentation and fixture implementation; empirical inputs are `NONE_APPROVED` pending exact input permission and section 5 access isolation.
 - **Planning base:** `5d358c9bad5648175e8742fa3d3b3bcc737ea0b8`.
 - **Review reconciliation:** current `main` at `cb0146d1310935cab06b73bdb09756cc02a7513a`, including merged PR #189.
 - **Immediate delivery:** U0 source/catalogue feasibility, U1 daily atlas and a first U2 daily selector laboratory.

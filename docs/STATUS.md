@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-09-08 (R4-P1 acceptance; earlier operational observations retain their original dates)
-**Current milestone:** R4-P0 and R4-P1 historical work are accepted and complete. P1 establishes corrected training capability but finds no useful corrected temporal or fixed-graph development improvement; the current graph expected-return hypothesis is deprioritised. R4 held-out retention remains unsatisfied. The next programme decision is whether and how to authorise a separate universe, regime and opportunity-discovery lane.
+**Updated:** 2026-09-09 (U-lane activation; earlier operational observations retain their original dates)
+**Current milestone:** U-lane is operator-approved for U0 source feasibility and fixture implementation. No empirical inputs or acquisition budget are approved; effective reserve isolation is a prerequisite to data-dependent work. R4-P0/P1 remain accepted and complete without graph retention or R5 authority.
 **Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion, while replacement Stage 8 promotion `1d881066c269a67dbe0663bd869f8b9d50ec3f539ef30bea982e4ee386d0fdd5` is bound to the final historical result. Native IG and IBKR conclusions remain provenance-distinct and their histories continue accumulating.
 **Completed execution records:** `docs/archive/r2/R2_SCIENTIFIC_EXECUTION_PLAN.md`, `docs/archive/r3/R3_EXECUTION_PLAN.md`, `docs/archive/r4/R4_P0_EXECUTION_PLAN.md` and `docs/R4_P1_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
@@ -298,7 +298,7 @@ remediation plans are archived under `docs/archive/r4/`.
 
 1. Retain the final-authenticated R2 result and completed R3 plan/report as provenance-distinct records.
 2. Retain the accepted P0 result, original predictions, failed closures and disclosed numerical qualifications; retain P1 as the accepted capability-corrected development finding without altering P0.
-3. Decide and, if approved, authorise the separate U-lane's objective, universe, data sources, prospective selection/control design, hypothesis families, acquisition budget and stop conditions. Do not infer R5 authority from P0/P1 completion.
+3. Deliver U-lane source feasibility and the fixture-based daily laboratory under `docs/U_LANE_IMPLEMENTATION_PLAN.md`; resolve exact development inputs, effective reserve isolation and any acquisition budget before empirical work. Do not infer R5 authority.
 4. Keep native IG and native IBKR conclusions provenance-distinct and fail closed pending their own qualifying foundations and untouched holdouts.
 5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 
